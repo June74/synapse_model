@@ -1,0 +1,17 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": ["success", "failure"]
+    },
+    "answer": {
+      "type": "string"
+    },
+    "error": {
+      "type": ["string", "null"]
+    }
+  },
+  "required": ["status", "answer", "error"]
+}
