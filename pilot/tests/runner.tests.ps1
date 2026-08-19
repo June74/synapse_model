@@ -338,6 +338,68 @@ Invoke-Assertion 'Resolve-RunnerInstructionFile rejects a real external final-fi
     }
 }
 
+Invoke-Assertion 'Subscription model matrix exists and has the complete validated catalog' {
+    $matrixPath = Join-Path $projectRoot 'pilot/model_matrix.json'
+    Assert-True (Test-Path -LiteralPath $matrixPath -PathType Leaf)
+    $matrix = Get-Content -Raw -LiteralPath $matrixPath | ConvertFrom-Json
+
+    Assert-Equal $matrix.schema_version 1
+    Assert-Equal $matrix.generated_from 'subscription model catalog'
+    Assert-Equal $matrix.candidates.Count 63
+    Assert-Equal $matrix.special_routes.Count 5
+    Assert-Equal (@($matrix.candidates | Where-Object { $_.enabled }).Count) 63
+    Assert-Equal (@($matrix.special_routes | Where-Object { -not $_.enabled }).Count) 5
+    Assert-Equal (@($matrix.candidates.route_id + $matrix.special_routes.route_id | Select-Object -Unique).Count) 68
+    Assert-True ((Test-CandidateMatrix @($matrix.candidates)).valid)
+    Assert-True ((Test-CandidateMatrix @($matrix.special_routes)).valid)
+    foreach ($candidate in @($matrix.candidates + $matrix.special_routes)) {
+        Assert-True ((Test-CandidateDefinition $candidate).valid)
+    }
+}
+
+Invoke-Assertion 'Subscription model matrix has the exact tool and model counts' {
+    $matrix = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'pilot/model_matrix.json') | ConvertFrom-Json
+    $candidates = @($matrix.candidates)
+
+    Assert-Equal (@($candidates | Where-Object { $_.tool -eq 'agy' }).Count) 14
+    Assert-Equal (@($candidates | Where-Object { $_.tool -eq 'codex' }).Count) 33
+    Assert-Equal (@($candidates | Where-Object { $_.tool -eq 'claude' }).Count) 16
+    Assert-Equal (@($matrix.special_routes | Where-Object { $_.tool -eq 'codex' }).Count) 5
+    $expectedAgyModels = @(
+        'gemini-3.7-flash-high', 'gemini-3.7-flash-medium', 'gemini-3.7-flash-low',
+        'gemini-3.6-flash-high', 'gemini-3.6-flash-medium', 'gemini-3.6-flash-low',
+        'gemini-3.5-flash-high', 'gemini-3.5-flash-medium', 'gemini-3.5-flash-low',
+        'gemini-3.1-pro-high', 'gemini-3.1-pro-low', 'claude-sonnet-4-6',
+        'claude-opus-4-6-thinking', 'gpt-oss-120b-medium'
+    )
+    Assert-Equal (@($candidates | Where-Object { $_.tool -eq 'agy' } | Select-Object -ExpandProperty model -Unique) -join ',') ($expectedAgyModels -join ',')
+    Assert-Equal (@($candidates | Where-Object { $_.tool -eq 'claude' } | Select-Object -ExpandProperty model -Unique).Count) 4
+    Assert-Equal (@($candidates | Where-Object { $_.tool -eq 'codex' } | Select-Object -ExpandProperty model -Unique).Count) 7
+    Assert-Equal (@($candidates | Where-Object { $_.model -eq 'claude-haiku-4-5' -and $null -eq $_.effort }).Count) 1
+}
+
+Invoke-Assertion 'Subscription model matrix uses exact instruction files and provider mapping' {
+    $matrix = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'pilot/model_matrix.json') | ConvertFrom-Json
+    $allRoutes = @($matrix.candidates + $matrix.special_routes)
+    foreach ($route in $allRoutes) {
+        $expectedInstruction = switch ($route.tool) {
+            'agy' { 'pilot/providers/google/GEMINI.md' }
+            'codex' { 'pilot/providers/openai/AGENTS.md' }
+            'claude' { 'pilot/providers/anthropic/CLAUDE.md' }
+        }
+        Assert-Equal $route.instruction_file $expectedInstruction
+    }
+    Assert-Equal (@($matrix.candidates | Where-Object { $_.tool -eq 'agy' -and $_.provider -eq 'google' }).Count) 11
+    Assert-Equal (@($matrix.candidates | Where-Object { $_.tool -eq 'agy' -and $_.provider -eq 'anthropic' }).Count) 2
+    Assert-Equal (@($matrix.candidates | Where-Object { $_.tool -eq 'agy' -and $_.provider -eq 'openai' }).Count) 1
+}
+
+Invoke-Assertion 'providers registry points to the subscription model matrix' {
+    $providers = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'pilot/providers.json') | ConvertFrom-Json
+    Assert-Equal $providers.model_matrix_path 'pilot/model_matrix.json'
+    Assert-Equal $providers.providers.Count 3
+}
+
 if ($failures.Count -gt 0) {
     $failures | ForEach-Object { Write-Error $_ -ErrorAction Continue }
     exit 1

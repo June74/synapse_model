@@ -2,6 +2,7 @@
   "schema_version": 1,
   "contract_path": "pilot/shared/experiment_contract.md",
   "response_schema_path": "pilot/shared/response_schema.json",
+  "model_matrix_path": "pilot/model_matrix.json",
   "default_task_path": "pilot/tasks/001_smoke_test.md",
   "results_path": "pilot/results/test-run.jsonl",
   "providers": [
