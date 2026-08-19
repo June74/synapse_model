@@ -1,5 +1,46 @@
 $script:RunnerProjectRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
 
+if ($null -eq ('RunnerNativeStreamCapture' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Collections.Concurrent;
+using System.Diagnostics;
+using System.IO;
+using System.Threading.Tasks;
+using System.Threading;
+
+public sealed class RunnerNativeStreamCapture
+{
+    public readonly ConcurrentQueue<string> Chunks;
+    public readonly ManualResetEventSlim Closed = new ManualResetEventSlim(false);
+    public Task ReaderTask;
+
+    private RunnerNativeStreamCapture(ConcurrentQueue<string> chunks)
+    {
+        Chunks = chunks;
+    }
+
+    public static RunnerNativeStreamCapture Attach(Process process, ConcurrentQueue<string> chunks, bool stdout)
+    {
+        StreamReader reader = stdout ? process.StandardOutput : process.StandardError;
+        var capture = new RunnerNativeStreamCapture(chunks);
+        capture.ReaderTask = Task.Run(async () =>
+        {
+            var buffer = new char[4096];
+            int count;
+            while ((count = await reader.ReadAsync(buffer, 0, buffer.Length).ConfigureAwait(false)) > 0)
+            {
+                capture.Chunks.Enqueue(new string(buffer, 0, count));
+            }
+            capture.Closed.Set();
+        });
+
+        return capture;
+    }
+}
+'@
+}
+
 function New-RouteId {
     param(
         [Parameter(Mandatory)][string]$Tool,
@@ -412,4 +453,330 @@ function Test-CandidateMatrix {
     }
 
     [pscustomobject]@{ valid = $true; reason = $null; candidates = $Candidates }
+}
+
+function New-CandidateCommand {
+    param(
+        [Parameter(Mandatory)][object]$Candidate,
+        [Parameter(Mandatory)][string]$Prompt
+    )
+
+    $arguments = [System.Collections.Generic.List[string]]::new()
+    switch ($Candidate.tool) {
+        'codex' {
+            $executable = 'codex'
+            $arguments.AddRange([string[]]@('exec', '--skip-git-repo-check', '--ephemeral', '--json', '-s', 'read-only', '--model', [string]$Candidate.model))
+            if (-not [string]::IsNullOrWhiteSpace([string]$Candidate.effort)) {
+                $arguments.Add('-c')
+                $arguments.Add(('model_reasoning_effort="{0}"' -f $Candidate.effort))
+            }
+            $arguments.Add($Prompt)
+        }
+        'claude' {
+            $executable = 'claude'
+            if ($Candidate.model -ne 'claude-haiku-4-5' -and [string]::IsNullOrWhiteSpace([string]$Candidate.effort)) {
+                throw "Claude model '$($Candidate.model)' requires effort."
+            }
+            $arguments.AddRange([string[]]@('-p', '--model', [string]$Candidate.model))
+            if ($Candidate.model -ne 'claude-haiku-4-5' -and -not [string]::IsNullOrWhiteSpace([string]$Candidate.effort)) {
+                $arguments.AddRange([string[]]@('--effort', [string]$Candidate.effort))
+            }
+            $arguments.AddRange([string[]]@('--output-format', 'json', '--max-turns', '1', '--no-session-persistence', '--disable-slash-commands', '--tools', '', $Prompt))
+        }
+        'agy' {
+            $executable = 'agy'
+            if ([string]::IsNullOrWhiteSpace([string]$Candidate.effort)) {
+                throw "agy model '$($Candidate.model)' requires effort."
+            }
+            $arguments.AddRange([string[]]@('-p', $Prompt, '--output-format', 'json', '--json-schema', 'pilot/shared/response_schema.json', '--model', [string]$Candidate.model))
+            if (-not [string]::IsNullOrWhiteSpace([string]$Candidate.effort)) {
+                $arguments.AddRange([string[]]@('--effort', [string]$Candidate.effort))
+            }
+            $arguments.AddRange([string[]]@('--print-timeout', '2m', '--disable-slash-commands'))
+        }
+        default { throw "Unsupported candidate tool '$($Candidate.tool)'." }
+    }
+
+    [pscustomobject]@{
+        executable = $executable
+        arguments = @($arguments)
+        prompt = $Prompt
+        tool = [string]$Candidate.tool
+        route_id = [string]$Candidate.route_id
+        working_directory = $script:RunnerProjectRoot
+    }
+}
+
+function ConvertTo-RunnerNormalizedLineEndings {
+    param([AllowNull()][string]$Text)
+
+    if ($null -eq $Text) { return '' }
+    return [System.Text.RegularExpressions.Regex]::Replace($Text, "`r`n|`r", "`n")
+}
+
+function ConvertTo-RunnerJsonUnicodeEscaped {
+    param(
+        [Parameter(Mandatory)][string]$JsonText,
+        [switch]$Lowercase
+    )
+
+    $format = if ($Lowercase) { 'x4' } else { 'X4' }
+    $builder = [System.Text.StringBuilder]::new()
+    foreach ($character in $JsonText.ToCharArray()) {
+        if ([int][char]$character -gt 127) {
+            [void]$builder.Append(('\u{0}' -f ([int][char]$character).ToString($format)))
+        } else {
+            [void]$builder.Append($character)
+        }
+    }
+    return $builder.ToString()
+}
+
+function ConvertTo-RunnerFullyUnicodeEscaped {
+    param([Parameter(Mandatory)][string]$Text)
+
+    $builder = [System.Text.StringBuilder]::new()
+    foreach ($character in $Text.ToCharArray()) {
+        [void]$builder.Append(('\u{0}' -f ([int][char]$character).ToString('X4')))
+    }
+    return $builder.ToString()
+}
+
+function Get-RunnerJsonPromptVariants {
+    param([Parameter(Mandatory)][string]$JsonText)
+
+    $variants = [System.Collections.Generic.List[string]]::new()
+    $slash = $JsonText.Replace('/', '\/')
+    foreach ($unicode in @(
+        (ConvertTo-RunnerJsonUnicodeEscaped -JsonText $JsonText),
+        (ConvertTo-RunnerJsonUnicodeEscaped -JsonText $JsonText -Lowercase)
+    )) {
+        $variants.Add($unicode)
+        $variants.Add($unicode.Replace('/', '\/'))
+    }
+    $variants.Add($JsonText)
+    $variants.Add($slash)
+    return @($variants | Select-Object -Unique)
+}
+
+function ConvertTo-RunnerPromptRegex {
+    param([Parameter(Mandatory)][string]$Prompt)
+
+    $characterPatterns = [System.Collections.Generic.List[string]]::new()
+    foreach ($character in $Prompt.ToCharArray()) {
+        $alternatives = [System.Collections.Generic.List[string]]::new()
+        $literal = [string]$character
+        $alternatives.Add(('(?i:' + [regex]::Escape($literal) + ')'))
+        $code = ([int][char]$character).ToString('X4')
+        $alternatives.Add(('(?i:' + [regex]::Escape(('\u{0}' -f $code)) + ')'))
+        switch ($character) {
+            '/' { $alternatives.Add([regex]::Escape('\/')) }
+            '"' { $alternatives.Add([regex]::Escape('\"')) }
+            '\' { $alternatives.Add([regex]::Escape('\\')) }
+            "`n" {
+                $alternatives.Add([regex]::Escape('\n'))
+                $alternatives.Add([regex]::Escape('\r\n'))
+                $lineFeedRepresentations = @(
+                    [regex]::Escape("`n"),
+                    [regex]::Escape('\n'),
+                    [regex]::Escape('\r\n'),
+                    ('(?i:' + [regex]::Escape('\u000A') + ')')
+                )
+                $carriageReturnRepresentations = @(
+                    [regex]::Escape("`n"),
+                    [regex]::Escape('\r'),
+                    ('(?i:' + [regex]::Escape('\u000D') + ')')
+                )
+                foreach ($lineFeedRepresentation in $lineFeedRepresentations) {
+                    $alternatives.Add($lineFeedRepresentation)
+                }
+                foreach ($carriageReturnRepresentation in $carriageReturnRepresentations) {
+                    foreach ($lineFeedRepresentation in $lineFeedRepresentations) {
+                        $alternatives.Add($carriageReturnRepresentation + $lineFeedRepresentation)
+                    }
+                }
+            }
+            "`t" { $alternatives.Add([regex]::Escape('\t')) }
+            "`b" { $alternatives.Add([regex]::Escape('\b')) }
+            "`f" { $alternatives.Add([regex]::Escape('\f')) }
+            "`r" { $alternatives.Add([regex]::Escape('\r')) }
+        }
+        $characterPatterns.Add('(?:' + (($alternatives | Select-Object -Unique) -join '|') + ')')
+    }
+    return ($characterPatterns -join '')
+}
+
+function ConvertTo-RunnerRedactedText {
+    param(
+        [AllowNull()][string]$Text,
+        [string[]]$PromptVariants,
+        [string]$PromptRegex
+    )
+
+    $result = ConvertTo-RunnerNormalizedLineEndings $Text
+    if (-not [string]::IsNullOrEmpty($PromptRegex)) {
+        $result = [regex]::Replace($result, $PromptRegex, '[prompt redacted]')
+    }
+    foreach ($variant in @($PromptVariants)) {
+        if (-not [string]::IsNullOrEmpty($variant)) {
+            $result = $result.Replace($variant, '[prompt redacted]')
+        }
+    }
+    return $result
+}
+
+function New-RunnerStreamCapture {
+    param(
+        [Parameter(Mandatory)][System.Diagnostics.Process]$Process,
+        [Parameter(Mandatory)][System.Collections.Concurrent.ConcurrentQueue[string]]$Chunks,
+        [Parameter(Mandatory)][ValidateSet('stdout', 'stderr')][string]$Stream
+    )
+
+    return [RunnerNativeStreamCapture]::Attach($Process, $Chunks, $Stream -eq 'stdout')
+}
+
+function Receive-RunnerStreamOutput {
+    param([Parameter(Mandatory)][System.Collections.Concurrent.ConcurrentQueue[string]]$Chunks)
+
+    $parts = [System.Collections.Generic.List[string]]::new()
+    $chunk = $null
+    while ($Chunks.TryDequeue([ref]$chunk)) {
+        [void]$parts.Add($chunk)
+        $chunk = $null
+    }
+    return ($parts -join '')
+}
+
+function Invoke-NativeCandidate {
+    param(
+        [Parameter(Mandatory)][object]$Command,
+        [int]$TimeoutSeconds = 0
+    )
+
+    $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = [string]$Command.executable
+    $startInfo.WorkingDirectory = [string]$Command.working_directory
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $utf8Encoding = [System.Text.UTF8Encoding]::new($false)
+    $startInfo.StandardOutputEncoding = $utf8Encoding
+    $startInfo.StandardErrorEncoding = $utf8Encoding
+    foreach ($argument in @($Command.arguments)) {
+        [void]$startInfo.ArgumentList.Add([string]$argument)
+    }
+
+    $promptProperty = $Command.PSObject.Properties['prompt']
+    $promptText = if ($null -ne $promptProperty) { [string]$promptProperty.Value } else { '' }
+    $normalizedPromptText = ConvertTo-RunnerNormalizedLineEndings $promptText
+    $promptVariants = [System.Collections.Generic.List[string]]::new()
+    foreach ($variant in @($promptText, $normalizedPromptText)) {
+        if ([string]::IsNullOrEmpty($variant)) { continue }
+        $promptVariants.Add($variant)
+        $fullyUnicodeVariant = ConvertTo-RunnerFullyUnicodeEscaped -Text $variant
+        $promptVariants.Add($fullyUnicodeVariant)
+        $promptVariants.Add($fullyUnicodeVariant.ToLowerInvariant())
+        $jsonVariant = ConvertTo-Json -InputObject $variant -Compress
+        foreach ($jsonSpelling in @(Get-RunnerJsonPromptVariants -JsonText $jsonVariant)) {
+            $promptVariants.Add($jsonSpelling)
+            if ($jsonSpelling.Length -gt 1) {
+                $promptVariants.Add($jsonSpelling.Substring(1, $jsonSpelling.Length - 2))
+            }
+        }
+    }
+    $orderedPromptVariants = @($promptVariants | Sort-Object Length -Descending | Select-Object -Unique)
+    $promptRegex = if ([string]::IsNullOrEmpty($normalizedPromptText)) {
+        ''
+    } else {
+        ConvertTo-RunnerPromptRegex -Prompt $normalizedPromptText
+    }
+    $safeArguments = @($Command.arguments | ForEach-Object {
+        ConvertTo-RunnerRedactedText -Text ([string]$_) -PromptVariants $orderedPromptVariants -PromptRegex $promptRegex
+    })
+
+    $process = [System.Diagnostics.Process]::new()
+    $process.StartInfo = $startInfo
+    $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+    try {
+        [void]$process.Start()
+        $processId = $process.Id
+        $stdoutChunks = [System.Collections.Concurrent.ConcurrentQueue[string]]::new()
+        $stderrChunks = [System.Collections.Concurrent.ConcurrentQueue[string]]::new()
+        $stdoutCapture = New-RunnerStreamCapture -Process $process -Chunks $stdoutChunks -Stream stdout
+        $stderrCapture = New-RunnerStreamCapture -Process $process -Chunks $stderrChunks -Stream stderr
+
+        $timedOut = $false
+        $cleanupFailed = $false
+        $cleanupStatus = 'not_required'
+        $cleanupIssues = [System.Collections.Generic.List[string]]::new()
+        $processWaitMilliseconds = if ($TimeoutSeconds -gt 0) { $TimeoutSeconds * 1000 } else { 30000 }
+        if (-not $process.WaitForExit($processWaitMilliseconds)) {
+                $timedOut = $true
+                $cleanupStatus = 'timeout_cleanup_complete'
+                try {
+                    $process.Kill($true)
+                } catch {
+                    $cleanupIssues.Add('kill_failed')
+                }
+                if (-not $process.WaitForExit(1000)) {
+                    $cleanupIssues.Add('process_exit_timeout')
+                }
+                if (-not $stdoutCapture.ReaderTask.Wait(1000)) {
+                    $cleanupIssues.Add('stdout_read_timeout')
+                }
+                if (-not $stderrCapture.ReaderTask.Wait(1000)) {
+                    $cleanupIssues.Add('stderr_read_timeout')
+                }
+        } else {
+            $drainWaitMilliseconds = if ($TimeoutSeconds -gt 0) {
+                [Math]::Max(1000, $TimeoutSeconds * 1000)
+            } else {
+                1000
+            }
+            if (-not $stdoutCapture.ReaderTask.Wait($drainWaitMilliseconds)) {
+                $cleanupIssues.Add('stdout_drain_timeout')
+            }
+            if (-not $stderrCapture.ReaderTask.Wait($drainWaitMilliseconds)) {
+                $cleanupIssues.Add('stderr_drain_timeout')
+            }
+            if ($cleanupIssues.Count -gt 0) {
+                $cleanupStatus = 'output_drain_timeout'
+            }
+        }
+
+        $stdout = Receive-RunnerStreamOutput -Chunks $stdoutChunks
+        $stderr = Receive-RunnerStreamOutput -Chunks $stderrChunks
+        $stdout = ConvertTo-RunnerRedactedText -Text $stdout -PromptVariants $orderedPromptVariants -PromptRegex $promptRegex
+        $stderr = ConvertTo-RunnerRedactedText -Text $stderr -PromptVariants $orderedPromptVariants -PromptRegex $promptRegex
+        if ($cleanupIssues.Count -gt 0) {
+            $cleanupFailed = $true
+            if ($timedOut) {
+                $cleanupStatus = 'timeout_cleanup_failed'
+            }
+        }
+        $processExited = $process.HasExited
+        $exitCode = if ($processExited) { $process.ExitCode } else { $null }
+        $stopwatch.Stop()
+
+        [pscustomobject]@{
+            exit_code = $exitCode
+            stdout = $stdout
+            stderr = $stderr
+            duration_ms = [int64]$stopwatch.ElapsedMilliseconds
+            timed_out = $timedOut
+            cleanup_failed = $cleanupFailed
+            cleanup_status = $cleanupStatus
+            process_id = $processId
+            process_exited = $processExited
+            executable = ConvertTo-RunnerRedactedText -Text ([string]$Command.executable) -PromptVariants $orderedPromptVariants -PromptRegex $promptRegex
+            tool = ConvertTo-RunnerRedactedText -Text ([string]$Command.tool) -PromptVariants $orderedPromptVariants -PromptRegex $promptRegex
+            route_id = ConvertTo-RunnerRedactedText -Text ([string]$Command.route_id) -PromptVariants $orderedPromptVariants -PromptRegex $promptRegex
+            working_directory = ConvertTo-RunnerRedactedText -Text ([string]$Command.working_directory) -PromptVariants $orderedPromptVariants -PromptRegex $promptRegex
+            arguments = $safeArguments
+        }
+    } finally {
+        $stopwatch.Stop()
+        $process.Dispose()
+    }
 }

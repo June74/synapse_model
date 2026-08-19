@@ -40,6 +40,18 @@ function Assert-Contains {
     }
 }
 
+function Assert-SequenceEqual {
+    param(
+        [object[]]$Actual,
+        [object[]]$Expected
+    )
+
+    Assert-Equal $Actual.Count $Expected.Count
+    for ($index = 0; $index -lt $Expected.Count; $index++) {
+        Assert-Equal $Actual[$index] $Expected[$index]
+    }
+}
+
 function Assert-Throws {
     param([scriptblock]$Script)
 
@@ -71,6 +83,495 @@ function Invoke-Assertion {
 
 Invoke-Assertion 'New-RouteId normalizes route components' {
     Assert-Equal (New-RouteId -Tool 'codex' -Model 'gpt-5.6-sol' -Effort 'xhigh') 'codex__gpt_5_6_sol__xhigh'
+}
+
+Invoke-Assertion 'New-CandidateCommand constructs a boundary-preserving Codex command' {
+    $candidate = [pscustomobject]@{ route_id = 'codex__gpt_5_6_sol__xhigh'; tool = 'codex'; model = 'gpt-5.6-sol'; effort = 'xhigh' }
+    $command = New-CandidateCommand -Candidate $candidate -Prompt 'quoted prompt "with spaces"'
+
+    Assert-Equal $command.executable 'codex'
+    Assert-Equal $command.tool 'codex'
+    Assert-Equal $command.route_id $candidate.route_id
+    Assert-Equal $command.prompt 'quoted prompt "with spaces"'
+    Assert-Equal $command.working_directory $projectRoot
+    Assert-SequenceEqual $command.arguments @('exec', '--skip-git-repo-check', '--ephemeral', '--json', '-s', 'read-only', '--model', 'gpt-5.6-sol', '-c', 'model_reasoning_effort="xhigh"', 'quoted prompt "with spaces"')
+}
+
+Invoke-Assertion 'New-CandidateCommand constructs native Claude commands and omits Haiku effort' {
+    $candidate = [pscustomobject]@{ route_id = 'claude__claude_sonnet_4_6__medium'; tool = 'claude'; model = 'claude-sonnet-4-6'; effort = 'medium' }
+    $command = New-CandidateCommand -Candidate $candidate -Prompt 'hello'
+    Assert-SequenceEqual $command.arguments @('-p', '--model', 'claude-sonnet-4-6', '--effort', 'medium', '--output-format', 'json', '--max-turns', '1', '--no-session-persistence', '--disable-slash-commands', '--tools', '', 'hello')
+
+    $haiku = [pscustomobject]@{ route_id = 'claude__claude_haiku_4_5__default'; tool = 'claude'; model = 'claude-haiku-4-5'; effort = 'medium' }
+    $haikuCommand = New-CandidateCommand -Candidate $haiku -Prompt 'haiku prompt'
+    Assert-SequenceEqual $haikuCommand.arguments @('-p', '--model', 'claude-haiku-4-5', '--output-format', 'json', '--max-turns', '1', '--no-session-persistence', '--disable-slash-commands', '--tools', '', 'haiku prompt')
+}
+
+Invoke-Assertion 'New-CandidateCommand constructs an Agy command with repository-relative schema path' {
+    $candidate = [pscustomobject]@{ route_id = 'agy__gemini_3_7_flash_high__high'; tool = 'agy'; model = 'gemini-3.7-flash-high'; effort = 'high' }
+    $command = New-CandidateCommand -Candidate $candidate -Prompt 'agy prompt'
+
+    Assert-Equal $command.executable 'agy'
+    Assert-SequenceEqual $command.arguments @('-p', 'agy prompt', '--output-format', 'json', '--json-schema', 'pilot/shared/response_schema.json', '--model', 'gemini-3.7-flash-high', '--effort', 'high', '--print-timeout', '2m', '--disable-slash-commands')
+}
+
+Invoke-Assertion 'New-CandidateCommand rejects blank effort for effort-required candidates' {
+    $claude = [pscustomobject]@{ route_id = 'claude__claude_sonnet_4_6__default'; tool = 'claude'; model = 'claude-sonnet-4-6'; effort = '' }
+    $agy = [pscustomobject]@{ route_id = 'agy__gemini_3_7_flash_high__default'; tool = 'agy'; model = 'gemini-3.7-flash-high'; effort = '' }
+    Assert-Throws { New-CandidateCommand -Candidate $claude -Prompt 'invalid' }
+    Assert-Throws { New-CandidateCommand -Candidate $agy -Prompt 'invalid' }
+    $codex = [pscustomobject]@{ route_id = 'codex__gpt_5_6_sol__default'; tool = 'codex'; model = 'gpt-5.6-sol'; effort = '' }
+    $codexCommand = New-CandidateCommand -Candidate $codex -Prompt 'codex without effort'
+    Assert-SequenceEqual $codexCommand.arguments @('exec', '--skip-git-repo-check', '--ephemeral', '--json', '-s', 'read-only', '--model', 'gpt-5.6-sol', 'codex without effort')
+}
+
+Invoke-Assertion 'Invoke-NativeCandidate captures stdout stderr exit code and duration' {
+    $command = [pscustomobject]@{
+        executable = 'pwsh'
+        arguments = @('-NoProfile', '-Command', "Write-Output 'ok'; [Console]::Error.WriteLine('warn')")
+        prompt = 'capture prompt'
+        tool = 'test'
+        route_id = 'test__capture'
+        working_directory = $projectRoot
+    }
+    $result = Invoke-NativeCandidate -Command $command -TimeoutSeconds 10
+    Assert-Equal $result.exit_code 0
+    Assert-Contains $result.stdout 'ok'
+    Assert-Contains $result.stderr 'warn'
+    Assert-True ($result.duration_ms -ge 0)
+    Assert-True (-not $result.timed_out)
+    Assert-SequenceEqual $result.arguments $command.arguments
+}
+
+Invoke-Assertion 'Invoke-NativeCandidate decodes Unicode output before redaction' {
+    $sensitivePrompt = 'Café ΔPrOmPt 😀'
+    $childScript = "[Console]::OutputEncoding = [Text.UTF8Encoding]::new(); Write-Output '$sensitivePrompt'; [Console]::Error.WriteLine('$sensitivePrompt')"
+    $command = [pscustomobject]@{
+        executable = 'pwsh'
+        arguments = @('-NoProfile', '-Command', $childScript)
+        prompt = $sensitivePrompt
+        tool = 'test'
+        route_id = 'test__unicode_encoding_redaction'
+        working_directory = $projectRoot
+    }
+    $result = Invoke-NativeCandidate -Command $command -TimeoutSeconds 10
+    $metadata = $result | ConvertTo-Json -Depth 10
+    Assert-True (-not $result.stdout.Contains($sensitivePrompt))
+    Assert-True (-not $result.stderr.Contains($sensitivePrompt))
+    Assert-True (-not $metadata.Contains($sensitivePrompt))
+    Assert-True (-not $result.stdout.Contains([char]0xFFFD))
+    Assert-True (-not $result.stderr.Contains([char]0xFFFD))
+    Assert-True (-not $metadata.Contains([char]0xFFFD))
+    Assert-Contains $result.stdout '[prompt redacted]'
+    Assert-Contains $result.stderr '[prompt redacted]'
+}
+
+Invoke-Assertion 'Invoke-NativeCandidate redacts prompt content from returned metadata' {
+    $sensitivePrompt = 'sensitive prompt text must not leak'
+    $command = [pscustomobject]@{
+        executable = 'pwsh'
+        arguments = @('-NoProfile', '-Command', "Write-Output 'ok'; [Console]::Error.WriteLine('warn')", $sensitivePrompt)
+        prompt = $sensitivePrompt
+        tool = 'test'
+        route_id = 'test__redaction'
+        working_directory = $projectRoot
+    }
+    $result = Invoke-NativeCandidate -Command $command -TimeoutSeconds 10
+    $metadata = $result | ConvertTo-Json -Depth 10
+    Assert-True (-not $metadata.Contains($sensitivePrompt))
+    Assert-True (-not $result.stdout.Contains($sensitivePrompt))
+    Assert-True (-not $result.stderr.Contains($sensitivePrompt))
+    Assert-Contains ($result.arguments -join '|') '[prompt redacted]'
+}
+
+Invoke-Assertion 'Invoke-NativeCandidate redacts prompt echoes from both output streams' {
+    $sensitivePrompt = 'echoed sensitive prompt must be redacted'
+    $command = [pscustomobject]@{
+        executable = 'pwsh'
+        arguments = @('-NoProfile', '-Command', "Write-Output '$sensitivePrompt'; [Console]::Error.WriteLine('$sensitivePrompt')")
+        prompt = $sensitivePrompt
+        tool = 'test'
+        route_id = 'test__echo_redaction'
+        working_directory = $projectRoot
+    }
+    $result = Invoke-NativeCandidate -Command $command -TimeoutSeconds 10
+    Assert-True (-not $result.stdout.Contains($sensitivePrompt))
+    Assert-True (-not $result.stderr.Contains($sensitivePrompt))
+    Assert-Contains $result.stdout '[prompt redacted]'
+    Assert-Contains $result.stderr '[prompt redacted]'
+}
+
+Invoke-Assertion 'Invoke-NativeCandidate redacts CRLF prompts from LF-normalized output' {
+    $sensitivePrompt = "line one`r`nline two"
+    $command = [pscustomobject]@{
+        executable = 'pwsh'
+        arguments = @('-NoProfile', '-Command', "[Console]::Out.Write('line one' + [char]10 + 'line two'); [Console]::Error.Write('line one' + [char]10 + 'line two')")
+        prompt = $sensitivePrompt
+        tool = 'test'
+        route_id = 'test__line_ending_redaction'
+        working_directory = $projectRoot
+    }
+    $result = Invoke-NativeCandidate -Command $command -TimeoutSeconds 10
+    $normalizedPrompt = "line one`nline two"
+    Assert-True (-not $result.stdout.Contains($normalizedPrompt))
+    Assert-True (-not $result.stderr.Contains($normalizedPrompt))
+    Assert-Contains $result.stdout '[prompt redacted]'
+    Assert-Contains $result.stderr '[prompt redacted]'
+}
+
+Invoke-Assertion 'Invoke-NativeCandidate redacts JSON-escaped multiline prompt echoes' {
+    $sensitivePrompt = "line one`r`nquoted `"value`" and path C:\tmp"
+    $escapedPrompt = $sensitivePrompt | ConvertTo-Json -Compress
+    $command = [pscustomobject]@{
+        executable = 'pwsh'
+        arguments = @('-NoProfile', '-Command', "[Console]::Out.Write('$escapedPrompt'); [Console]::Error.Write('$escapedPrompt')")
+        prompt = $sensitivePrompt
+        tool = 'test'
+        route_id = 'test__json_escaped_redaction'
+        working_directory = $projectRoot
+    }
+    $result = Invoke-NativeCandidate -Command $command -TimeoutSeconds 10
+    Assert-True (-not $result.stdout.Contains($sensitivePrompt))
+    Assert-True (-not $result.stderr.Contains($sensitivePrompt))
+    Assert-True (-not $result.stdout.Contains($escapedPrompt))
+    Assert-True (-not $result.stderr.Contains($escapedPrompt))
+    Assert-Contains $result.stdout '[prompt redacted]'
+    Assert-Contains $result.stderr '[prompt redacted]'
+}
+
+Invoke-Assertion 'Invoke-NativeCandidate redacts JSON escaped content without outer quotes' {
+    $sensitivePrompt = "inner line one`r`ninner `"quoted`" line"
+    $escapedPrompt = $sensitivePrompt | ConvertTo-Json -Compress
+    $escapedContent = $escapedPrompt.Substring(1, $escapedPrompt.Length - 2)
+    $command = [pscustomobject]@{
+        executable = 'pwsh'
+        arguments = @('-NoProfile', '-Command', "[Console]::Out.Write('$escapedContent'); [Console]::Error.Write('$escapedContent')")
+        prompt = $sensitivePrompt
+        tool = 'test'
+        route_id = 'test__json_inner_redaction'
+        working_directory = $projectRoot
+    }
+    $result = Invoke-NativeCandidate -Command $command -TimeoutSeconds 10
+    $metadata = $result | ConvertTo-Json -Depth 10
+    Assert-True (-not $result.stdout.Contains($escapedContent))
+    Assert-True (-not $result.stderr.Contains($escapedContent))
+    Assert-True (-not $metadata.Contains($escapedContent))
+    Assert-Contains $result.stdout '[prompt redacted]'
+    Assert-Contains $result.stderr '[prompt redacted]'
+}
+
+Invoke-Assertion 'Invoke-NativeCandidate redacts slash and Unicode JSON prompt variants everywhere' {
+    $sensitivePrompt = 'slash / and café'
+    $jsonPrompt = $sensitivePrompt | ConvertTo-Json -Compress
+    $jsonContent = $jsonPrompt.Substring(1, $jsonPrompt.Length - 2)
+    $slashContent = $jsonContent.Replace('/', '\/')
+    $unicodeContent = $jsonContent.Replace('é', '\u00E9')
+    $command = [pscustomobject]@{
+        executable = 'pwsh'
+        arguments = @('-NoProfile', '-Command', "[Console]::Out.Write('$slashContent|$unicodeContent'); [Console]::Error.Write('$slashContent|$unicodeContent')")
+        prompt = $sensitivePrompt
+        tool = 'test'
+        route_id = 'test__json_variant_redaction'
+        working_directory = $projectRoot
+    }
+    $result = Invoke-NativeCandidate -Command $command -TimeoutSeconds 10
+    $metadata = $result | ConvertTo-Json -Depth 10
+    Assert-Equal $result.exit_code 0
+    foreach ($value in @($sensitivePrompt, $slashContent, $unicodeContent)) {
+        Assert-True (-not $result.stdout.Contains($value))
+        Assert-True (-not $result.stderr.Contains($value))
+        Assert-True (-not $metadata.Contains($value))
+    }
+    Assert-Contains $result.stdout '[prompt redacted]'
+    Assert-Contains $result.stderr '[prompt redacted]'
+    Assert-Contains ($result.arguments -join '|') '[prompt redacted]'
+}
+
+Invoke-Assertion 'Invoke-NativeCandidate redacts mixed raw and Unicode JSON escapes everywhere' {
+    $sensitivePrompt = 'alpha / beta'
+    $mixedEscape = 'alpha \u002F beta'
+    $childScript = "[Console]::Out.Write('$mixedEscape'); [Console]::Error.Write('$mixedEscape')"
+    $command = [pscustomobject]@{
+        executable = 'pwsh'
+        arguments = @('-NoProfile', '-Command', $childScript)
+        prompt = $sensitivePrompt
+        tool = 'test'
+        route_id = 'test__mixed_json_redaction'
+        working_directory = $projectRoot
+    }
+    $result = Invoke-NativeCandidate -Command $command -TimeoutSeconds 10
+    $metadata = $result | ConvertTo-Json -Depth 10
+    foreach ($value in @($mixedEscape, $sensitivePrompt)) {
+        Assert-True (-not $result.stdout.Contains($value))
+        Assert-True (-not $result.stderr.Contains($value))
+        Assert-True (-not $metadata.Contains($value))
+    }
+    Assert-Contains $result.stdout '[prompt redacted]'
+    Assert-Contains $result.stderr '[prompt redacted]'
+    Assert-Contains ($result.arguments -join '|') '[prompt redacted]'
+}
+
+Invoke-Assertion 'Invoke-NativeCandidate redacts mixed CRLF Unicode escapes everywhere' {
+    $sensitivePrompt = "lineA`r`nlineB"
+    $mixedEscape = "lineA\u000D`nlineB"
+    $childScript = "[Console]::Out.Write('$mixedEscape'); [Console]::Error.Write('$mixedEscape')"
+    $command = [pscustomobject]@{
+        executable = 'pwsh'
+        arguments = @('-NoProfile', '-Command', $childScript)
+        prompt = $sensitivePrompt
+        tool = 'test'
+        route_id = 'test__mixed_crlf_redaction'
+        working_directory = $projectRoot
+    }
+    $result = Invoke-NativeCandidate -Command $command -TimeoutSeconds 10
+    $metadata = $result | ConvertTo-Json -Depth 10
+    foreach ($value in @($mixedEscape, $sensitivePrompt, "lineA`nlineB")) {
+        Assert-True (-not $result.stdout.Contains($value))
+        Assert-True (-not $result.stderr.Contains($value))
+        Assert-True (-not $metadata.Contains($value))
+    }
+    Assert-Contains $result.stdout '[prompt redacted]'
+    Assert-Contains $result.stderr '[prompt redacted]'
+    Assert-Contains ($result.arguments -join '|') '[prompt redacted]'
+}
+
+Invoke-Assertion 'Invoke-NativeCandidate redacts arbitrary mixed newline and surrogate escapes' {
+    $cases = @(
+        [pscustomobject]@{ prompt = "lineA`r`nlineB"; emitted = "lineA`r\u000AlineB"; name = 'raw CR and Unicode LF' }
+        [pscustomobject]@{ prompt = "lineA`r`nlineB"; emitted = 'lineA\u000D\u000AlineB'; name = 'Unicode CR and Unicode LF' }
+        [pscustomobject]@{ prompt = 'AS😀'; emitted = '\u0041S\uD83d\uDe00'; name = 'mixed-case surrogate escapes' }
+        [pscustomobject]@{ prompt = 'alpha / beta'; emitted = 'a\u006Cp\u0068a / b\u0065ta'; name = 'mixed literal and Unicode characters' }
+    )
+    foreach ($case in $cases) {
+        $childScript = "[Console]::Out.Write('$($case.emitted)'); [Console]::Error.Write('$($case.emitted)')"
+        $command = [pscustomobject]@{
+            executable = 'pwsh'
+            arguments = @('-NoProfile', '-Command', $childScript)
+            prompt = $case.prompt
+            tool = 'test'
+            route_id = 'test__arbitrary_' + ($case.name -replace '[^A-Za-z0-9]', '_')
+            working_directory = $projectRoot
+        }
+        $result = Invoke-NativeCandidate -Command $command -TimeoutSeconds 10
+        $metadata = $result | ConvertTo-Json -Depth 10
+        Assert-True (-not $result.stdout.Contains($case.emitted))
+        Assert-True (-not $result.stderr.Contains($case.emitted))
+        Assert-True (-not $metadata.Contains($case.emitted))
+        Assert-Contains $result.stdout '[prompt redacted]'
+        Assert-Contains $result.stderr '[prompt redacted]'
+        Assert-Contains ($result.arguments -join '|') '[prompt redacted]'
+    }
+}
+
+Invoke-Assertion 'Invoke-NativeCandidate redacts raw prompt case-insensitively everywhere' {
+    $sensitivePrompt = 'CaseSensitive'
+    $emitted = 'cAsEsEnSiTiVe'
+    $childScript = "[Console]::Out.Write('$emitted'); [Console]::Error.Write('$emitted')"
+    $command = [pscustomobject]@{
+        executable = 'pwsh'
+        arguments = @('-NoProfile', '-Command', $childScript)
+        prompt = $sensitivePrompt
+        tool = 'test'
+        route_id = 'test__case_insensitive_redaction'
+        working_directory = $projectRoot
+    }
+    $result = Invoke-NativeCandidate -Command $command -TimeoutSeconds 10
+    $metadata = $result | ConvertTo-Json -Depth 10
+    foreach ($value in @($emitted, $sensitivePrompt)) {
+        Assert-True (-not $result.stdout.Contains($value))
+        Assert-True (-not $result.stderr.Contains($value))
+        Assert-True (-not $metadata.Contains($value))
+    }
+    Assert-Contains $result.stdout '[prompt redacted]'
+    Assert-Contains $result.stderr '[prompt redacted]'
+    Assert-Contains ($result.arguments -join '|') '[prompt redacted]'
+}
+
+Invoke-Assertion 'Invoke-NativeCandidate redacts fully Unicode escaped prompt variants including surrogate pairs' {
+    $sensitivePrompt = 'AS😀'
+    $fullyEscaped = '\u0041\u0053\uD83D\uDE00'
+    $command = [pscustomobject]@{
+        executable = 'pwsh'
+        arguments = @('-NoProfile', '-Command', "[Console]::Out.Write('$fullyEscaped'); [Console]::Error.Write('$fullyEscaped'); Write-Output '$fullyEscaped'")
+        prompt = $sensitivePrompt
+        tool = 'test'
+        route_id = 'test__fully_unicode_redaction'
+        working_directory = $projectRoot
+    }
+    $result = Invoke-NativeCandidate -Command $command -TimeoutSeconds 10
+    foreach ($property in $result.PSObject.Properties) {
+        Assert-True (-not ([string]$property.Value).Contains($fullyEscaped))
+    }
+    Assert-Contains $result.stdout '[prompt redacted]'
+    Assert-Contains $result.stderr '[prompt redacted]'
+}
+
+Invoke-Assertion 'Invoke-NativeCandidate redacts prompt content from every string metadata field' {
+    $command = [pscustomobject]@{
+        executable = 'pwsh'
+        arguments = @('-NoProfile', '-Command', "Write-Output 'safe'; [Console]::Error.WriteLine('safe')")
+        prompt = 'pwsh'
+        tool = 'test'
+        route_id = 'test__executable_prompt'
+        working_directory = $projectRoot
+    }
+    $result = Invoke-NativeCandidate -Command $command -TimeoutSeconds 10
+    foreach ($property in $result.PSObject.Properties) {
+        Assert-True (-not ([string]$property.Value).Contains('pwsh'))
+    }
+    Assert-Contains $result.executable '[prompt redacted]'
+}
+
+Invoke-Assertion 'Invoke-NativeCandidate redacts echoes from a constructed command' {
+    $sensitivePrompt = "constructed line one`r`nquoted `"value`" and path C:\tmp"
+    $candidate = [pscustomobject]@{ route_id = 'codex__gpt_5_6_sol__medium'; tool = 'codex'; model = 'gpt-5.6-sol'; effort = 'medium' }
+    $command = New-CandidateCommand -Candidate $candidate -Prompt $sensitivePrompt
+    $escapedPrompt = $sensitivePrompt | ConvertTo-Json -Compress
+    $command.executable = 'pwsh'
+    $command.arguments = @('-NoProfile', '-Command', "[Console]::Out.Write('constructed line one' + [char]13 + [char]10 + 'quoted `"value`" and path C:\tmp|$escapedPrompt'); [Console]::Error.Write('constructed line one' + [char]10 + 'quoted `"value`" and path C:\tmp|$escapedPrompt')")
+
+    $result = Invoke-NativeCandidate -Command $command -TimeoutSeconds 10
+    $normalizedPrompt = $sensitivePrompt -replace "`r`n", "`n"
+    Assert-True (-not $result.stdout.Contains($sensitivePrompt))
+    Assert-True (-not $result.stderr.Contains($sensitivePrompt))
+    Assert-True (-not $result.stdout.Contains($normalizedPrompt))
+    Assert-True (-not $result.stderr.Contains($normalizedPrompt))
+    Assert-True (-not $result.stdout.Contains($escapedPrompt))
+    Assert-True (-not $result.stderr.Contains($escapedPrompt))
+    Assert-Contains $result.stdout '[prompt redacted]'
+    Assert-Contains $result.stderr '[prompt redacted]'
+}
+
+Invoke-Assertion 'Invoke-NativeCandidate terminates a timed out process without throwing' {
+    $command = [pscustomobject]@{
+        executable = 'pwsh'
+        arguments = @('-NoProfile', '-Command', '$child = Start-Process -FilePath ''pwsh'' -ArgumentList @(''-NoProfile'', ''-Command'', ''Start-Sleep -Seconds 30'') -PassThru; Write-Output (''CHILD_PID='' + $child.Id); Start-Sleep -Seconds 30')
+        prompt = ''
+        tool = 'test'
+        route_id = 'test__timeout'
+        working_directory = $projectRoot
+    }
+    $result = Invoke-NativeCandidate -Command $command -TimeoutSeconds 1
+    Assert-True $result.timed_out
+    Assert-True ($result.duration_ms -ge 0)
+    Assert-True ($result.duration_ms -lt 5000)
+    Assert-True ($result.PSObject.Properties.Name -contains 'cleanup_failed')
+    Assert-True ($result.PSObject.Properties.Name -contains 'cleanup_status')
+    Assert-True (-not $result.cleanup_failed)
+    Assert-Equal $result.cleanup_status 'timeout_cleanup_complete'
+    Assert-True $result.process_exited
+    Assert-True ($result.process_id -gt 0)
+    Assert-True ($null -eq (Get-Process -Id $result.process_id -ErrorAction SilentlyContinue))
+    $childPidMatch = [regex]::Match($result.stdout, 'CHILD_PID=(\d+)')
+    Assert-True $childPidMatch.Success
+    Assert-True ($null -eq (Get-Process -Id ([int]$childPidMatch.Groups[1].Value) -ErrorAction SilentlyContinue))
+}
+
+Invoke-Assertion 'Invoke-NativeCandidate drains output after parent exits with descendant-held pipes' {
+    $parentScript = '$childInfo = [System.Diagnostics.ProcessStartInfo]::new(); $childInfo.FileName = ''pwsh''; $childInfo.UseShellExecute = $false; $childInfo.CreateNoWindow = $true; [void]$childInfo.ArgumentList.Add(''-NoProfile''); [void]$childInfo.ArgumentList.Add(''-Command''); [void]$childInfo.ArgumentList.Add(''Start-Sleep -Seconds 2''); $child = [System.Diagnostics.Process]::new(); $child.StartInfo = $childInfo; [void]$child.Start(); Write-Output (''CHILD_PID='' + $child.Id); [Console]::Error.WriteLine(''parent warning retained'')'
+    $command = [pscustomobject]@{
+        executable = 'pwsh'
+        arguments = @('-NoProfile', '-Command', $parentScript)
+        prompt = ''
+        tool = 'test'
+        route_id = 'test__parent_exit_drain'
+        working_directory = $projectRoot
+    }
+    $result = Invoke-NativeCandidate -Command $command -TimeoutSeconds 5
+    Assert-Contains $result.stdout 'CHILD_PID='
+    Assert-Contains $result.stderr 'parent warning retained'
+    Assert-True (-not $result.cleanup_failed)
+    Assert-True $result.process_exited
+    Assert-True ($result.duration_ms -ge 1000)
+    $childPidMatch = [regex]::Match($result.stdout, 'CHILD_PID=(\d+)')
+    Assert-True $childPidMatch.Success
+    Assert-True ($null -eq (Get-Process -Id ([int]$childPidMatch.Groups[1].Value) -ErrorAction SilentlyContinue))
+}
+
+Invoke-Assertion 'Invoke-NativeCandidate preserves parent output when a descendant exceeds drain timeout' {
+    $childPid = $null
+    try {
+        $parentScript = '$childInfo = [System.Diagnostics.ProcessStartInfo]::new(); $childInfo.FileName = ''pwsh''; $childInfo.UseShellExecute = $false; $childInfo.CreateNoWindow = $true; [void]$childInfo.ArgumentList.Add(''-NoProfile''); [void]$childInfo.ArgumentList.Add(''-Command''); [void]$childInfo.ArgumentList.Add(''Start-Sleep -Seconds 30''); $child = [System.Diagnostics.Process]::new(); $child.StartInfo = $childInfo; [void]$child.Start(); Write-Output (''LONG_CHILD_PID='' + $child.Id); Write-Output ''parent output retained''; [Console]::Error.WriteLine(''parent warning retained'')'
+        $command = [pscustomobject]@{
+            executable = 'pwsh'
+            arguments = @('-NoProfile', '-Command', $parentScript)
+            prompt = ''
+            tool = 'test'
+            route_id = 'test__parent_drain_timeout'
+            working_directory = $projectRoot
+        }
+        $result = Invoke-NativeCandidate -Command $command -TimeoutSeconds 1
+        Assert-Contains $result.stdout 'parent output retained'
+        Assert-Contains $result.stderr 'parent warning retained'
+        Assert-True $result.cleanup_failed
+        Assert-Equal $result.cleanup_status 'output_drain_timeout'
+        $childPidMatch = [regex]::Match($result.stdout, 'LONG_CHILD_PID=(\d+)')
+        Assert-True $childPidMatch.Success
+        $childPid = [int]$childPidMatch.Groups[1].Value
+    } finally {
+        if ($null -ne $childPid) {
+            $child = Get-Process -Id $childPid -ErrorAction SilentlyContinue
+            if ($null -ne $child) { Stop-Process -Id $childPid -Force -ErrorAction SilentlyContinue }
+        }
+    }
+}
+
+Invoke-Assertion 'Invoke-NativeCandidate preserves partial stdout and stderr with inherited pipes' {
+    $childPid = $null
+    try {
+        $parentScript = '$childInfo = [System.Diagnostics.ProcessStartInfo]::new(); $childInfo.FileName = ''pwsh''; $childInfo.UseShellExecute = $false; $childInfo.CreateNoWindow = $true; [void]$childInfo.ArgumentList.Add(''-NoProfile''); [void]$childInfo.ArgumentList.Add(''-Command''); [void]$childInfo.ArgumentList.Add(''Start-Sleep -Seconds 30''); $child = [System.Diagnostics.Process]::new(); $child.StartInfo = $childInfo; [void]$child.Start(); [Console]::Out.Write(''PARTIAL_STDOUT|CHILD_PID='' + $child.Id); [Console]::Error.Write(''PARTIAL_STDERR'')'
+        $command = [pscustomobject]@{
+            executable = 'pwsh'
+            arguments = @('-NoProfile', '-Command', $parentScript)
+            prompt = ''
+            tool = 'test'
+            route_id = 'test__partial_pipe_capture'
+            working_directory = $projectRoot
+        }
+        $result = Invoke-NativeCandidate -Command $command -TimeoutSeconds 1
+        Assert-Contains $result.stdout 'PARTIAL_STDOUT|CHILD_PID='
+        Assert-Contains $result.stderr 'PARTIAL_STDERR'
+        Assert-True $result.cleanup_failed
+        Assert-Equal $result.cleanup_status 'output_drain_timeout'
+        $childPidMatch = [regex]::Match($result.stdout, 'CHILD_PID=(\d+)')
+        Assert-True $childPidMatch.Success
+        $childPid = [int]$childPidMatch.Groups[1].Value
+    } finally {
+        if ($null -ne $childPid) {
+            $child = Get-Process -Id $childPid -ErrorAction SilentlyContinue
+            if ($null -ne $child) { Stop-Process -Id $childPid -Force -ErrorAction SilentlyContinue }
+        }
+    }
+}
+
+Invoke-Assertion 'Invoke-NativeCandidate default timeout classifies descendant-held pipes' {
+    $childPid = $null
+    try {
+        $parentScript = '$childInfo = [System.Diagnostics.ProcessStartInfo]::new(); $childInfo.FileName = ''pwsh''; $childInfo.UseShellExecute = $false; $childInfo.CreateNoWindow = $true; [void]$childInfo.ArgumentList.Add(''-NoProfile''); [void]$childInfo.ArgumentList.Add(''-Command''); [void]$childInfo.ArgumentList.Add(''Start-Sleep -Seconds 30''); $child = [System.Diagnostics.Process]::new(); $child.StartInfo = $childInfo; [void]$child.Start(); Write-Output (''DEFAULT_CHILD_PID='' + $child.Id); Write-Output ''default parent output''; [Console]::Error.WriteLine(''default parent warning'')'
+        $command = [pscustomobject]@{
+            executable = 'pwsh'
+            arguments = @('-NoProfile', '-Command', $parentScript)
+            prompt = ''
+            tool = 'test'
+            route_id = 'test__default_pipe_timeout'
+            working_directory = $projectRoot
+        }
+        $result = Invoke-NativeCandidate -Command $command
+        Assert-Contains $result.stdout 'default parent output'
+        Assert-Contains $result.stderr 'default parent warning'
+        Assert-True $result.cleanup_failed
+        Assert-Equal $result.cleanup_status 'output_drain_timeout'
+        Assert-True (-not $result.timed_out)
+        Assert-True ($result.duration_ms -lt 10000)
+        $childPidMatch = [regex]::Match($result.stdout, 'DEFAULT_CHILD_PID=(\d+)')
+        Assert-True $childPidMatch.Success
+        $childPid = [int]$childPidMatch.Groups[1].Value
+    } finally {
+        if ($null -ne $childPid) {
+            $child = Get-Process -Id $childPid -ErrorAction SilentlyContinue
+            if ($null -ne $child) { Stop-Process -Id $childPid -Force -ErrorAction SilentlyContinue }
+        }
+    }
 }
 
 Invoke-Assertion 'New-RouteId replaces punctuation in each route component' {
