@@ -66,11 +66,6 @@ function ConvertFrom-RunnerCanonicalJsonBody {
     param([Parameter(Mandatory)][string]$Text)
 
     $body = $Text.Trim()
-    $fence = [regex]::Match($body, '\A```json\s*(?<body>[\s\S]*?)\s*```\z', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
-    if ($fence.Success) {
-        $body = $fence.Groups['body'].Value
-    }
-
     try {
         return ($body | ConvertFrom-Json -Depth 20)
     } catch {
@@ -110,6 +105,19 @@ function ConvertFrom-ClaudeOutput {
         $outer = $Text | ConvertFrom-Json -Depth 20
     } catch {
         throw "Invalid Claude output JSON: $($_.Exception.Message)"
+    }
+
+    if ($outer.PSObject.Properties.Name -contains 'structured_output') {
+        if ($outer.structured_output -is [string]) {
+            if ([string]::IsNullOrWhiteSpace($outer.structured_output)) {
+                throw 'Claude output contains an unusable structured_output string.'
+            }
+            return (ConvertFrom-RunnerCanonicalJsonBody -Text $outer.structured_output)
+        }
+        if ($outer.structured_output -is [System.Management.Automation.PSCustomObject]) {
+            return $outer.structured_output
+        }
+        throw 'Claude output structured_output must be a JSON string or object.'
     }
 
     if (-not ($outer.PSObject.Properties.Name -contains 'result')) {
@@ -885,7 +893,8 @@ function New-RunnerPromptRedactionContext {
 function Invoke-NativeCandidate {
     param(
         [Parameter(Mandatory)][object]$Command,
-        [int]$TimeoutSeconds = 0
+        [int]$TimeoutSeconds = 0,
+        [switch]$PreserveRawOutput
     )
 
     $resolvedCommand = Resolve-RunnerNativeCommand -Command $Command
@@ -965,10 +974,10 @@ function Invoke-NativeCandidate {
             }
         }
 
-        $stdout = Receive-RunnerStreamOutput -Chunks $stdoutChunks
-        $stderr = Receive-RunnerStreamOutput -Chunks $stderrChunks
-        $stdout = ConvertTo-RunnerRedactedText -Text $stdout -PromptVariants $orderedPromptVariants -PromptRegex $promptRegex -PromptFragmentVariants $promptFragmentVariants -PromptFragmentRegex $promptFragmentRegex -PromptBase64FragmentRegex $promptBase64FragmentRegex
-        $stderr = ConvertTo-RunnerRedactedText -Text $stderr -PromptVariants $orderedPromptVariants -PromptRegex $promptRegex -PromptFragmentVariants $promptFragmentVariants -PromptFragmentRegex $promptFragmentRegex -PromptBase64FragmentRegex $promptBase64FragmentRegex
+        $rawStdout = Receive-RunnerStreamOutput -Chunks $stdoutChunks
+        $rawStderr = Receive-RunnerStreamOutput -Chunks $stderrChunks
+        $stdout = ConvertTo-RunnerRedactedText -Text $rawStdout -PromptVariants $orderedPromptVariants -PromptRegex $promptRegex -PromptFragmentVariants $promptFragmentVariants -PromptFragmentRegex $promptFragmentRegex -PromptBase64FragmentRegex $promptBase64FragmentRegex
+        $stderr = ConvertTo-RunnerRedactedText -Text $rawStderr -PromptVariants $orderedPromptVariants -PromptRegex $promptRegex -PromptFragmentVariants $promptFragmentVariants -PromptFragmentRegex $promptFragmentRegex -PromptBase64FragmentRegex $promptBase64FragmentRegex
         if ($cleanupIssues.Count -gt 0) {
             $cleanupFailed = $true
             if ($timedOut) {
@@ -979,7 +988,7 @@ function Invoke-NativeCandidate {
         $exitCode = if ($processExited) { $process.ExitCode } else { $null }
         $stopwatch.Stop()
 
-        [pscustomobject]@{
+        $result = [ordered]@{
             exit_code = $exitCode
             stdout = $stdout
             stderr = $stderr
@@ -995,6 +1004,11 @@ function Invoke-NativeCandidate {
             working_directory = ConvertTo-RunnerRedactedText -Text ([string]$resolvedCommand.working_directory) -PromptVariants $orderedPromptVariants -PromptRegex $promptRegex -PromptFragmentVariants $promptFragmentVariants -PromptFragmentRegex $promptFragmentRegex -PromptBase64FragmentRegex $promptBase64FragmentRegex
             arguments = $safeArguments
         }
+        if ($PreserveRawOutput) {
+            $result.raw_stdout = $rawStdout
+            $result.raw_stderr = $rawStderr
+        }
+        [pscustomobject]$result
     } finally {
         $stopwatch.Stop()
         $process.Dispose()
@@ -1330,17 +1344,18 @@ function Invoke-PilotRun {
         try {
             $prompt = New-PilotPrompt -Candidate $candidate
             $command = New-CandidateCommand -Candidate $candidate -Prompt $prompt
-            $processResult = if ($null -ne $NativeInvoker) { & $NativeInvoker $command } else { Invoke-NativeCandidate -Command $command }
+            $processResult = if ($null -ne $NativeInvoker) { & $NativeInvoker $command } else { Invoke-NativeCandidate -Command $command -PreserveRawOutput }
             $reportedCost = Get-PilotReportedCost -ProcessResult $processResult
             if ($processResult.exit_code -ne 0) {
                 $note = 'transport failure'
                 $failure = "Process exited with code $($processResult.exit_code)."
             } else {
                 try {
+                    $providerOutput = if ($processResult.PSObject.Properties.Name -contains 'raw_stdout') { $processResult.raw_stdout } else { $processResult.stdout }
                     $canonical = switch ($candidate.tool) {
-                        'codex' { ConvertFrom-CodexOutput $processResult.stdout }
-                        'claude' { ConvertFrom-ClaudeOutput $processResult.stdout }
-                        'agy' { ConvertFrom-AgyOutput $processResult.stdout }
+                        'codex' { ConvertFrom-CodexOutput $providerOutput }
+                        'claude' { ConvertFrom-ClaudeOutput $providerOutput }
+                        'agy' { ConvertFrom-AgyOutput $providerOutput }
                     }
                     $canonicalCheck = Test-CanonicalResponse $canonical
                     if (-not $canonicalCheck.valid) {
@@ -1356,7 +1371,8 @@ function Invoke-PilotRun {
             $note = 'execution failure'
             $failure = $_.Exception.Message
         }
-        $record = New-ResultRecord -Candidate $candidate -ProcessResult $processResult -Canonical $canonical -RunId $runId -DiagnosticNote $note -FailureError $failure -Prompt $prompt -CliReportedCostUsd $reportedCost
+        $safeProcessResult = if ($null -ne $processResult) { $processResult | Select-Object -Property * -ExcludeProperty raw_stdout, raw_stderr } else { $null }
+        $record = New-ResultRecord -Candidate $candidate -ProcessResult $safeProcessResult -Canonical $canonical -RunId $runId -DiagnosticNote $note -FailureError $failure -Prompt $prompt -CliReportedCostUsd $reportedCost
         Add-PilotResultRecord -Record $record -ResultsPath $ResultsPath
         [void]$records.Add($record)
     }
