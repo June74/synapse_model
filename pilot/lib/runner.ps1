@@ -133,6 +133,7 @@ function ConvertFrom-ClaudeOutput {
 function ConvertFrom-AgyOutput {
     param([Parameter(Mandatory)][string]$Text)
 
+    $objects = [System.Collections.Generic.List[object]]::new()
     $envelopes = [System.Collections.Generic.List[object]]::new()
     $startIndex = -1
     $depth = 0
@@ -171,6 +172,7 @@ function ConvertFrom-AgyOutput {
                 $candidateText = $Text.Substring($startIndex, $index - $startIndex + 1)
                 try {
                     $candidate = $candidateText | ConvertFrom-Json -Depth 20
+                    $objects.Add($candidate)
                     if (($candidate.PSObject.Properties.Name -contains 'structured_output') -or
                         ($candidate.PSObject.Properties.Name -contains 'response')) {
                         $envelopes.Add($candidate)
@@ -182,8 +184,8 @@ function ConvertFrom-AgyOutput {
         }
     }
 
-    if ($envelopes.Count -ne 1) {
-        throw "Agy output must contain exactly one recognizable JSON envelope; found $($envelopes.Count)."
+    if ($objects.Count -ne 1 -or $envelopes.Count -ne 1) {
+        throw "Agy output must contain exactly one top-level JSON object and one recognizable JSON envelope; found $($objects.Count) object(s) and $($envelopes.Count) envelope(s)."
     }
 
     $outer = $envelopes[0]
