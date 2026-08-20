@@ -965,6 +965,14 @@ Invoke-Assertion 'New-PilotPrompt includes only contract wrapper and task conten
     Assert-True (-not $prompt.Contains('auth_verified'))
 }
 
+Invoke-Assertion 'RouteId selection is case-sensitive' {
+    $matrix = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'pilot/model_matrix.json') | ConvertFrom-Json
+    $route = @($matrix.candidates | Select-Object -First 1)[0]
+    $mutatedRouteId = $route.route_id.Substring(0, 1).ToUpperInvariant() + $route.route_id.Substring(1)
+    Assert-True ($mutatedRouteId -cne $route.route_id)
+    Assert-Throws { Select-PilotCandidates -Matrix $matrix -RouteId $mutatedRouteId }
+}
+
 Invoke-Assertion 'New-PilotPrompt rejects outside ContractPath and TaskPath values' {
     $matrix = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'pilot/model_matrix.json') | ConvertFrom-Json
     $candidate = @($matrix.candidates | Select-Object -First 1)[0]
@@ -1299,15 +1307,19 @@ Invoke-Assertion 'RunAll continues after one injected candidate failure in the s
 }
 
 Invoke-Assertion 'public CLI no-switch entrypoint performs a 63-candidate dry-run without writing results' {
-    $resultsPath = New-OfflineResultPath 'cli-dry-run'
+    $resultsPath = Join-Path 'pilot/results' 'runner-test-run.jsonl'
+    $legacyResultsPath = Join-Path 'pilot/results' 'test-run.jsonl'
     $sentinel = 'prior record must remain untouched'
+    $legacyHashBefore = (Get-FileHash -LiteralPath $legacyResultsPath -Algorithm SHA256).Hash
+    if (Test-Path -LiteralPath $resultsPath) { Remove-Item -LiteralPath $resultsPath -Force }
     Set-Content -LiteralPath $resultsPath -Value $sentinel -Encoding utf8
     try {
-        $output = @(pwsh -NoProfile -File (Join-Path $projectRoot 'pilot/run_pilot.ps1') -ResultsPath $resultsPath 2>&1)
+        $output = @(pwsh -NoProfile -File (Join-Path $projectRoot 'pilot/run_pilot.ps1') 2>&1)
         Assert-Equal $LASTEXITCODE 0
         $joinedOutput = $output -join "`n"
         Assert-Contains $joinedOutput 'Dry run: 63 candidate(s) selected; no provider processes invoked.'
         Assert-Equal (Get-Content -Raw -LiteralPath $resultsPath).Trim() $sentinel
+        Assert-Equal (Get-FileHash -LiteralPath $legacyResultsPath -Algorithm SHA256).Hash $legacyHashBefore
     } finally {
         if (Test-Path -LiteralPath $resultsPath) { Remove-Item -LiteralPath $resultsPath -Force }
     }

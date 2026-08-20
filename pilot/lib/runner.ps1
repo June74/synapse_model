@@ -965,7 +965,7 @@ function Select-PilotCandidates {
     if (-not $validation.valid) { throw "Invalid model matrix: $($validation.reason)" }
 
     if (-not [string]::IsNullOrWhiteSpace($RouteId)) {
-        $match = @($all | Where-Object { $_.route_id -eq $RouteId })
+        $match = @($all | Where-Object { $_.route_id -ceq $RouteId })
         if ($match.Count -ne 1) { throw "RouteId '$RouteId' did not resolve to exactly one candidate." }
         if ($match[0].candidate_kind -eq 'special_route' -and -not $IncludeSpecialRoutes) {
             throw "Special route '$RouteId' requires -IncludeSpecialRoutes."
@@ -1179,7 +1179,9 @@ function Invoke-PilotRun {
         [switch]$RunAll,
         [switch]$IncludeSpecialRoutes,
         [AllowEmptyString()][string]$RouteId,
-        [string]$ResultsPath = 'pilot/results/test-run.jsonl',
+        # Deliberate migration boundary: legacy pilot/results/test-run.jsonl is preserved;
+        # new runner writes use this separate normalized-results target by default.
+        [string]$ResultsPath = 'pilot/results/runner-test-run.jsonl',
         [switch]$DryRun,
         [scriptblock]$NativeInvoker
     )

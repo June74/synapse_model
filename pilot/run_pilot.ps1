@@ -2,7 +2,8 @@ param(
     [switch]$RunAll,
     [switch]$IncludeSpecialRoutes,
     [string]$RouteId,
-    [string]$ResultsPath = 'pilot/results/test-run.jsonl'
+    # Deliberate migration boundary: leave legacy pilot/results/test-run.jsonl untouched.
+    [string]$ResultsPath = 'pilot/results/runner-test-run.jsonl'
 )
 
 $ErrorActionPreference = 'Stop'
