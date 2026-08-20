@@ -1,1 +1,4 @@
 .worktrees/
+
+# Local pilot results are runtime outputs and must never be committed.
+pilot/results/*.jsonl
