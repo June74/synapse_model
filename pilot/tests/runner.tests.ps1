@@ -901,6 +901,125 @@ Invoke-Assertion 'providers registry points to the subscription model matrix' {
     Assert-Equal $providers.providers.Count 3
 }
 
+Invoke-Assertion 'Invoke-PilotRun dry-run does not invoke the native process' {
+    $matrix = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'pilot/model_matrix.json') | ConvertFrom-Json
+    $state = @{ calls = 0 }
+    $result = Invoke-PilotRun -Matrix $matrix -DryRun -NativeInvoker {
+        $state.calls++
+        throw 'native process must not be called during dry-run'
+    }
+    Assert-Equal $state.calls 0
+    Assert-Equal $result.mode 'dry-run'
+    Assert-Equal $result.selected.Count 63
+}
+
+Invoke-Assertion 'Invoke-PilotRun selects one route and appends one normalized record' {
+    $matrix = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'pilot/model_matrix.json') | ConvertFrom-Json
+    $route = @($matrix.candidates | Where-Object { $_.tool -eq 'codex' } | Select-Object -First 1)[0]
+    $resultsPath = Join-Path $projectRoot 'pilot/tests/.runner-task5-route.jsonl'
+    if (Test-Path -LiteralPath $resultsPath) { Remove-Item -LiteralPath $resultsPath -Force }
+    try {
+        $invoker = {
+            [pscustomobject]@{ exit_code = 0; stdout = (Get-Content -Raw (Join-Path $projectRoot 'pilot/tests/fixtures/codex-success.jsonl')); stderr = ''; duration_ms = 7 }
+        }
+        $run = Invoke-PilotRun -Matrix $matrix -RouteId $route.route_id -ResultsPath $resultsPath -NativeInvoker $invoker
+        $records = @(Get-Content -LiteralPath $resultsPath | ForEach-Object { $_ | ConvertFrom-Json })
+        Assert-Equal $run.selected.Count 1
+        Assert-Equal $records.Count 1
+        Assert-Equal $records[0].route_id $route.route_id
+        Assert-True $records[0].transport_success
+        Assert-True $records[0].contract_compliant
+        Assert-Equal $records[0].answer '4'
+        Assert-Equal $records[0].error $null
+        Assert-True ($records[0].run_id.Length -gt 0)
+    } finally {
+        if (Test-Path -LiteralPath $resultsPath) { Remove-Item -LiteralPath $resultsPath -Force }
+    }
+}
+
+Invoke-Assertion 'New-PilotPrompt includes only contract wrapper and task content' {
+    $matrix = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'pilot/model_matrix.json') | ConvertFrom-Json
+    $candidate = @($matrix.candidates | Select-Object -First 1)[0]
+    $prompt = New-PilotPrompt -Candidate $candidate
+    Assert-Contains $prompt 'Shared Experiment Contract'
+    Assert-Contains $prompt 'Compute `2 + 2`.'
+    Assert-Contains $prompt 'Do not browse the web.'
+    Assert-True (-not $prompt.Contains('gpt-5.6-sol'))
+    Assert-True (-not $prompt.Contains('model_matrix.json'))
+    Assert-True (-not $prompt.Contains('auth_verified'))
+}
+
+Invoke-Assertion 'Invoke-PilotRun continues after a failed candidate' {
+    $matrix = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'pilot/model_matrix.json') | ConvertFrom-Json
+    $selected = @($matrix.candidates | Where-Object { $_.tool -eq 'codex' } | Select-Object -First 2)
+    $resultsPath = Join-Path $projectRoot 'pilot/tests/.runner-task5-continue.jsonl'
+    if (Test-Path -LiteralPath $resultsPath) { Remove-Item -LiteralPath $resultsPath -Force }
+    try {
+        $failedRoute = $selected[0].route_id
+        $invoker = {
+            param($command)
+            if ($command.route_id -eq $failedRoute) { throw 'fixture transport failure' }
+            [pscustomobject]@{ exit_code = 0; stdout = (Get-Content -Raw (Join-Path $projectRoot 'pilot/tests/fixtures/codex-success.jsonl')); stderr = ''; duration_ms = 8 }
+        }
+        Invoke-PilotRun -Matrix $matrix -RouteId $selected[0].route_id -ResultsPath $resultsPath -NativeInvoker $invoker | Out-Null
+        Invoke-PilotRun -Matrix $matrix -RouteId $selected[1].route_id -ResultsPath $resultsPath -NativeInvoker $invoker | Out-Null
+        $records = @(Get-Content -LiteralPath $resultsPath | ForEach-Object { $_ | ConvertFrom-Json })
+        Assert-Equal $records.Count 2
+        Assert-True (-not $records[0].transport_success)
+        Assert-True $records[1].transport_success
+    } finally {
+        if (Test-Path -LiteralPath $resultsPath) { Remove-Item -LiteralPath $resultsPath -Force }
+    }
+}
+
+Invoke-Assertion 'Invoke-PilotRun appends without overwriting prior JSONL records' {
+    $matrix = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'pilot/model_matrix.json') | ConvertFrom-Json
+    $routes = @($matrix.candidates | Select-Object -First 2)
+    $resultsPath = Join-Path $projectRoot 'pilot/tests/.runner-task5-append.jsonl'
+    if (Test-Path -LiteralPath $resultsPath) { Remove-Item -LiteralPath $resultsPath -Force }
+    try {
+        $invoker = { [pscustomobject]@{ exit_code = 0; stdout = (Get-Content -Raw (Join-Path $projectRoot 'pilot/tests/fixtures/codex-success.jsonl')); stderr = ''; duration_ms = 1 } }
+        Invoke-PilotRun -Matrix $matrix -RouteId $routes[0].route_id -ResultsPath $resultsPath -NativeInvoker $invoker | Out-Null
+        Invoke-PilotRun -Matrix $matrix -RouteId $routes[1].route_id -ResultsPath $resultsPath -NativeInvoker $invoker | Out-Null
+        $lines = @(Get-Content -LiteralPath $resultsPath)
+        Assert-Equal $lines.Count 2
+        Assert-Equal (@($lines | ForEach-Object { $_ | ConvertFrom-Json }).Count) 2
+    } finally {
+        if (Test-Path -LiteralPath $resultsPath) { Remove-Item -LiteralPath $resultsPath -Force }
+    }
+}
+
+Invoke-Assertion 'result normalization separates transport success from contract failure' {
+    $matrix = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'pilot/model_matrix.json') | ConvertFrom-Json
+    $route = @($matrix.candidates | Where-Object { $_.tool -eq 'codex' } | Select-Object -First 1)[0]
+    $resultsPath = Join-Path $projectRoot 'pilot/tests/.runner-task5-contract.jsonl'
+    if (Test-Path -LiteralPath $resultsPath) { Remove-Item -LiteralPath $resultsPath -Force }
+    try {
+        $invoker = { [pscustomobject]@{ exit_code = 0; stdout = (Get-Content -Raw (Join-Path $projectRoot 'pilot/tests/fixtures/contract-type-failure.json')); stderr = 'raw stderr must not be persisted'; duration_ms = 3 } }
+        Invoke-PilotRun -Matrix $matrix -RouteId $route.route_id -ResultsPath $resultsPath -NativeInvoker $invoker | Out-Null
+        $record = Get-Content -Raw -LiteralPath $resultsPath | ConvertFrom-Json
+        foreach ($field in @('run_id','route_id','tool','provider','model','effort','transport_success','contract_compliant','status','answer','error','exit_code','duration_ms','diagnostic_note')) {
+            Assert-True ($record.PSObject.Properties.Name -contains $field)
+        }
+        Assert-True $record.transport_success
+        Assert-True (-not $record.contract_compliant)
+        Assert-Equal $record.answer ''
+        Assert-True ($record.error -is [string])
+        Assert-True (-not ([string]$record | Select-String 'raw stderr'))
+    } finally {
+        if (Test-Path -LiteralPath $resultsPath) { Remove-Item -LiteralPath $resultsPath -Force }
+    }
+}
+
+Invoke-Assertion 'special routes require explicit opt-in' {
+    $matrix = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'pilot/model_matrix.json') | ConvertFrom-Json
+    $special = @($matrix.special_routes | Select-Object -First 1)[0]
+    $normal = Invoke-PilotRun -Matrix $matrix -DryRun
+    $included = Invoke-PilotRun -Matrix $matrix -DryRun -IncludeSpecialRoutes
+    Assert-True ($normal.selected.route_id -notcontains $special.route_id)
+    Assert-True ($included.selected.route_id -contains $special.route_id)
+}
+
 if ($failures.Count -gt 0) {
     $failures | ForEach-Object { Write-Error $_ -ErrorAction Continue }
     exit 1

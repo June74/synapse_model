@@ -780,3 +780,196 @@ function Invoke-NativeCandidate {
         $process.Dispose()
     }
 }
+
+function Resolve-PilotProjectPath {
+    param([Parameter(Mandatory)][string]$Path)
+
+    if ([System.IO.Path]::IsPathRooted($Path)) {
+        return [System.IO.Path]::GetFullPath($Path)
+    }
+    return [System.IO.Path]::GetFullPath((Join-Path $script:RunnerProjectRoot $Path))
+}
+
+function New-PilotPrompt {
+    param(
+        [Parameter(Mandatory)][object]$Candidate,
+        [string]$ContractPath = 'pilot/shared/experiment_contract.md',
+        [string]$TaskPath = 'pilot/tasks/001_smoke_test.md'
+    )
+
+    $wrapper = Resolve-RunnerInstructionFile $Candidate.instruction_file
+    if ($null -eq $wrapper) {
+        throw "Instruction file could not be resolved for route '$($Candidate.route_id)'."
+    }
+    $contractFile = Resolve-PilotProjectPath $ContractPath
+    $taskFile = Resolve-PilotProjectPath $TaskPath
+    if (-not (Test-Path -LiteralPath $contractFile -PathType Leaf)) { throw "Contract file not found: $ContractPath" }
+    if (-not (Test-Path -LiteralPath $taskFile -PathType Leaf)) { throw "Task file not found: $TaskPath" }
+
+    return @(
+        '=== Shared experiment contract ==='
+        (Get-Content -Raw -LiteralPath $contractFile)
+        '=== Provider wrapper instructions ==='
+        (Get-Content -Raw -LiteralPath $wrapper.FullName)
+        '=== Experiment task ==='
+        (Get-Content -Raw -LiteralPath $taskFile)
+    ) -join "`n`n"
+}
+
+function Select-PilotCandidates {
+    param(
+        [Parameter(Mandatory)][object]$Matrix,
+        [switch]$RunAll,
+        [switch]$IncludeSpecialRoutes,
+        [AllowEmptyString()][string]$RouteId
+    )
+
+    if ($RunAll -and -not [string]::IsNullOrWhiteSpace($RouteId)) {
+        throw '-RunAll and -RouteId cannot be used together.'
+    }
+
+    $normal = @($Matrix.candidates)
+    $special = @($Matrix.special_routes)
+    $all = @($normal + $special)
+    if ($null -eq $Matrix.candidates -or $null -eq $Matrix.special_routes) {
+        throw 'Model matrix must contain candidates and special_routes arrays.'
+    }
+    $validation = Test-CandidateMatrix $all
+    if (-not $validation.valid) { throw "Invalid model matrix: $($validation.reason)" }
+
+    if (-not [string]::IsNullOrWhiteSpace($RouteId)) {
+        $match = @($all | Where-Object { $_.route_id -eq $RouteId })
+        if ($match.Count -ne 1) { throw "RouteId '$RouteId' did not resolve to exactly one candidate." }
+        if ($match[0].candidate_kind -eq 'special_route' -and -not $IncludeSpecialRoutes) {
+            throw "Special route '$RouteId' requires -IncludeSpecialRoutes."
+        }
+        return $match
+    }
+
+    $selected = @($normal | Where-Object { $_.enabled })
+    if ($IncludeSpecialRoutes) {
+        $selected += @($special)
+    }
+    return @($selected)
+}
+
+function ConvertTo-PilotDiagnostic {
+    param([AllowNull()][object]$Value)
+
+    if ($null -eq $Value) { return $null }
+    $text = ([string]$Value -replace '[\r\n\t]+', ' ' -replace '\s{2,}', ' ').Trim()
+    if ($text.Length -gt 300) { $text = $text.Substring(0, 300) + '...' }
+    return $text
+}
+
+function New-ResultRecord {
+    param(
+        [Parameter(Mandatory)][object]$Candidate,
+        [AllowNull()][object]$ProcessResult,
+        [AllowNull()][object]$Canonical,
+        [Parameter(Mandatory)][string]$RunId,
+        [AllowNull()][string]$DiagnosticNote,
+        [AllowNull()][string]$FailureError
+    )
+
+    $transportSuccess = $null -ne $ProcessResult -and
+        $ProcessResult.exit_code -eq 0 -and
+        (-not [bool]$ProcessResult.timed_out) -and
+        (-not [bool]$ProcessResult.cleanup_failed)
+    $contractCompliant = $transportSuccess -and $null -ne $Canonical -and (Test-CanonicalResponse $Canonical).valid
+    $answer = if ($contractCompliant) { [string]$Canonical.answer } else { '' }
+    $error = if ($contractCompliant) { $null } elseif ($null -ne $FailureError) { ConvertTo-PilotDiagnostic $FailureError } elseif ($null -ne $Canonical -and $Canonical.error -is [string]) { ConvertTo-PilotDiagnostic $Canonical.error } else { 'Candidate did not produce a contract-compliant response.' }
+
+    $record = [ordered]@{
+        run_id = $RunId
+        route_id = [string]$Candidate.route_id
+        tool = [string]$Candidate.tool
+        provider = [string]$Candidate.provider
+        model = [string]$Candidate.model
+        effort = if ($Candidate.PSObject.Properties.Name -contains 'effort') { [string]$Candidate.effort } else { 'default' }
+        transport_success = [bool]$transportSuccess
+        contract_compliant = [bool]$contractCompliant
+        status = if ($contractCompliant) { [string]$Canonical.status } else { 'failure' }
+        answer = [string]$answer
+        error = $error
+        exit_code = if ($null -ne $ProcessResult) { $ProcessResult.exit_code } else { $null }
+        duration_ms = if ($null -ne $ProcessResult) { [int64]$ProcessResult.duration_ms } else { [int64]0 }
+        diagnostic_note = ConvertTo-PilotDiagnostic $DiagnosticNote
+    }
+    if ($null -ne $ProcessResult -and $ProcessResult.PSObject.Properties.Name -contains 'cli_reported_cost_usd' -and $null -ne $ProcessResult.cli_reported_cost_usd) {
+        $record.cli_reported_cost_usd = $ProcessResult.cli_reported_cost_usd
+    }
+    return [pscustomobject]$record
+}
+
+function Add-PilotResultRecord {
+    param(
+        [Parameter(Mandatory)][object]$Record,
+        [Parameter(Mandatory)][string]$ResultsPath
+    )
+
+    $path = Resolve-PilotProjectPath $ResultsPath
+    $parent = Split-Path -Parent $path
+    if (-not (Test-Path -LiteralPath $parent)) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
+    $line = $Record | ConvertTo-Json -Compress -Depth 10
+    Add-Content -LiteralPath $path -Value $line -Encoding utf8
+}
+
+function Invoke-PilotRun {
+    param(
+        [Parameter(Mandatory)][object]$Matrix,
+        [switch]$RunAll,
+        [switch]$IncludeSpecialRoutes,
+        [AllowEmptyString()][string]$RouteId,
+        [string]$ResultsPath = 'pilot/results/test-run.jsonl',
+        [switch]$DryRun,
+        [scriptblock]$NativeInvoker
+    )
+
+    $selected = @(Select-PilotCandidates -Matrix $Matrix -RunAll:$RunAll -IncludeSpecialRoutes:$IncludeSpecialRoutes -RouteId $RouteId)
+    if (-not $RunAll -and [string]::IsNullOrWhiteSpace($RouteId)) { $DryRun = $true }
+    $summary = [pscustomobject]@{ mode = if ($DryRun) { 'dry-run' } else { 'run' }; selected = $selected; records = @() }
+    if ($DryRun) { return $summary }
+
+    $runId = [guid]::NewGuid().ToString('N')
+    $records = [System.Collections.Generic.List[object]]::new()
+    foreach ($candidate in $selected) {
+        $processResult = $null
+        $canonical = $null
+        $failure = $null
+        $note = 'completed'
+        try {
+            $prompt = New-PilotPrompt -Candidate $candidate
+            $command = New-CandidateCommand -Candidate $candidate -Prompt $prompt
+            $processResult = if ($null -ne $NativeInvoker) { & $NativeInvoker $command } else { Invoke-NativeCandidate -Command $command }
+            if ($processResult.exit_code -ne 0) {
+                $note = 'transport failure'
+                $failure = "Process exited with code $($processResult.exit_code)."
+            } else {
+                try {
+                    $canonical = switch ($candidate.tool) {
+                        'codex' { ConvertFrom-CodexOutput $processResult.stdout }
+                        'claude' { ConvertFrom-ClaudeOutput $processResult.stdout }
+                        'agy' { ConvertFrom-AgyOutput $processResult.stdout }
+                    }
+                    $canonicalCheck = Test-CanonicalResponse $canonical
+                    if (-not $canonicalCheck.valid) {
+                        $note = 'contract validation failure'
+                        $failure = $canonicalCheck.reason
+                    }
+                } catch {
+                    $note = 'output parse failure'
+                    $failure = $_.Exception.Message
+                }
+            }
+        } catch {
+            $note = 'candidate execution failure'
+            $failure = $_.Exception.Message
+        }
+        $record = New-ResultRecord -Candidate $candidate -ProcessResult $processResult -Canonical $canonical -RunId $runId -DiagnosticNote $note -FailureError $failure
+        Add-PilotResultRecord -Record $record -ResultsPath $ResultsPath
+        [void]$records.Add($record)
+    }
+    $summary.records = @($records)
+    return $summary
+}
