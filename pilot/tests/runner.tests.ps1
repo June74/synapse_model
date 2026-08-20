@@ -1171,6 +1171,28 @@ Invoke-Assertion 'privacy sanitizer redacts 31-character literal and Base64 prom
     }
 }
 
+Invoke-Assertion 'privacy sanitizer redacts 15-character literal and Base64 prompt excerpts' {
+    $matrix = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'pilot/model_matrix.json') | ConvertFrom-Json
+    $route = @($matrix.candidates | Where-Object { $_.tool -eq 'codex' } | Select-Object -First 1)[0]
+    $prompt = New-PilotPrompt -Candidate $route
+    $excerpt = $prompt.Substring(280, 15)
+    $encodedExcerpt = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($excerpt))
+    $resultsPath = Join-Path $projectRoot 'pilot/tests/.runner-task5-15-fragment.jsonl'
+    if (Test-Path -LiteralPath $resultsPath) { Remove-Item -LiteralPath $resultsPath -Force }
+    try {
+        $record = [pscustomobject]@{ run_id = 'offline'; answer = "$excerpt $encodedExcerpt"; error = $null; diagnostic_note = '4' }
+        Add-PilotResultRecord -Record $record -ResultsPath $resultsPath -Prompt $prompt
+        $jsonl = Get-Content -Raw -LiteralPath $resultsPath
+        Assert-True (-not $jsonl.Contains($excerpt))
+        Assert-True (-not $jsonl.Contains($encodedExcerpt))
+        Assert-Contains $jsonl '[prompt fragment redacted]'
+        Assert-Contains $jsonl '[prompt Base64 redacted]'
+        Assert-Contains $jsonl '"diagnostic_note":"4"'
+    } finally {
+        if (Test-Path -LiteralPath $resultsPath) { Remove-Item -LiteralPath $resultsPath -Force }
+    }
+}
+
 Invoke-Assertion 'privacy sanitizer redacts Unicode and JSON-escaped excerpts at the end of a long prompt' {
     $longPrompt = ('long-unicode-prefix-' * 400) + ' Ω漢字 final prompt material '
     Assert-True ($longPrompt.Length -ge 7211)
@@ -1206,9 +1228,10 @@ Invoke-Assertion 'credential sanitizer preserves canonical failure meaning while
         Assert-Equal $record.status 'failure'
         Assert-Contains $record.error 'provider failed'
         Assert-Contains $record.error '[credential redacted]'
-        foreach ($secret in @('Bearer test-bearer-token', 'sk-proj-test-openai-secret', 'AIzaTestGoogleSecret', 'sk-ant-test-anthropic-secret')) {
+        foreach ($secret in @('Authorization: Basic dXNlcjpwYXNz', 'Bearer test-bearer-token', 'sk-proj-test-openai-secret', 'AIzaTestGoogleSecret', 'sk-ant-test-anthropic-secret')) {
             Assert-True (-not $jsonl.Contains($secret))
         }
+        Assert-Contains $record.error 'Authorization: Basic [credential redacted]'
     } finally {
         if (Test-Path -LiteralPath $resultsPath) { Remove-Item -LiteralPath $resultsPath -Force }
     }

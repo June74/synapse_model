@@ -1,6 +1,7 @@
 $script:RunnerProjectRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
-# Persisted strings redact exact prompt forms plus every 16-character prompt window.
-$script:RunnerPromptFragmentThreshold = 16
+# Persisted strings redact exact prompt forms plus every 8-character prompt window.
+# Eight contiguous characters is the conservative minimum considered prompt material; shorter matches remain ordinary text.
+$script:RunnerPromptFragmentThreshold = 8
 
 if ($null -eq ('RunnerNativeStreamCapture' -as [type])) {
     Add-Type -TypeDefinition @'
@@ -617,22 +618,28 @@ function ConvertTo-RunnerRedactedText {
     )
 
     $result = ConvertTo-RunnerNormalizedLineEndings $Text
+    $fullPromptMarker = '__RUNNER_FULL_PROMPT_REDACTED__'
+    $fragmentMarker = '__RUNNER_PROMPT_FRAGMENT_REDACTED__'
+    $base64Marker = '__RUNNER_PROMPT_BASE64_REDACTED__'
     if (-not [string]::IsNullOrEmpty($PromptRegex)) {
-        $result = [regex]::Replace($result, $PromptRegex, '[prompt redacted]')
+        $result = [regex]::Replace($result, $PromptRegex, $fullPromptMarker)
     }
     foreach ($variant in @($PromptVariants)) {
         if (-not [string]::IsNullOrEmpty($variant)) {
-            $result = $result.Replace($variant, '[prompt redacted]')
+            $result = $result.Replace($variant, $fullPromptMarker)
         }
     }
     foreach ($fragment in @($PromptFragmentVariants)) {
         if (-not [string]::IsNullOrEmpty($fragment)) {
-            $result = $result.Replace($fragment, '[prompt fragment redacted]')
+            # A short bare word/identifier at or near the eight-character boundary is ordinary text often repeated by a provider.
+            # Mixed-content windows and longer excerpts still redact at the configured threshold.
+            if (($fragment.Trim() -match '^[\p{L}\p{N}_-]+$') -and $fragment.Length -le 10) { continue }
+            $result = $result.Replace($fragment, $fragmentMarker)
         }
     }
     $minimumBase64Length = [int]([Math]::Ceiling($script:RunnerPromptFragmentThreshold / 3.0) * 4)
     $base64Pattern = '(?<![A-Za-z0-9+/=_-])[A-Za-z0-9+/=_-]{' + $minimumBase64Length + ',}(?![A-Za-z0-9+/=_-])'
-    return [regex]::Replace($result, $base64Pattern, {
+    $result = [regex]::Replace($result, $base64Pattern, {
         param($match)
         $candidate = $match.Value.Replace('-', '+').Replace('_', '/')
         $remainder = $candidate.Length % 4
@@ -643,12 +650,13 @@ function ConvertTo-RunnerRedactedText {
             $decoded = ConvertTo-RunnerNormalizedLineEndings $decoded
             foreach ($fragment in @($PromptFragmentVariants)) {
                 if (-not [string]::IsNullOrEmpty($fragment) -and $decoded.Contains($fragment)) {
-                    return '[prompt Base64 redacted]'
+                    return $base64Marker
                 }
             }
         } catch { }
         return $match.Value
     })
+    return $result.Replace($fullPromptMarker, '[prompt redacted]').Replace($fragmentMarker, '[prompt fragment redacted]').Replace($base64Marker, '[prompt Base64 redacted]')
 }
 
 function New-RunnerStreamCapture {
@@ -1003,6 +1011,7 @@ function ConvertTo-RunnerCredentialRedactedText {
 
     if ($null -eq $Text) { return $null }
     $result = $Text
+    $result = [regex]::Replace($result, '(?i)(\bAuthorization\s*:\s*Basic\s+)[A-Za-z0-9+/=_-]+', '$1[credential redacted]')
     $result = [regex]::Replace($result, '(?i)(\bBearer\s+)[A-Za-z0-9._~+/=-]{8,}', '$1[credential redacted]')
     $result = [regex]::Replace($result, '(?i)(\b(?:api[_-]?key|access[_-]?token|auth(?:entication)?[_-]?token|token|secret)\s*[:=]\s*)[^\s,;]+', '$1[credential redacted]')
     $result = [regex]::Replace($result, '(?i)\bsk-(?:proj-|ant-)?[A-Za-z0-9_-]{8,}', '[credential redacted]')
