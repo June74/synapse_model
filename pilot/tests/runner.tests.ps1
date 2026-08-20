@@ -1151,6 +1151,84 @@ Invoke-Assertion 'privacy sanitizer redacts Base64 encoded prompt excerpts' {
     }
 }
 
+Invoke-Assertion 'privacy sanitizer redacts 31-character literal and Base64 prompt excerpts' {
+    $matrix = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'pilot/model_matrix.json') | ConvertFrom-Json
+    $route = @($matrix.candidates | Where-Object { $_.tool -eq 'codex' } | Select-Object -First 1)[0]
+    $prompt = New-PilotPrompt -Candidate $route
+    $excerpt = $prompt.Substring(240, 31)
+    $encodedExcerpt = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($excerpt))
+    $resultsPath = Join-Path $projectRoot 'pilot/tests/.runner-task5-31-fragment.jsonl'
+    if (Test-Path -LiteralPath $resultsPath) { Remove-Item -LiteralPath $resultsPath -Force }
+    try {
+        $record = [pscustomobject]@{ run_id = 'offline'; answer = "$excerpt $encodedExcerpt"; error = $null; diagnostic_note = '4' }
+        Add-PilotResultRecord -Record $record -ResultsPath $resultsPath -Prompt $prompt
+        $jsonl = Get-Content -Raw -LiteralPath $resultsPath
+        Assert-True (-not $jsonl.Contains($excerpt))
+        Assert-True (-not $jsonl.Contains($encodedExcerpt))
+        Assert-Contains $jsonl '"diagnostic_note":"4"'
+    } finally {
+        if (Test-Path -LiteralPath $resultsPath) { Remove-Item -LiteralPath $resultsPath -Force }
+    }
+}
+
+Invoke-Assertion 'privacy sanitizer redacts Unicode and JSON-escaped excerpts at the end of a long prompt' {
+    $longPrompt = ('long-unicode-prefix-' * 400) + ' Ω漢字 final prompt material '
+    Assert-True ($longPrompt.Length -ge 7211)
+    $excerpt = $longPrompt.Substring($longPrompt.Length - 31)
+    $jsonExcerpt = ($excerpt | ConvertTo-Json -Compress).Substring(1)
+    $jsonExcerpt = $jsonExcerpt.Substring(0, $jsonExcerpt.Length - 1)
+    $resultsPath = Join-Path $projectRoot 'pilot/tests/.runner-task5-long-json-fragment.jsonl'
+    if (Test-Path -LiteralPath $resultsPath) { Remove-Item -LiteralPath $resultsPath -Force }
+    try {
+        $record = [pscustomobject]@{ run_id = 'offline'; answer = $jsonExcerpt; error = $null; diagnostic_note = '4' }
+        Add-PilotResultRecord -Record $record -ResultsPath $resultsPath -Prompt $longPrompt
+        $jsonl = Get-Content -Raw -LiteralPath $resultsPath
+        Assert-True (-not $jsonl.Contains($jsonExcerpt))
+        Assert-Contains $jsonl '[prompt fragment redacted]'
+        Assert-Contains $jsonl '"diagnostic_note":"4"'
+    } finally {
+        if (Test-Path -LiteralPath $resultsPath) { Remove-Item -LiteralPath $resultsPath -Force }
+    }
+}
+
+Invoke-Assertion 'credential sanitizer preserves canonical failure meaning while removing recognizable secrets' {
+    $matrix = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'pilot/model_matrix.json') | ConvertFrom-Json
+    $route = @($matrix.candidates | Where-Object { $_.tool -eq 'codex' } | Select-Object -First 1)[0]
+    $resultsPath = Join-Path $projectRoot 'pilot/tests/.runner-task5-credential-failure.jsonl'
+    if (Test-Path -LiteralPath $resultsPath) { Remove-Item -LiteralPath $resultsPath -Force }
+    try {
+        $invoker = { [pscustomobject]@{ exit_code = 0; stdout = (Get-Content -Raw (Join-Path $projectRoot 'pilot/tests/fixtures/codex-credential-failure.jsonl')); stderr = ''; duration_ms = 3 } }
+        Invoke-PilotRun -Matrix $matrix -RouteId $route.route_id -ResultsPath $resultsPath -NativeInvoker $invoker | Out-Null
+        $jsonl = Get-Content -Raw -LiteralPath $resultsPath
+        $record = $jsonl | ConvertFrom-Json
+        Assert-True $record.transport_success
+        Assert-True $record.contract_compliant
+        Assert-Equal $record.status 'failure'
+        Assert-Contains $record.error 'provider failed'
+        Assert-Contains $record.error '[credential redacted]'
+        foreach ($secret in @('Bearer test-bearer-token', 'sk-proj-test-openai-secret', 'AIzaTestGoogleSecret', 'sk-ant-test-anthropic-secret')) {
+            Assert-True (-not $jsonl.Contains($secret))
+        }
+    } finally {
+        if (Test-Path -LiteralPath $resultsPath) { Remove-Item -LiteralPath $resultsPath -Force }
+    }
+}
+
+Invoke-Assertion 'credential sanitizer applies even when no prompt is supplied to the writer' {
+    $resultsPath = Join-Path $projectRoot 'pilot/tests/.runner-task5-credential-no-prompt.jsonl'
+    if (Test-Path -LiteralPath $resultsPath) { Remove-Item -LiteralPath $resultsPath -Force }
+    try {
+        $record = [pscustomobject]@{ run_id = 'offline'; answer = ''; error = 'fallback api_key=sk-proj-test-openai-secret'; diagnostic_note = 'provider failure' }
+        Add-PilotResultRecord -Record $record -ResultsPath $resultsPath
+        $jsonl = Get-Content -Raw -LiteralPath $resultsPath
+        Assert-True (-not $jsonl.Contains('sk-proj-test-openai-secret'))
+        Assert-Contains $jsonl '[credential redacted]'
+        Assert-Contains $jsonl 'fallback'
+    } finally {
+        if (Test-Path -LiteralPath $resultsPath) { Remove-Item -LiteralPath $resultsPath -Force }
+    }
+}
+
 Invoke-Assertion 'RunAll continues after one injected candidate failure in the same invocation' {
     $matrix = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'pilot/model_matrix.json') | ConvertFrom-Json
     $runMatrix = [pscustomobject]@{

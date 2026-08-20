@@ -1,8 +1,6 @@
 $script:RunnerProjectRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
-# Persisted strings redact exact prompt forms plus every 32-character prompt window.
-$script:RunnerPromptFragmentThreshold = 32
-# Avoid constructing a very large case-insensitive whole-prompt regex; exact variants and windows still apply.
-$script:RunnerPromptRegexMaxLength = 2048
+# Persisted strings redact exact prompt forms plus every 16-character prompt window.
+$script:RunnerPromptFragmentThreshold = 16
 
 if ($null -eq ('RunnerNativeStreamCapture' -as [type])) {
     Add-Type -TypeDefinition @'
@@ -632,7 +630,8 @@ function ConvertTo-RunnerRedactedText {
             $result = $result.Replace($fragment, '[prompt fragment redacted]')
         }
     }
-    $base64Pattern = '(?<![A-Za-z0-9+/=_-])[A-Za-z0-9+/=_-]{44,}(?![A-Za-z0-9+/=_-])'
+    $minimumBase64Length = [int]([Math]::Ceiling($script:RunnerPromptFragmentThreshold / 3.0) * 4)
+    $base64Pattern = '(?<![A-Za-z0-9+/=_-])[A-Za-z0-9+/=_-]{' + $minimumBase64Length + ',}(?![A-Za-z0-9+/=_-])'
     return [regex]::Replace($result, $base64Pattern, {
         param($match)
         $candidate = $match.Value.Replace('-', '+').Replace('_', '/')
@@ -703,14 +702,24 @@ function New-RunnerPromptRedactionContext {
     if ($normalizedPromptText.Length -ge $script:RunnerPromptFragmentThreshold) {
         $maxStart = $normalizedPromptText.Length - $script:RunnerPromptFragmentThreshold
         for ($index = 0; $index -le $maxStart; $index++) {
-            [void]$promptFragmentVariants.Add($normalizedPromptText.Substring($index, $script:RunnerPromptFragmentThreshold))
+            $fragment = $normalizedPromptText.Substring($index, $script:RunnerPromptFragmentThreshold)
+            [void]$promptFragmentVariants.Add($fragment)
+            [void]$promptFragmentVariants.Add((ConvertTo-RunnerFullyUnicodeEscaped -Text $fragment))
+            [void]$promptFragmentVariants.Add((ConvertTo-RunnerFullyUnicodeEscaped -Text $fragment).ToLowerInvariant())
+            $jsonFragment = ConvertTo-Json -InputObject $fragment -Compress
+            foreach ($jsonSpelling in @(Get-RunnerJsonPromptVariants -JsonText $jsonFragment)) {
+                [void]$promptFragmentVariants.Add($jsonSpelling)
+                if ($jsonSpelling.Length -gt 1) {
+                    [void]$promptFragmentVariants.Add($jsonSpelling.Substring(1, $jsonSpelling.Length - 2))
+                }
+            }
         }
     }
 
     [pscustomobject]@{
         variants = @($promptVariants | Sort-Object Length -Descending | Select-Object -Unique)
         fragments = @($promptFragmentVariants | Select-Object -Unique)
-        regex = if ([string]::IsNullOrEmpty($normalizedPromptText) -or $normalizedPromptText.Length -gt $script:RunnerPromptRegexMaxLength) { '' } else { ConvertTo-RunnerPromptRegex -Prompt $normalizedPromptText }
+        regex = if ([string]::IsNullOrEmpty($normalizedPromptText)) { '' } else { ConvertTo-RunnerPromptRegex -Prompt $normalizedPromptText }
     }
 }
 
@@ -975,14 +984,30 @@ function Protect-PilotRecordStrings {
         [AllowNull()][string]$Prompt
     )
 
-    if ([string]::IsNullOrEmpty($Prompt)) { return $Record }
-    $redactionContext = New-RunnerPromptRedactionContext -Prompt $Prompt
+    $redactionContext = if ([string]::IsNullOrEmpty($Prompt)) { $null } else { New-RunnerPromptRedactionContext -Prompt $Prompt }
     foreach ($property in $Record.PSObject.Properties) {
         if ($property.Value -is [string]) {
-            $property.Value = ConvertTo-RunnerRedactedText -Text $property.Value -PromptVariants $redactionContext.variants -PromptRegex $redactionContext.regex -PromptFragmentVariants $redactionContext.fragments
+            $safeText = if ($null -eq $redactionContext) {
+                [string]$property.Value
+            } else {
+                ConvertTo-RunnerRedactedText -Text $property.Value -PromptVariants $redactionContext.variants -PromptRegex $redactionContext.regex -PromptFragmentVariants $redactionContext.fragments
+            }
+            $property.Value = ConvertTo-RunnerCredentialRedactedText -Text $safeText
         }
     }
     return $Record
+}
+
+function ConvertTo-RunnerCredentialRedactedText {
+    param([AllowNull()][string]$Text)
+
+    if ($null -eq $Text) { return $null }
+    $result = $Text
+    $result = [regex]::Replace($result, '(?i)(\bBearer\s+)[A-Za-z0-9._~+/=-]{8,}', '$1[credential redacted]')
+    $result = [regex]::Replace($result, '(?i)(\b(?:api[_-]?key|access[_-]?token|auth(?:entication)?[_-]?token|token|secret)\s*[:=]\s*)[^\s,;]+', '$1[credential redacted]')
+    $result = [regex]::Replace($result, '(?i)\bsk-(?:proj-|ant-)?[A-Za-z0-9_-]{8,}', '[credential redacted]')
+    $result = [regex]::Replace($result, '(?i)\bAIza[0-9A-Za-z_-]{8,}', '[credential redacted]')
+    return $result
 }
 
 function New-ResultRecord {
