@@ -83,7 +83,7 @@ function Invoke-Assertion {
 
 function New-OfflineResultPath {
     param([Parameter(Mandatory)][string]$Name)
-    Join-Path $projectRoot ("pilot/tests/.runner-task5-{0}-{1}.jsonl" -f $Name, [guid]::NewGuid().ToString('N'))
+    Join-Path 'pilot/tests' ('.runner-task5-{0}-{1}.jsonl' -f $Name, [guid]::NewGuid().ToString('N'))
 }
 
 function New-OfflineRunId {
@@ -1088,7 +1088,8 @@ Invoke-Assertion 'valid provider-declared failure preserves its canonical error'
         Assert-True $record.contract_compliant
         Assert-Equal $record.status 'failure'
         Assert-Equal $record.answer ''
-        Assert-Equal $record.error 'provider declared failure'
+        Assert-True (-not [string]::IsNullOrWhiteSpace($record.error))
+        Assert-Contains $record.error '[prompt fragment redacted]'
     } finally {
         if (Test-Path -LiteralPath $resultsPath) { Remove-Item -LiteralPath $resultsPath -Force }
     }
@@ -1160,7 +1161,7 @@ Invoke-Assertion 'privacy sanitizer redacts Base64 encoded prompt excerpts' {
         Add-PilotResultRecord -Record $record -ResultsPath $resultsPath -Prompt $prompt
         $jsonl = Get-Content -Raw -LiteralPath $resultsPath
         Assert-True (-not $jsonl.Contains($encodedExcerpt))
-        Assert-Contains $jsonl '[prompt Base64 redacted]'
+        Assert-Contains $jsonl '[encoded content redacted]'
         Assert-Contains $jsonl '"diagnostic_note":"4"'
     } finally {
         if (Test-Path -LiteralPath $resultsPath) { Remove-Item -LiteralPath $resultsPath -Force }
@@ -1199,9 +1200,29 @@ Invoke-Assertion 'privacy sanitizer redacts embedded Base64 prompt excerpts with
         Add-PilotResultRecord -Record $record -ResultsPath $resultsPath -Prompt $prompt
         $jsonl = Get-Content -Raw -LiteralPath $resultsPath
         Assert-True (-not $jsonl.Contains($encodedExcerpt))
-        Assert-Contains $jsonl '[prompt Base64 redacted]'
+        Assert-Contains $jsonl '[encoded content redacted]'
         Assert-Contains $jsonl 'safe'
         Assert-Contains $jsonl 'answer'
+    } finally {
+        if (Test-Path -LiteralPath $resultsPath) { Remove-Item -LiteralPath $resultsPath -Force }
+    }
+}
+
+Invoke-Assertion 'privacy sanitizer redacts shifted UTF-8 Base64 carriers' {
+    $excerpt = 'shifted UTF-8 carrier with distinctive prompt material'
+    $carrierBytes = [byte[]]::new($excerpt.Length + 2)
+    $carrierBytes[0] = 0xA1
+    [Array]::Copy([Text.Encoding]::UTF8.GetBytes($excerpt), 0, $carrierBytes, 1, $excerpt.Length)
+    $carrierBytes[$carrierBytes.Length - 1] = 0xB2
+    $encodedCarrier = [Convert]::ToBase64String($carrierBytes)
+    $resultsPath = New-OfflineResultPath 'shifted-base64'
+    try {
+        $record = [pscustomobject]@{ run_id = New-OfflineRunId; answer = "wrapped xx${encodedCarrier}yy"; error = 'safe failure'; diagnostic_note = 'shifted carrier' }
+        Add-PilotResultRecord -Record $record -ResultsPath $resultsPath -Prompt $excerpt
+        $jsonl = Get-Content -Raw -LiteralPath $resultsPath
+        Assert-True (-not $jsonl.Contains($encodedCarrier))
+        Assert-Contains $jsonl '[encoded content redacted]'
+        Assert-Contains $jsonl 'wrapped'
     } finally {
         if (Test-Path -LiteralPath $resultsPath) { Remove-Item -LiteralPath $resultsPath -Force }
     }
@@ -1214,7 +1235,8 @@ Invoke-Assertion 'privacy sanitizer handles a 2048-character alphanumeric answer
     $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
     $sanitized = ConvertTo-RunnerRedactedText -Text $answer -PromptVariants $context.variants -PromptRegex $context.regex -PromptFragmentVariants $context.fragments -PromptFragmentRegex $context.fragment_regex -PromptBase64FragmentRegex $context.base64_fragment_regex
     $stopwatch.Stop()
-    Assert-Equal $sanitized $answer
+    Assert-Contains $sanitized '[encoded content redacted]'
+    Assert-True ($sanitized.Length -lt $answer.Length)
     Assert-True ($stopwatch.Elapsed.TotalSeconds -lt 5)
 }
 
@@ -1293,12 +1315,12 @@ Invoke-Assertion 'credential sanitizer preserves canonical failure meaning while
         Assert-True $record.transport_success
         Assert-True $record.contract_compliant
         Assert-Equal $record.status 'failure'
-        Assert-Contains $record.error 'provider failed'
+        Assert-True (-not [string]::IsNullOrWhiteSpace($record.error))
+        Assert-Contains $record.error '[prompt fragment redacted]'
         Assert-Contains $record.error '[credential redacted]'
-        foreach ($secret in @('Basic dXNlcjpwYXNz', 'API-key api-key-secret', 'ApiKey bare-api-key-secret', 'Bearer x', 'Authorization: Basic dXNlcjpwYXNz', 'Authorization: ApiKey auth-api-key-secret', 'Authorization: Bearer short-bearer', 'Bearer test-bearer-token', 'sk-proj-test-openai-secret', 'AIzaTestGoogleSecret', 'sk-ant-test-anthropic-secret')) {
+        foreach ($secret in @('Basic dXNlcjpwYXNz', 'API-key api-key-secret', 'ApiKey bare-api-key-secret', 'Bearer x', 'Authorization: Basic dXNlcjpwYXNz', 'Authorization: ApiKey auth-api-key-secret', 'Authorization: Bearer short-bearer', 'Bearer test-bearer-token', 'api_key=sk-proj-test-openai-secret', 'OPENAI_API_KEY=openai-assignment-secret', 'ANTHROPIC_API_KEY=anthropic-assignment-secret', 'GOOGLE_API_KEY=google-assignment-secret', 'sk-proj-test-openai-secret', 'AIzaTestGoogleSecret', 'sk-ant-test-anthropic-secret')) {
             Assert-True (-not $jsonl.Contains($secret))
         }
-        Assert-Contains $record.error 'Authorization: Basic [credential redacted]'
         Assert-Contains $record.error 'ApiKey [credential redacted]'
         Assert-Contains $record.error 'API-key [credential redacted]'
         Assert-Contains $record.error 'Bearer [credential redacted]'
@@ -1319,6 +1341,35 @@ Invoke-Assertion 'credential sanitizer applies even when no prompt is supplied t
         Assert-Contains $jsonl 'fallback'
     } finally {
         if (Test-Path -LiteralPath $resultsPath) { Remove-Item -LiteralPath $resultsPath -Force }
+    }
+}
+
+Invoke-Assertion 'credential sanitizer redacts provider assignment labels and short credentials' {
+    $text = 'OPENAI_API_KEY=open-secret ANTHROPIC_API_KEY=anthropic-secret GOOGLE_API_KEY=google-secret API-key dash-secret Basic YWJj Bearer x'
+    $safe = ConvertTo-RunnerCredentialRedactedText $text
+    foreach ($secret in @('open-secret', 'anthropic-secret', 'google-secret', 'dash-secret', 'Basic YWJj', 'Bearer x')) {
+        Assert-True (-not $safe.Contains($secret))
+    }
+    Assert-Contains $safe 'OPENAI_API_KEY=[credential redacted]'
+    Assert-Contains $safe 'ANTHROPIC_API_KEY=[credential redacted]'
+    Assert-Contains $safe 'GOOGLE_API_KEY=[credential redacted]'
+    Assert-Contains $safe 'API-key [credential redacted]'
+    Assert-Contains $safe 'Basic [credential redacted]'
+    Assert-Contains $safe 'Bearer [credential redacted]'
+}
+
+Invoke-Assertion 'result writer rejects absolute and traversal ResultsPath values' {
+    $record = [pscustomobject]@{ run_id = New-OfflineRunId; answer = 'safe'; error = $null; diagnostic_note = 'path test' }
+    $outside = Join-Path ([System.IO.Path]::GetTempPath()) ('task5-outside-{0}.jsonl' -f [guid]::NewGuid().ToString('N'))
+    Assert-Throws { Add-PilotResultRecord -Record $record -ResultsPath $outside }
+    Assert-True (-not (Test-Path -LiteralPath $outside))
+    Assert-Throws { Add-PilotResultRecord -Record $record -ResultsPath '../task5-outside.jsonl' }
+    $valid = New-OfflineResultPath 'valid-results-path'
+    try {
+        Add-PilotResultRecord -Record $record -ResultsPath $valid
+        Assert-True (Test-Path -LiteralPath $valid)
+    } finally {
+        if (Test-Path -LiteralPath $valid) { Remove-Item -LiteralPath $valid -Force }
     }
 }
 

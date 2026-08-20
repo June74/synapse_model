@@ -1,6 +1,6 @@
 $script:RunnerProjectRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
 # Persisted strings redact exact prompt forms plus every 4-character prompt window.
-# Four contiguous characters is the conservative minimum considered prompt material; shorter matches remain ordinary text.
+# Four contiguous characters is the conservative minimum considered prompt material.
 $script:RunnerPromptFragmentThreshold = 4
 
 if ($null -eq ('RunnerNativeStreamCapture' -as [type])) {
@@ -616,15 +616,17 @@ function ConvertTo-RunnerRedactedText {
         [string]$PromptRegex,
         [string[]]$PromptFragmentVariants,
         [string]$PromptFragmentRegex,
-        [string]$PromptBase64FragmentRegex,
-        [switch]$SkipPromptFragments
+        [string]$PromptBase64FragmentRegex
     )
 
     $result = ConvertTo-RunnerNormalizedLineEndings $Text
-    $markerToken = [guid]::NewGuid().ToString('N')
+    # Separators keep our temporary markers from looking like the long Base64-looking
+    # carriers redacted below.
+    $markerToken = ([guid]::NewGuid().ToString('N') -replace '(.{4})', '$1:')
     $fullPromptMarker = "`0${markerToken}F`0"
     $fragmentMarker = "`0${markerToken}R`0"
     $base64Marker = "`0${markerToken}B`0"
+    $encodedMarker = "`0${markerToken}E`0"
     if (-not [string]::IsNullOrEmpty($PromptRegex)) {
         $result = [regex]::Replace($result, $PromptRegex, $fullPromptMarker)
     }
@@ -633,14 +635,19 @@ function ConvertTo-RunnerRedactedText {
             $result = $result.Replace($variant, $fullPromptMarker)
         }
     }
-    if (-not $SkipPromptFragments -and -not [string]::IsNullOrEmpty($PromptFragmentRegex)) {
+    # A provider can return a shifted, wrapped, or embedded UTF-8 Base64 carrier that
+    # is not one of the prompt-derived encodings. This boundary-free linear scan is
+    # deliberately conservative: any contiguous run of 32+ Base64/URL-safe chars,
+    # including padding, is treated as encoded content and never persisted.
+    $result = [regex]::Replace($result, '(?i)[A-Za-z0-9+/=_-]{32,}', $encodedMarker)
+    if (-not [string]::IsNullOrEmpty($PromptFragmentRegex)) {
         $result = [regex]::Replace($result, $PromptFragmentRegex, $fragmentMarker)
     }
     if (-not [string]::IsNullOrEmpty($PromptBase64FragmentRegex)) {
         # Generated Base64 fragment variants are replaced directly in one regex pass; no candidate substrings are decoded.
         $result = [regex]::Replace($result, $PromptBase64FragmentRegex, $base64Marker)
     }
-    return $result.Replace($fullPromptMarker, '[prompt redacted]').Replace($fragmentMarker, '[prompt fragment redacted]').Replace($base64Marker, '[prompt Base64 redacted]')
+    return $result.Replace($fullPromptMarker, '[prompt redacted]').Replace($fragmentMarker, '[prompt fragment redacted]').Replace($base64Marker, '[prompt Base64 redacted]').Replace($encodedMarker, '[encoded content redacted]')
 }
 
 function New-RunnerStreamCapture {
@@ -877,6 +884,26 @@ function Resolve-PilotProjectPath {
     return [System.IO.Path]::GetFullPath((Join-Path $script:RunnerProjectRoot $Path))
 }
 
+function Resolve-PilotResultsPath {
+    param([Parameter(Mandatory)][string]$Path)
+
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        throw 'ResultsPath must be a nonempty repository-relative path.'
+    }
+    if ([System.IO.Path]::IsPathRooted($Path)) {
+        throw 'ResultsPath must be repository-relative.'
+    }
+    if (@($Path -split '[\\/]' | Where-Object { $_ -eq '..' }).Count -gt 0) {
+        throw 'ResultsPath traversal is not allowed.'
+    }
+
+    $resolved = [System.IO.Path]::GetFullPath((Join-Path $script:RunnerProjectRoot $Path))
+    if (-not (Test-RunnerPathComponentsInsideRepository $resolved)) {
+        throw 'ResultsPath must remain inside the repository.'
+    }
+    return $resolved
+}
+
 function New-PilotPrompt {
     param(
         [Parameter(Mandatory)][object]$Candidate,
@@ -1026,17 +1053,12 @@ function Protect-PilotRecordStrings {
         if ($property.Value -is [string]) {
             # These values are generated identifiers/status metadata, not provider/freeform content;
             # preserve them for result identity while sanitizing every freeform persisted string.
-            $skipPromptFragments = $property.Name -eq 'error' -and
-                ($Record.PSObject.Properties.Name -contains 'contract_compliant') -and
-                [bool]$Record.contract_compliant -and
-                ($Record.PSObject.Properties.Name -contains 'status') -and
-                [string]$Record.status -eq 'failure'
             $safeText = if ($structuralProperties -contains $property.Name) {
                 [string]$property.Value
             } elseif ($null -eq $redactionContext) {
                 [string]$property.Value
             } else {
-                ConvertTo-RunnerRedactedText -Text $property.Value -PromptVariants $redactionContext.variants -PromptRegex $redactionContext.regex -PromptFragmentVariants $redactionContext.fragments -PromptFragmentRegex $redactionContext.fragment_regex -PromptBase64FragmentRegex $redactionContext.base64_fragment_regex -SkipPromptFragments:$skipPromptFragments
+                ConvertTo-RunnerRedactedText -Text $property.Value -PromptVariants $redactionContext.variants -PromptRegex $redactionContext.regex -PromptFragmentVariants $redactionContext.fragments -PromptFragmentRegex $redactionContext.fragment_regex -PromptBase64FragmentRegex $redactionContext.base64_fragment_regex
             }
             $property.Value = ConvertTo-RunnerCredentialRedactedText -Text $safeText
         }
@@ -1052,7 +1074,7 @@ function ConvertTo-RunnerCredentialRedactedText {
     $result = [regex]::Replace($result, '(?i)(\b(?:(?:Authorization\s*:\s*)?Basic)\s+)[A-Za-z0-9+/=_-]+', '$1[credential redacted]')
     $result = [regex]::Replace($result, '(?i)(\b(?:(?:Authorization\s*:\s*)?Api[-_]?Key)\s+)[^\s,;]+', '$1[credential redacted]')
     $result = [regex]::Replace($result, '(?i)(\bBearer\s+)[A-Za-z0-9._~+/=-]+', '$1[credential redacted]')
-    $result = [regex]::Replace($result, '(?i)(\b(?:api[_-]?key|access[_-]?token|auth(?:entication)?[_-]?token|token|secret)\s*[:=]\s*)[^\s,;]+', '$1[credential redacted]')
+    $result = [regex]::Replace($result, '(?i)(\b(?:[A-Za-z0-9]+[_-])*(?:api[_-]?key|access[_-]?token|auth(?:entication)?[_-]?token|token|secret)\s*[:=]\s*)[^\s,;]+', '$1[credential redacted]')
     $result = [regex]::Replace($result, '(?i)\bsk-(?:proj-|ant-)?[A-Za-z0-9_-]{8,}', '[credential redacted]')
     $result = [regex]::Replace($result, '(?i)\bAIza[0-9A-Za-z_-]{8,}', '[credential redacted]')
     return $result
@@ -1113,7 +1135,7 @@ function Add-PilotResultRecord {
         [AllowNull()][object]$RedactionContext
     )
 
-    $path = Resolve-PilotProjectPath $ResultsPath
+    $path = Resolve-PilotResultsPath $ResultsPath
     $parent = Split-Path -Parent $path
     if (-not (Test-Path -LiteralPath $parent)) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
     $safeRecord = Protect-PilotRecordStrings -Record $Record -Prompt $Prompt -RedactionContext $RedactionContext
