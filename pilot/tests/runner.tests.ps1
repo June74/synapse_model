@@ -152,6 +152,29 @@ Invoke-Assertion 'Invoke-NativeCandidate captures stdout stderr exit code and du
     Assert-SequenceEqual $result.arguments $command.arguments
 }
 
+Invoke-Assertion 'Invoke-NativeCandidate resolves a PowerShell executable shim' {
+    $shimPath = Join-Path $projectRoot 'pilot/tests/fixtures/native-shim.ps1'
+    $command = [pscustomobject]@{
+        executable = $shimPath
+        arguments = @('alpha', 'beta')
+        prompt = 'shim fixture prompt'
+        tool = 'codex'
+        route_id = 'codex__shim_fixture__high'
+        working_directory = $projectRoot
+    }
+    $resolved = Resolve-RunnerNativeCommand -Command $command
+    Assert-Equal $resolved.arguments[0] '-NoProfile'
+    Assert-Equal $resolved.arguments[1] '-File'
+    Assert-Equal $resolved.arguments[2] $shimPath
+    $result = Invoke-NativeCandidate -Command $command -TimeoutSeconds 10
+    Assert-Equal $result.exit_code 0
+    Assert-Contains $result.stdout 'SHIM_OK:alpha|beta'
+    Assert-Contains ($result.arguments -join '|') '-NoProfile'
+    Assert-Contains ($result.arguments -join '|') '-File'
+    Assert-Equal $result.tool 'codex'
+    Assert-Equal $result.route_id 'codex__shim_fixture__high'
+}
+
 Invoke-Assertion 'Invoke-NativeCandidate decodes Unicode output before redaction' {
     $sensitivePrompt = 'Café ΔPrOmPt 😀'
     $childScript = "[Console]::OutputEncoding = [Text.UTF8Encoding]::new(); Write-Output '$sensitivePrompt'; [Console]::Error.WriteLine('$sensitivePrompt')"

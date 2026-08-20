@@ -510,6 +510,61 @@ function New-CandidateCommand {
     }
 }
 
+function Resolve-RunnerNativeCommand {
+    param([Parameter(Mandatory)][object]$Command)
+
+    $commandInfo = @(Get-Command -Name ([string]$Command.executable) -ErrorAction Stop |
+        Where-Object { $_.CommandType -in @('Application', 'ExternalScript') } |
+        Select-Object -First 1)[0]
+    if ($null -eq $commandInfo) {
+        throw "Native executable '$($Command.executable)' could not be resolved."
+    }
+
+    $resolvedPath = [string]$commandInfo.Path
+    if ([string]::IsNullOrWhiteSpace($resolvedPath)) {
+        $resolvedPath = [string]$commandInfo.Source
+    }
+    if ([string]::IsNullOrWhiteSpace($resolvedPath)) {
+        throw "Native executable '$($Command.executable)' did not resolve to a file."
+    }
+
+    $isPowerShellShim = [System.IO.Path]::GetExtension($resolvedPath).Equals('.ps1', [System.StringComparison]::OrdinalIgnoreCase)
+    $requestedName = [System.IO.Path]::GetFileNameWithoutExtension([System.IO.Path]::GetFileName([string]$Command.executable))
+    $arguments = [System.Collections.Generic.List[string]]::new()
+    $executable = $resolvedPath
+    if ($isPowerShellShim) {
+        $launcherName = if ($requestedName -in @('pwsh', 'powershell')) { $requestedName } else { $null }
+        if ($null -ne $launcherName) {
+            $launcherInfo = @(Get-Command -Name $launcherName -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1)[0]
+            if ($null -ne $launcherInfo -and [System.IO.Path]::GetExtension([string]$launcherInfo.Path) -ne '.ps1') {
+                $executable = [string]$launcherInfo.Path
+                $isPowerShellShim = $false
+            }
+        }
+    }
+    if ($isPowerShellShim) {
+        $pwshInfo = @(Get-Command -Name 'pwsh' -CommandType Application -ErrorAction Stop | Select-Object -First 1)[0]
+        $executable = if ($null -ne $pwshInfo -and -not [string]::IsNullOrWhiteSpace([string]$pwshInfo.Path)) {
+            [string]$pwshInfo.Path
+        } else { [System.IO.Path]::Combine($PSHOME, 'pwsh.exe') }
+        $arguments.Add('-NoProfile')
+        $arguments.Add('-File')
+        $arguments.Add($resolvedPath)
+    }
+    foreach ($argument in @($Command.arguments)) {
+        $arguments.Add([string]$argument)
+    }
+
+    [pscustomobject]@{
+        executable = $executable
+        arguments = @($arguments)
+        prompt = [string]$Command.prompt
+        tool = [string]$Command.tool
+        route_id = [string]$Command.route_id
+        working_directory = [string]$Command.working_directory
+    }
+}
+
 function ConvertTo-RunnerNormalizedLineEndings {
     param([AllowNull()][string]$Text)
 
@@ -763,9 +818,10 @@ function Invoke-NativeCandidate {
         [int]$TimeoutSeconds = 0
     )
 
+    $resolvedCommand = Resolve-RunnerNativeCommand -Command $Command
     $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
-    $startInfo.FileName = [string]$Command.executable
-    $startInfo.WorkingDirectory = [string]$Command.working_directory
+    $startInfo.FileName = [string]$resolvedCommand.executable
+    $startInfo.WorkingDirectory = [string]$resolvedCommand.working_directory
     $startInfo.UseShellExecute = $false
     $startInfo.CreateNoWindow = $true
     $startInfo.RedirectStandardOutput = $true
@@ -773,7 +829,7 @@ function Invoke-NativeCandidate {
     $utf8Encoding = [System.Text.UTF8Encoding]::new($false)
     $startInfo.StandardOutputEncoding = $utf8Encoding
     $startInfo.StandardErrorEncoding = $utf8Encoding
-    foreach ($argument in @($Command.arguments)) {
+    foreach ($argument in @($resolvedCommand.arguments)) {
         [void]$startInfo.ArgumentList.Add([string]$argument)
     }
 
@@ -785,7 +841,7 @@ function Invoke-NativeCandidate {
     $promptRegex = $redactionContext.regex
     $promptFragmentRegex = $redactionContext.fragment_regex
     $promptBase64FragmentRegex = $redactionContext.base64_fragment_regex
-    $safeArguments = @($Command.arguments | ForEach-Object {
+    $safeArguments = @($resolvedCommand.arguments | ForEach-Object {
         ConvertTo-RunnerRedactedText -Text ([string]$_) -PromptVariants $orderedPromptVariants -PromptRegex $promptRegex -PromptFragmentVariants $promptFragmentVariants -PromptFragmentRegex $promptFragmentRegex -PromptBase64FragmentRegex $promptBase64FragmentRegex
     })
 
@@ -863,10 +919,10 @@ function Invoke-NativeCandidate {
             cleanup_status = $cleanupStatus
             process_id = $processId
             process_exited = $processExited
-            executable = ConvertTo-RunnerRedactedText -Text ([string]$Command.executable) -PromptVariants $orderedPromptVariants -PromptRegex $promptRegex -PromptFragmentVariants $promptFragmentVariants -PromptFragmentRegex $promptFragmentRegex -PromptBase64FragmentRegex $promptBase64FragmentRegex
-            tool = ConvertTo-RunnerRedactedText -Text ([string]$Command.tool) -PromptVariants $orderedPromptVariants -PromptRegex $promptRegex -PromptFragmentVariants $promptFragmentVariants -PromptFragmentRegex $promptFragmentRegex -PromptBase64FragmentRegex $promptBase64FragmentRegex
-            route_id = ConvertTo-RunnerRedactedText -Text ([string]$Command.route_id) -PromptVariants $orderedPromptVariants -PromptRegex $promptRegex -PromptFragmentVariants $promptFragmentVariants -PromptFragmentRegex $promptFragmentRegex -PromptBase64FragmentRegex $promptBase64FragmentRegex
-            working_directory = ConvertTo-RunnerRedactedText -Text ([string]$Command.working_directory) -PromptVariants $orderedPromptVariants -PromptRegex $promptRegex -PromptFragmentVariants $promptFragmentVariants -PromptFragmentRegex $promptFragmentRegex -PromptBase64FragmentRegex $promptBase64FragmentRegex
+            executable = ConvertTo-RunnerRedactedText -Text ([string]$resolvedCommand.executable) -PromptVariants $orderedPromptVariants -PromptRegex $promptRegex -PromptFragmentVariants $promptFragmentVariants -PromptFragmentRegex $promptFragmentRegex -PromptBase64FragmentRegex $promptBase64FragmentRegex
+            tool = [string]$Command.tool
+            route_id = [string]$Command.route_id
+            working_directory = ConvertTo-RunnerRedactedText -Text ([string]$resolvedCommand.working_directory) -PromptVariants $orderedPromptVariants -PromptRegex $promptRegex -PromptFragmentVariants $promptFragmentVariants -PromptFragmentRegex $promptFragmentRegex -PromptBase64FragmentRegex $promptBase64FragmentRegex
             arguments = $safeArguments
         }
     } finally {
