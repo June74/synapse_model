@@ -1167,15 +1167,17 @@ Invoke-Assertion 'privacy sanitizer redacts Base64 encoded prompt excerpts' {
     }
 }
 
-Invoke-Assertion 'privacy sanitizer redacts four-character alphanumeric fragments at every position' {
-    $prompt = 'prefix-AB12-suffix with additional prompt material'
+Invoke-Assertion 'privacy sanitizer redacts four-character alphabetic and alphanumeric fragments at every position' {
+    $prompt = 'prefix-ABCD-AB12-suffix with additional prompt material'
     $resultsPath = New-OfflineResultPath 'four-character-fragment'
-    $fragment = 'AB12'
+    $alphabeticFragment = 'ABCD'
+    $alphanumericFragment = 'AB12'
     try {
-        $record = [pscustomobject]@{ run_id = New-OfflineRunId; answer = "safe $fragment answer"; error = $null; diagnostic_note = 'fragment test' }
+        $record = [pscustomobject]@{ run_id = New-OfflineRunId; answer = "safe $alphabeticFragment $alphanumericFragment answer"; error = $null; diagnostic_note = 'fragment test' }
         Add-PilotResultRecord -Record $record -ResultsPath $resultsPath -Prompt $prompt
         $jsonl = Get-Content -Raw -LiteralPath $resultsPath
-        Assert-True (-not $jsonl.Contains($fragment))
+        Assert-True (-not $jsonl.Contains($alphabeticFragment))
+        Assert-True (-not $jsonl.Contains($alphanumericFragment))
         Assert-Contains $jsonl '[prompt fragment redacted]'
         Assert-Contains $jsonl 'safe'
         Assert-Contains $jsonl 'answer'
@@ -1203,6 +1205,17 @@ Invoke-Assertion 'privacy sanitizer redacts embedded Base64 prompt excerpts with
     } finally {
         if (Test-Path -LiteralPath $resultsPath) { Remove-Item -LiteralPath $resultsPath -Force }
     }
+}
+
+Invoke-Assertion 'privacy sanitizer handles a 2048-character alphanumeric answer without unbounded work' {
+    $prompt = 'prefix-ABCD-suffix with additional prompt material'
+    $context = New-RunnerPromptRedactionContext -Prompt $prompt
+    $answer = 'A' * 2048
+    $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+    $sanitized = ConvertTo-RunnerRedactedText -Text $answer -PromptVariants $context.variants -PromptRegex $context.regex -PromptFragmentVariants $context.fragments -PromptFragmentRegex $context.fragment_regex -PromptBase64FragmentRegex $context.base64_fragment_regex
+    $stopwatch.Stop()
+    Assert-Equal $sanitized $answer
+    Assert-True ($stopwatch.Elapsed.TotalSeconds -lt 5)
 }
 
 Invoke-Assertion 'privacy sanitizer redacts 31-character literal and Base64 prompt excerpts' {
@@ -1282,11 +1295,13 @@ Invoke-Assertion 'credential sanitizer preserves canonical failure meaning while
         Assert-Equal $record.status 'failure'
         Assert-Contains $record.error 'provider failed'
         Assert-Contains $record.error '[credential redacted]'
-        foreach ($secret in @('Basic dXNlcjpwYXNz', 'ApiKey bare-api-key-secret', 'Authorization: Basic dXNlcjpwYXNz', 'Authorization: ApiKey auth-api-key-secret', 'Bearer test-bearer-token', 'sk-proj-test-openai-secret', 'AIzaTestGoogleSecret', 'sk-ant-test-anthropic-secret')) {
+        foreach ($secret in @('Basic dXNlcjpwYXNz', 'API-key api-key-secret', 'ApiKey bare-api-key-secret', 'Bearer x', 'Authorization: Basic dXNlcjpwYXNz', 'Authorization: ApiKey auth-api-key-secret', 'Authorization: Bearer short-bearer', 'Bearer test-bearer-token', 'sk-proj-test-openai-secret', 'AIzaTestGoogleSecret', 'sk-ant-test-anthropic-secret')) {
             Assert-True (-not $jsonl.Contains($secret))
         }
         Assert-Contains $record.error 'Authorization: Basic [credential redacted]'
         Assert-Contains $record.error 'ApiKey [credential redacted]'
+        Assert-Contains $record.error 'API-key [credential redacted]'
+        Assert-Contains $record.error 'Bearer [credential redacted]'
     } finally {
         if (Test-Path -LiteralPath $resultsPath) { Remove-Item -LiteralPath $resultsPath -Force }
     }
