@@ -1,7 +1,8 @@
 $script:RunnerProjectRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
-# Persisted strings redact exact prompt forms plus bounded 32-character prompt fragments.
+# Persisted strings redact exact prompt forms plus every 32-character prompt window.
 $script:RunnerPromptFragmentThreshold = 32
-$script:RunnerPromptFragmentVariantLimit = 4096
+# Avoid constructing a very large case-insensitive whole-prompt regex; exact variants and windows still apply.
+$script:RunnerPromptRegexMaxLength = 2048
 
 if ($null -eq ('RunnerNativeStreamCapture' -as [type])) {
     Add-Type -TypeDefinition @'
@@ -631,7 +632,24 @@ function ConvertTo-RunnerRedactedText {
             $result = $result.Replace($fragment, '[prompt fragment redacted]')
         }
     }
-    return $result
+    $base64Pattern = '(?<![A-Za-z0-9+/=_-])[A-Za-z0-9+/=_-]{44,}(?![A-Za-z0-9+/=_-])'
+    return [regex]::Replace($result, $base64Pattern, {
+        param($match)
+        $candidate = $match.Value.Replace('-', '+').Replace('_', '/')
+        $remainder = $candidate.Length % 4
+        if ($remainder -eq 1) { return $match.Value }
+        if ($remainder -gt 0) { $candidate += ('=' * (4 - $remainder)) }
+        try {
+            $decoded = [Text.UTF8Encoding]::new($false, $true).GetString([Convert]::FromBase64String($candidate))
+            $decoded = ConvertTo-RunnerNormalizedLineEndings $decoded
+            foreach ($fragment in @($PromptFragmentVariants)) {
+                if (-not [string]::IsNullOrEmpty($fragment) -and $decoded.Contains($fragment)) {
+                    return '[prompt Base64 redacted]'
+                }
+            }
+        } catch { }
+        return $match.Value
+    })
 }
 
 function New-RunnerStreamCapture {
@@ -683,10 +701,7 @@ function New-RunnerPromptRedactionContext {
 
     $promptFragmentVariants = [System.Collections.Generic.List[string]]::new()
     if ($normalizedPromptText.Length -ge $script:RunnerPromptFragmentThreshold) {
-        $maxStart = [Math]::Min(
-            $normalizedPromptText.Length - $script:RunnerPromptFragmentThreshold,
-            $script:RunnerPromptFragmentVariantLimit - 1
-        )
+        $maxStart = $normalizedPromptText.Length - $script:RunnerPromptFragmentThreshold
         for ($index = 0; $index -le $maxStart; $index++) {
             [void]$promptFragmentVariants.Add($normalizedPromptText.Substring($index, $script:RunnerPromptFragmentThreshold))
         }
@@ -695,7 +710,7 @@ function New-RunnerPromptRedactionContext {
     [pscustomobject]@{
         variants = @($promptVariants | Sort-Object Length -Descending | Select-Object -Unique)
         fragments = @($promptFragmentVariants | Select-Object -Unique)
-        regex = if ([string]::IsNullOrEmpty($normalizedPromptText)) { '' } else { ConvertTo-RunnerPromptRegex -Prompt $normalizedPromptText }
+        regex = if ([string]::IsNullOrEmpty($normalizedPromptText) -or $normalizedPromptText.Length -gt $script:RunnerPromptRegexMaxLength) { '' } else { ConvertTo-RunnerPromptRegex -Prompt $normalizedPromptText }
     }
 }
 

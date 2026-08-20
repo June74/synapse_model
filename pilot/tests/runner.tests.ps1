@@ -1113,6 +1113,44 @@ Invoke-Assertion 'bounded privacy sanitizer redacts long prompt fragments and Ba
     }
 }
 
+Invoke-Assertion 'privacy sanitizer scans a final fragment in a 7211-plus character prompt' {
+    $longPrompt = ('long-prompt-material-' * 400) + 'FINAL_OFFSET_PROMPT_FRAGMENT_32_CHARS!!'
+    Assert-True ($longPrompt.Length -ge 7211)
+    $finalFragment = $longPrompt.Substring($longPrompt.Length - 32)
+    $resultsPath = Join-Path $projectRoot 'pilot/tests/.runner-task5-final-fragment.jsonl'
+    if (Test-Path -LiteralPath $resultsPath) { Remove-Item -LiteralPath $resultsPath -Force }
+    try {
+        $record = [pscustomobject]@{ run_id = 'offline'; answer = $finalFragment; error = $finalFragment; diagnostic_note = $finalFragment }
+        Add-PilotResultRecord -Record $record -ResultsPath $resultsPath -Prompt $longPrompt
+        $jsonl = Get-Content -Raw -LiteralPath $resultsPath
+        Assert-True (-not $jsonl.Contains($finalFragment))
+        Assert-Contains $jsonl '[prompt fragment redacted]'
+        Assert-True ($jsonl.Contains('"run_id":"offline"'))
+    } finally {
+        if (Test-Path -LiteralPath $resultsPath) { Remove-Item -LiteralPath $resultsPath -Force }
+    }
+}
+
+Invoke-Assertion 'privacy sanitizer redacts Base64 encoded prompt excerpts' {
+    $matrix = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'pilot/model_matrix.json') | ConvertFrom-Json
+    $route = @($matrix.candidates | Where-Object { $_.tool -eq 'codex' } | Select-Object -First 1)[0]
+    $prompt = New-PilotPrompt -Candidate $route
+    $excerpt = $prompt.Substring(200, 48)
+    $encodedExcerpt = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($excerpt))
+    $resultsPath = Join-Path $projectRoot 'pilot/tests/.runner-task5-base64-excerpt.jsonl'
+    if (Test-Path -LiteralPath $resultsPath) { Remove-Item -LiteralPath $resultsPath -Force }
+    try {
+        $record = [pscustomobject]@{ run_id = 'offline'; answer = $encodedExcerpt; error = $null; diagnostic_note = '4' }
+        Add-PilotResultRecord -Record $record -ResultsPath $resultsPath -Prompt $prompt
+        $jsonl = Get-Content -Raw -LiteralPath $resultsPath
+        Assert-True (-not $jsonl.Contains($encodedExcerpt))
+        Assert-Contains $jsonl '[prompt Base64 redacted]'
+        Assert-Contains $jsonl '"diagnostic_note":"4"'
+    } finally {
+        if (Test-Path -LiteralPath $resultsPath) { Remove-Item -LiteralPath $resultsPath -Force }
+    }
+}
+
 Invoke-Assertion 'RunAll continues after one injected candidate failure in the same invocation' {
     $matrix = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'pilot/model_matrix.json') | ConvertFrom-Json
     $runMatrix = [pscustomobject]@{
