@@ -876,12 +876,23 @@ function Invoke-NativeCandidate {
 }
 
 function Resolve-PilotProjectPath {
-    param([Parameter(Mandatory)][string]$Path)
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [string]$FieldName = 'Path'
+    )
 
-    if ([System.IO.Path]::IsPathRooted($Path)) {
-        return [System.IO.Path]::GetFullPath($Path)
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        throw "$FieldName must be a nonempty repository path."
     }
-    return [System.IO.Path]::GetFullPath((Join-Path $script:RunnerProjectRoot $Path))
+    $resolved = if ([System.IO.Path]::IsPathRooted($Path)) {
+        [System.IO.Path]::GetFullPath($Path)
+    } else {
+        [System.IO.Path]::GetFullPath((Join-Path $script:RunnerProjectRoot $Path))
+    }
+    if (-not (Test-RunnerPathComponentsInsideRepository $resolved)) {
+        throw "$FieldName must remain inside the repository."
+    }
+    return $resolved
 }
 
 function Resolve-PilotResultsPath {
@@ -915,8 +926,8 @@ function New-PilotPrompt {
     if ($null -eq $wrapper) {
         throw "Instruction file could not be resolved for route '$($Candidate.route_id)'."
     }
-    $contractFile = Resolve-PilotProjectPath $ContractPath
-    $taskFile = Resolve-PilotProjectPath $TaskPath
+    $contractFile = Resolve-PilotProjectPath -Path $ContractPath -FieldName 'ContractPath'
+    $taskFile = Resolve-PilotProjectPath -Path $TaskPath -FieldName 'TaskPath'
     if (-not (Test-Path -LiteralPath $contractFile -PathType Leaf)) { throw "Contract file not found: $ContractPath" }
     if (-not (Test-Path -LiteralPath $taskFile -PathType Leaf)) { throw "Task file not found: $TaskPath" }
 
@@ -1041,26 +1052,38 @@ function Protect-PilotRecordStrings {
         [AllowNull()][object]$RedactionContext
     )
 
-    $redactionContext = if ($null -ne $RedactionContext) {
-        $RedactionContext
-    } elseif ([string]::IsNullOrEmpty($Prompt)) {
-        $null
-    } else {
-        New-RunnerPromptRedactionContext -Prompt $Prompt
-    }
     $structuralProperties = @('run_id', 'route_id', 'tool', 'provider', 'model', 'effort', 'status', 'exit_code', 'duration_ms')
+    $safeDiagnosticCodes = @('completed', 'provider-declared failure', 'transport failure', 'parse failure', 'contract failure', 'execution failure')
+    $status = if ($Record.PSObject.Properties.Name -contains 'status') { [string]$Record.status } else { 'failure' }
+    $isFailure = $status -eq 'failure'
+    $isContractCompliant = ($Record.PSObject.Properties.Name -contains 'contract_compliant') -and [bool]$Record.contract_compliant
     foreach ($property in $Record.PSObject.Properties) {
-        if ($property.Value -is [string]) {
-            # These values are generated identifiers/status metadata, not provider/freeform content;
-            # preserve them for result identity while sanitizing every freeform persisted string.
-            $safeText = if ($structuralProperties -contains $property.Name) {
-                [string]$property.Value
-            } elseif ($null -eq $redactionContext) {
-                [string]$property.Value
-            } else {
-                ConvertTo-RunnerRedactedText -Text $property.Value -PromptVariants $redactionContext.variants -PromptRegex $redactionContext.regex -PromptFragmentVariants $redactionContext.fragments -PromptFragmentRegex $redactionContext.fragment_regex -PromptBase64FragmentRegex $redactionContext.base64_fragment_regex
+        if ($structuralProperties -contains $property.Name) { continue }
+        switch ($property.Name) {
+            'answer' {
+                $property.Value = if ($isFailure) { '' } else { '[provider answer omitted from JSONL for privacy]' }
             }
-            $property.Value = ConvertTo-RunnerCredentialRedactedText -Text $safeText
+            'error' {
+                if (-not $isFailure) {
+                    $property.Value = $null
+                } elseif ($isContractCompliant) {
+                    $property.Value = 'provider-declared failure'
+                } elseif (($Record.PSObject.Properties.Name -contains 'diagnostic_note') -and $safeDiagnosticCodes -contains [string]$Record.diagnostic_note) {
+                    $property.Value = [string]$Record.diagnostic_note
+                } else {
+                    $property.Value = 'execution failure'
+                }
+            }
+            'diagnostic_note' {
+                if ($safeDiagnosticCodes -notcontains [string]$property.Value) {
+                    $property.Value = 'execution failure'
+                }
+            }
+            default {
+                if ($property.Value -is [string]) {
+                    $property.Value = '[record text omitted]'
+                }
+            }
         }
     }
     return $Record
@@ -1097,8 +1120,13 @@ function New-ResultRecord {
         (-not [bool]$ProcessResult.timed_out) -and
         (-not [bool]$ProcessResult.cleanup_failed)
     $contractCompliant = $transportSuccess -and $null -ne $Canonical -and (Test-CanonicalResponse $Canonical).valid
-    $answer = if ($contractCompliant) { [string]$Canonical.answer } else { '' }
-    $error = if ($contractCompliant -and $Canonical.status -eq 'failure') { ConvertTo-PilotDiagnostic $Canonical.error } elseif ($contractCompliant) { $null } elseif ($null -ne $FailureError) { ConvertTo-PilotDiagnostic $FailureError } elseif ($null -ne $Canonical -and $Canonical.error -is [string]) { ConvertTo-PilotDiagnostic $Canonical.error } else { 'Candidate did not produce a contract-compliant response.' }
+    $safeDiagnosticCodes = @('completed', 'provider-declared failure', 'transport failure', 'parse failure', 'contract failure', 'execution failure')
+    $safeNote = if ($safeDiagnosticCodes -contains $DiagnosticNote) { $DiagnosticNote } else { 'execution failure' }
+    if ($contractCompliant -and $Canonical.status -eq 'failure') {
+        $safeNote = 'provider-declared failure'
+    }
+    $answer = if ($contractCompliant -and $Canonical.status -eq 'success') { '[provider answer omitted from JSONL for privacy]' } else { '' }
+    $error = if ($contractCompliant -and $Canonical.status -eq 'failure') { 'provider-declared failure' } elseif ($contractCompliant) { $null } else { $safeNote }
 
     $record = [ordered]@{
         run_id = $RunId
@@ -1114,7 +1142,7 @@ function New-ResultRecord {
         error = $error
         exit_code = if ($null -ne $ProcessResult) { $ProcessResult.exit_code } else { $null }
         duration_ms = if ($null -ne $ProcessResult) { [int64]$ProcessResult.duration_ms } else { [int64]0 }
-        diagnostic_note = ConvertTo-PilotDiagnostic $DiagnosticNote
+        diagnostic_note = $safeNote
     }
     if ($null -ne $ProcessResult -and $ProcessResult.PSObject.Properties.Name -contains 'cli_reported_cost_usd') {
         $processCost = ConvertTo-PilotSafeCost $ProcessResult.cli_reported_cost_usd
@@ -1154,6 +1182,7 @@ function Invoke-PilotRun {
         [scriptblock]$NativeInvoker
     )
 
+    [void](Resolve-PilotResultsPath $ResultsPath)
     $selected = @(Select-PilotCandidates -Matrix $Matrix -RunAll:$RunAll -IncludeSpecialRoutes:$IncludeSpecialRoutes -RouteId $RouteId)
     if (-not $RunAll -and [string]::IsNullOrWhiteSpace($RouteId)) { $DryRun = $true }
     $summary = [pscustomobject]@{ mode = if ($DryRun) { 'dry-run' } else { 'run' }; selected = $selected; records = @() }
@@ -1161,7 +1190,6 @@ function Invoke-PilotRun {
 
     $runId = [guid]::NewGuid().ToString('N')
     $records = [System.Collections.Generic.List[object]]::new()
-    $redactionContexts = @{}
     foreach ($candidate in $selected) {
         $processResult = $null
         $canonical = $null
@@ -1186,29 +1214,20 @@ function Invoke-PilotRun {
                     }
                     $canonicalCheck = Test-CanonicalResponse $canonical
                     if (-not $canonicalCheck.valid) {
-                        $note = 'contract validation failure'
+                        $note = 'contract failure'
                         $failure = $canonicalCheck.reason
                     }
                 } catch {
-                    $note = 'output parse failure'
+                    $note = 'parse failure'
                     $failure = $_.Exception.Message
                 }
             }
         } catch {
-            $note = 'candidate execution failure'
+            $note = 'execution failure'
             $failure = $_.Exception.Message
         }
-        $redactionContext = $null
-        if (-not [string]::IsNullOrEmpty($prompt)) {
-            if ($redactionContexts.ContainsKey($prompt)) {
-                $redactionContext = $redactionContexts[$prompt]
-            } else {
-                $redactionContext = New-RunnerPromptRedactionContext -Prompt $prompt
-                $redactionContexts[$prompt] = $redactionContext
-            }
-        }
         $record = New-ResultRecord -Candidate $candidate -ProcessResult $processResult -Canonical $canonical -RunId $runId -DiagnosticNote $note -FailureError $failure -Prompt $prompt -CliReportedCostUsd $reportedCost
-        Add-PilotResultRecord -Record $record -ResultsPath $ResultsPath -Prompt $prompt -RedactionContext $redactionContext
+        Add-PilotResultRecord -Record $record -ResultsPath $ResultsPath
         [void]$records.Add($record)
     }
     $summary.records = @($records)

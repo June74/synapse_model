@@ -945,7 +945,7 @@ Invoke-Assertion 'Invoke-PilotRun selects one route and appends one normalized r
         Assert-Equal $records[0].duration_ms 7
         Assert-True $records[0].transport_success
         Assert-True $records[0].contract_compliant
-        Assert-Equal $records[0].answer '4'
+        Assert-Equal $records[0].answer '[provider answer omitted from JSONL for privacy]'
         Assert-Equal $records[0].error $null
         Assert-True ($records[0].run_id.Length -gt 0)
     } finally {
@@ -963,6 +963,16 @@ Invoke-Assertion 'New-PilotPrompt includes only contract wrapper and task conten
     Assert-True (-not $prompt.Contains('gpt-5.6-sol'))
     Assert-True (-not $prompt.Contains('model_matrix.json'))
     Assert-True (-not $prompt.Contains('auth_verified'))
+}
+
+Invoke-Assertion 'New-PilotPrompt rejects outside ContractPath and TaskPath values' {
+    $matrix = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'pilot/model_matrix.json') | ConvertFrom-Json
+    $candidate = @($matrix.candidates | Select-Object -First 1)[0]
+    $outside = Join-Path ([System.IO.Path]::GetTempPath()) ('task5-prompt-outside-{0}.md' -f [guid]::NewGuid().ToString('N'))
+    Assert-Throws { New-PilotPrompt -Candidate $candidate -ContractPath $outside }
+    Assert-Throws { New-PilotPrompt -Candidate $candidate -TaskPath $outside }
+    Assert-Throws { New-PilotPrompt -Candidate $candidate -ContractPath '../outside-contract.md' }
+    Assert-Throws { New-PilotPrompt -Candidate $candidate -TaskPath '../outside-task.md' }
 }
 
 Invoke-Assertion 'Invoke-PilotRun continues after a failed candidate' {
@@ -1011,7 +1021,11 @@ Invoke-Assertion 'result normalization separates transport success from contract
     $resultsPath = New-OfflineResultPath 'contract'
     if (Test-Path -LiteralPath $resultsPath) { Remove-Item -LiteralPath $resultsPath -Force }
     try {
-        $invoker = { [pscustomobject]@{ exit_code = 0; stdout = (Get-Content -Raw (Join-Path $projectRoot 'pilot/tests/fixtures/contract-type-failure.json')); stderr = 'raw stderr must not be persisted'; duration_ms = 3 } }
+        $invoker = {
+            $inner = Get-Content -Raw (Join-Path $projectRoot 'pilot/tests/fixtures/contract-type-failure.json')
+            $outer = [pscustomobject]@{ type = 'item.completed'; item = [pscustomobject]@{ type = 'agent_message'; text = $inner } } | ConvertTo-Json -Compress
+            [pscustomobject]@{ exit_code = 0; stdout = $outer; stderr = 'raw stderr must not be persisted'; duration_ms = 3 }
+        }
         Invoke-PilotRun -Matrix $matrix -RouteId $route.route_id -ResultsPath $resultsPath -NativeInvoker $invoker | Out-Null
         $record = Get-Content -Raw -LiteralPath $resultsPath | ConvertFrom-Json
         foreach ($field in @('run_id','route_id','tool','provider','model','effort','transport_success','contract_compliant','status','answer','error','exit_code','duration_ms','diagnostic_note')) {
@@ -1020,7 +1034,8 @@ Invoke-Assertion 'result normalization separates transport success from contract
         Assert-True $record.transport_success
         Assert-True (-not $record.contract_compliant)
         Assert-Equal $record.answer ''
-        Assert-True ($record.error -is [string])
+        Assert-Equal $record.error 'contract failure'
+        Assert-Equal $record.diagnostic_note 'contract failure'
         Assert-True (-not ([string]$record | Select-String 'raw stderr'))
     } finally {
         if (Test-Path -LiteralPath $resultsPath) { Remove-Item -LiteralPath $resultsPath -Force }
@@ -1048,8 +1063,9 @@ Invoke-Assertion 'persisted result strings redact the complete generated prompt 
         Assert-True (-not $jsonl.Contains($encodedPrompt))
         Assert-True (-not $jsonl.Contains($fullyEncodedPrompt))
         $record = $jsonl | ConvertFrom-Json
-        Assert-Equal $record.answer '[prompt redacted]'
+        Assert-Equal $record.answer '[provider answer omitted from JSONL for privacy]'
         Assert-Equal $record.error $null
+        Assert-Equal $record.diagnostic_note 'completed'
     } finally {
         if (Test-Path -LiteralPath $resultsPath) { Remove-Item -LiteralPath $resultsPath -Force }
     }
@@ -1088,14 +1104,14 @@ Invoke-Assertion 'valid provider-declared failure preserves its canonical error'
         Assert-True $record.contract_compliant
         Assert-Equal $record.status 'failure'
         Assert-Equal $record.answer ''
-        Assert-True (-not [string]::IsNullOrWhiteSpace($record.error))
-        Assert-Contains $record.error '[prompt fragment redacted]'
+        Assert-Equal $record.error 'provider-declared failure'
+        Assert-Equal $record.diagnostic_note 'provider-declared failure'
     } finally {
         if (Test-Path -LiteralPath $resultsPath) { Remove-Item -LiteralPath $resultsPath -Force }
     }
 }
 
-Invoke-Assertion 'bounded privacy sanitizer redacts long prompt fragments and Base64 while preserving unrelated answers' {
+Invoke-Assertion 'persisted records use fixed privacy markers for provider answers' {
     $matrix = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'pilot/model_matrix.json') | ConvertFrom-Json
     $runMatrix = [pscustomobject]@{
         candidates = @($matrix.candidates | Where-Object { $_.tool -eq 'codex' } | Select-Object -First 3)
@@ -1124,105 +1140,49 @@ Invoke-Assertion 'bounded privacy sanitizer redacts long prompt fragments and Ba
         Assert-True (-not $jsonl.Contains($base64Prompt))
         $records = @(Get-Content -LiteralPath $resultsPath | ForEach-Object { $_ | ConvertFrom-Json })
         Assert-Equal $records.Count 3
-        Assert-Equal (@($records | Where-Object { $_.answer -eq '4' }).Count) 1
+        Assert-Equal (@($records | Where-Object { $_.answer -eq '[provider answer omitted from JSONL for privacy]' }).Count) 3
+        Assert-True (-not $jsonl.Contains('[prompt fragment redacted]'))
+        Assert-True (-not $jsonl.Contains('[encoded content redacted]'))
     } finally {
         if (Test-Path -LiteralPath $resultsPath) { Remove-Item -LiteralPath $resultsPath -Force }
     }
 }
 
-Invoke-Assertion 'privacy sanitizer scans a final fragment in a 7211-plus character prompt' {
+Invoke-Assertion 'persisted record boundary uses fixed markers and stays bounded' {
     $longPrompt = ('long-prompt-material-' * 400) + 'FINAL_OFFSET_PROMPT_FRAGMENT_32_CHARS!!'
     Assert-True ($longPrompt.Length -ge 7211)
-    $finalFragment = $longPrompt.Substring($longPrompt.Length - 32)
-    $resultsPath = New-OfflineResultPath 'final-fragment'
-    if (Test-Path -LiteralPath $resultsPath) { Remove-Item -LiteralPath $resultsPath -Force }
+    $encodedPrompt = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($longPrompt))
+    $resultsPath = New-OfflineResultPath 'fixed-record-boundary'
     try {
-        $record = [pscustomobject]@{ run_id = New-OfflineRunId; answer = $finalFragment; error = $finalFragment; diagnostic_note = $finalFragment }
+        $record = [pscustomobject]@{
+            run_id = New-OfflineRunId
+            route_id = 'codex__privacy__high'
+            tool = 'codex'
+            provider = 'openai'
+            model = 'privacy-model'
+            effort = 'high'
+            transport_success = $true
+            contract_compliant = $true
+            status = 'success'
+            answer = "$longPrompt $encodedPrompt"
+            error = $longPrompt
+            exit_code = 0
+            duration_ms = 7
+            diagnostic_note = $longPrompt
+        }
+        $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
         Add-PilotResultRecord -Record $record -ResultsPath $resultsPath -Prompt $longPrompt
+        $stopwatch.Stop()
         $jsonl = Get-Content -Raw -LiteralPath $resultsPath
-        Assert-True (-not $jsonl.Contains($finalFragment))
-        Assert-Contains $jsonl '[prompt fragment redacted]'
-        Assert-True ($jsonl.Contains('"run_id":"offline-'))
-    } finally {
-        if (Test-Path -LiteralPath $resultsPath) { Remove-Item -LiteralPath $resultsPath -Force }
-    }
-}
-
-Invoke-Assertion 'privacy sanitizer redacts Base64 encoded prompt excerpts' {
-    $matrix = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'pilot/model_matrix.json') | ConvertFrom-Json
-    $route = @($matrix.candidates | Where-Object { $_.tool -eq 'codex' } | Select-Object -First 1)[0]
-    $prompt = New-PilotPrompt -Candidate $route
-    $excerpt = $prompt.Substring(200, 48)
-    $encodedExcerpt = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($excerpt))
-    $resultsPath = New-OfflineResultPath 'base64-excerpt'
-    if (Test-Path -LiteralPath $resultsPath) { Remove-Item -LiteralPath $resultsPath -Force }
-    try {
-        $record = [pscustomobject]@{ run_id = New-OfflineRunId; answer = $encodedExcerpt; error = $null; diagnostic_note = '4' }
-        Add-PilotResultRecord -Record $record -ResultsPath $resultsPath -Prompt $prompt
-        $jsonl = Get-Content -Raw -LiteralPath $resultsPath
-        Assert-True (-not $jsonl.Contains($encodedExcerpt))
-        Assert-Contains $jsonl '[encoded content redacted]'
-        Assert-Contains $jsonl '"diagnostic_note":"4"'
-    } finally {
-        if (Test-Path -LiteralPath $resultsPath) { Remove-Item -LiteralPath $resultsPath -Force }
-    }
-}
-
-Invoke-Assertion 'privacy sanitizer redacts four-character alphabetic and alphanumeric fragments at every position' {
-    $prompt = 'prefix-ABCD-AB12-suffix with additional prompt material'
-    $resultsPath = New-OfflineResultPath 'four-character-fragment'
-    $alphabeticFragment = 'ABCD'
-    $alphanumericFragment = 'AB12'
-    try {
-        $record = [pscustomobject]@{ run_id = New-OfflineRunId; answer = "safe $alphabeticFragment $alphanumericFragment answer"; error = $null; diagnostic_note = 'fragment test' }
-        Add-PilotResultRecord -Record $record -ResultsPath $resultsPath -Prompt $prompt
-        $jsonl = Get-Content -Raw -LiteralPath $resultsPath
-        Assert-True (-not $jsonl.Contains($alphabeticFragment))
-        Assert-True (-not $jsonl.Contains($alphanumericFragment))
-        Assert-Contains $jsonl '[prompt fragment redacted]'
-        Assert-Contains $jsonl 'safe'
-        Assert-Contains $jsonl 'answer'
-    } finally {
-        if (Test-Path -LiteralPath $resultsPath) { Remove-Item -LiteralPath $resultsPath -Force }
-    }
-}
-
-Invoke-Assertion 'privacy sanitizer redacts embedded Base64 prompt excerpts without token boundaries' {
-    $matrix = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'pilot/model_matrix.json') | ConvertFrom-Json
-    $route = @($matrix.candidates | Where-Object { $_.tool -eq 'codex' } | Select-Object -First 1)[0]
-    $prompt = New-PilotPrompt -Candidate $route
-    $excerpt = $prompt.Substring(200, 48)
-    $encodedExcerpt = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($excerpt))
-    $embedded = "xx${encodedExcerpt}yy"
-    $resultsPath = New-OfflineResultPath 'embedded-base64'
-    try {
-        $record = [pscustomobject]@{ run_id = New-OfflineRunId; answer = "safe $embedded answer"; error = $null; diagnostic_note = 'embedded base64 test' }
-        Add-PilotResultRecord -Record $record -ResultsPath $resultsPath -Prompt $prompt
-        $jsonl = Get-Content -Raw -LiteralPath $resultsPath
-        Assert-True (-not $jsonl.Contains($encodedExcerpt))
-        Assert-Contains $jsonl '[encoded content redacted]'
-        Assert-Contains $jsonl 'safe'
-        Assert-Contains $jsonl 'answer'
-    } finally {
-        if (Test-Path -LiteralPath $resultsPath) { Remove-Item -LiteralPath $resultsPath -Force }
-    }
-}
-
-Invoke-Assertion 'privacy sanitizer redacts shifted UTF-8 Base64 carriers' {
-    $excerpt = 'shifted UTF-8 carrier with distinctive prompt material'
-    $carrierBytes = [byte[]]::new($excerpt.Length + 2)
-    $carrierBytes[0] = 0xA1
-    [Array]::Copy([Text.Encoding]::UTF8.GetBytes($excerpt), 0, $carrierBytes, 1, $excerpt.Length)
-    $carrierBytes[$carrierBytes.Length - 1] = 0xB2
-    $encodedCarrier = [Convert]::ToBase64String($carrierBytes)
-    $resultsPath = New-OfflineResultPath 'shifted-base64'
-    try {
-        $record = [pscustomobject]@{ run_id = New-OfflineRunId; answer = "wrapped xx${encodedCarrier}yy"; error = 'safe failure'; diagnostic_note = 'shifted carrier' }
-        Add-PilotResultRecord -Record $record -ResultsPath $resultsPath -Prompt $excerpt
-        $jsonl = Get-Content -Raw -LiteralPath $resultsPath
-        Assert-True (-not $jsonl.Contains($encodedCarrier))
-        Assert-Contains $jsonl '[encoded content redacted]'
-        Assert-Contains $jsonl 'wrapped'
+        $persisted = $jsonl | ConvertFrom-Json
+        Assert-Equal $persisted.answer '[provider answer omitted from JSONL for privacy]'
+        Assert-Equal $persisted.error $null
+        Assert-Equal $persisted.diagnostic_note 'execution failure'
+        Assert-Equal $persisted.route_id 'codex__privacy__high'
+        Assert-True (-not $jsonl.Contains($longPrompt))
+        Assert-True (-not $jsonl.Contains($encodedPrompt))
+        Assert-True ($stopwatch.Elapsed.TotalSeconds -lt 2)
+        [void]($jsonl | ConvertFrom-Json)
     } finally {
         if (Test-Path -LiteralPath $resultsPath) { Remove-Item -LiteralPath $resultsPath -Force }
     }
@@ -1240,68 +1200,6 @@ Invoke-Assertion 'privacy sanitizer handles a 2048-character alphanumeric answer
     Assert-True ($stopwatch.Elapsed.TotalSeconds -lt 5)
 }
 
-Invoke-Assertion 'privacy sanitizer redacts 31-character literal and Base64 prompt excerpts' {
-    $matrix = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'pilot/model_matrix.json') | ConvertFrom-Json
-    $route = @($matrix.candidates | Where-Object { $_.tool -eq 'codex' } | Select-Object -First 1)[0]
-    $prompt = New-PilotPrompt -Candidate $route
-    $excerpt = $prompt.Substring(240, 31)
-    $encodedExcerpt = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($excerpt))
-    $resultsPath = New-OfflineResultPath '31-fragment'
-    if (Test-Path -LiteralPath $resultsPath) { Remove-Item -LiteralPath $resultsPath -Force }
-    try {
-        $record = [pscustomobject]@{ run_id = New-OfflineRunId; answer = "$excerpt $encodedExcerpt"; error = $null; diagnostic_note = '4' }
-        Add-PilotResultRecord -Record $record -ResultsPath $resultsPath -Prompt $prompt
-        $jsonl = Get-Content -Raw -LiteralPath $resultsPath
-        Assert-True (-not $jsonl.Contains($excerpt))
-        Assert-True (-not $jsonl.Contains($encodedExcerpt))
-        Assert-Contains $jsonl '"diagnostic_note":"4"'
-    } finally {
-        if (Test-Path -LiteralPath $resultsPath) { Remove-Item -LiteralPath $resultsPath -Force }
-    }
-}
-
-Invoke-Assertion 'privacy sanitizer redacts 15-character literal and Base64 prompt excerpts' {
-    $matrix = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'pilot/model_matrix.json') | ConvertFrom-Json
-    $route = @($matrix.candidates | Where-Object { $_.tool -eq 'codex' } | Select-Object -First 1)[0]
-    $prompt = New-PilotPrompt -Candidate $route
-    $excerpt = $prompt.Substring(280, 15)
-    $encodedExcerpt = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($excerpt))
-    $resultsPath = New-OfflineResultPath '15-fragment'
-    if (Test-Path -LiteralPath $resultsPath) { Remove-Item -LiteralPath $resultsPath -Force }
-    try {
-        $record = [pscustomobject]@{ run_id = New-OfflineRunId; answer = "$excerpt $encodedExcerpt"; error = $null; diagnostic_note = '4' }
-        Add-PilotResultRecord -Record $record -ResultsPath $resultsPath -Prompt $prompt
-        $jsonl = Get-Content -Raw -LiteralPath $resultsPath
-        Assert-True (-not $jsonl.Contains($excerpt))
-        Assert-True (-not $jsonl.Contains($encodedExcerpt))
-        Assert-Contains $jsonl '[prompt fragment redacted]'
-        Assert-Contains $jsonl '[prompt Base64 redacted]'
-        Assert-Contains $jsonl '"diagnostic_note":"4"'
-    } finally {
-        if (Test-Path -LiteralPath $resultsPath) { Remove-Item -LiteralPath $resultsPath -Force }
-    }
-}
-
-Invoke-Assertion 'privacy sanitizer redacts Unicode and JSON-escaped excerpts at the end of a long prompt' {
-    $longPrompt = ('long-unicode-prefix-' * 400) + ' Ω漢字 final prompt material '
-    Assert-True ($longPrompt.Length -ge 7211)
-    $excerpt = $longPrompt.Substring($longPrompt.Length - 31)
-    $jsonExcerpt = ($excerpt | ConvertTo-Json -Compress).Substring(1)
-    $jsonExcerpt = $jsonExcerpt.Substring(0, $jsonExcerpt.Length - 1)
-    $resultsPath = New-OfflineResultPath 'long-json-fragment'
-    if (Test-Path -LiteralPath $resultsPath) { Remove-Item -LiteralPath $resultsPath -Force }
-    try {
-        $record = [pscustomobject]@{ run_id = New-OfflineRunId; answer = $jsonExcerpt; error = $null; diagnostic_note = '4' }
-        Add-PilotResultRecord -Record $record -ResultsPath $resultsPath -Prompt $longPrompt
-        $jsonl = Get-Content -Raw -LiteralPath $resultsPath
-        Assert-True (-not $jsonl.Contains($jsonExcerpt))
-        Assert-Contains $jsonl '[prompt fragment redacted]'
-        Assert-Contains $jsonl '"diagnostic_note":"4"'
-    } finally {
-        if (Test-Path -LiteralPath $resultsPath) { Remove-Item -LiteralPath $resultsPath -Force }
-    }
-}
-
 Invoke-Assertion 'credential sanitizer preserves canonical failure meaning while removing recognizable secrets' {
     $matrix = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'pilot/model_matrix.json') | ConvertFrom-Json
     $route = @($matrix.candidates | Where-Object { $_.tool -eq 'codex' } | Select-Object -First 1)[0]
@@ -1315,15 +1213,12 @@ Invoke-Assertion 'credential sanitizer preserves canonical failure meaning while
         Assert-True $record.transport_success
         Assert-True $record.contract_compliant
         Assert-Equal $record.status 'failure'
-        Assert-True (-not [string]::IsNullOrWhiteSpace($record.error))
-        Assert-Contains $record.error '[prompt fragment redacted]'
-        Assert-Contains $record.error '[credential redacted]'
+        Assert-Equal $record.answer ''
+        Assert-Equal $record.error 'provider-declared failure'
+        Assert-Equal $record.diagnostic_note 'provider-declared failure'
         foreach ($secret in @('Basic dXNlcjpwYXNz', 'API-key api-key-secret', 'ApiKey bare-api-key-secret', 'Bearer x', 'Authorization: Basic dXNlcjpwYXNz', 'Authorization: ApiKey auth-api-key-secret', 'Authorization: Bearer short-bearer', 'Bearer test-bearer-token', 'api_key=sk-proj-test-openai-secret', 'OPENAI_API_KEY=openai-assignment-secret', 'ANTHROPIC_API_KEY=anthropic-assignment-secret', 'GOOGLE_API_KEY=google-assignment-secret', 'sk-proj-test-openai-secret', 'AIzaTestGoogleSecret', 'sk-ant-test-anthropic-secret')) {
             Assert-True (-not $jsonl.Contains($secret))
         }
-        Assert-Contains $record.error 'ApiKey [credential redacted]'
-        Assert-Contains $record.error 'API-key [credential redacted]'
-        Assert-Contains $record.error 'Bearer [credential redacted]'
     } finally {
         if (Test-Path -LiteralPath $resultsPath) { Remove-Item -LiteralPath $resultsPath -Force }
     }
@@ -1333,12 +1228,12 @@ Invoke-Assertion 'credential sanitizer applies even when no prompt is supplied t
     $resultsPath = New-OfflineResultPath 'credential-no-prompt'
     if (Test-Path -LiteralPath $resultsPath) { Remove-Item -LiteralPath $resultsPath -Force }
     try {
-        $record = [pscustomobject]@{ run_id = New-OfflineRunId; answer = ''; error = 'fallback api_key=sk-proj-test-openai-secret'; diagnostic_note = 'provider failure' }
+        $record = [pscustomobject]@{ run_id = New-OfflineRunId; status = 'failure'; contract_compliant = $false; answer = ''; error = 'fallback api_key=sk-proj-test-openai-secret'; diagnostic_note = 'provider failure' }
         Add-PilotResultRecord -Record $record -ResultsPath $resultsPath
         $jsonl = Get-Content -Raw -LiteralPath $resultsPath
         Assert-True (-not $jsonl.Contains('sk-proj-test-openai-secret'))
-        Assert-Contains $jsonl '[credential redacted]'
-        Assert-Contains $jsonl 'fallback'
+        Assert-Contains $jsonl '"error":"execution failure"'
+        Assert-Contains $jsonl '"diagnostic_note":"execution failure"'
     } finally {
         if (Test-Path -LiteralPath $resultsPath) { Remove-Item -LiteralPath $resultsPath -Force }
     }
