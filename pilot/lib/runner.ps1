@@ -884,11 +884,13 @@ function Resolve-PilotProjectPath {
     if ([string]::IsNullOrWhiteSpace($Path)) {
         throw "$FieldName must be a nonempty repository path."
     }
-    $resolved = if ([System.IO.Path]::IsPathRooted($Path)) {
-        [System.IO.Path]::GetFullPath($Path)
-    } else {
-        [System.IO.Path]::GetFullPath((Join-Path $script:RunnerProjectRoot $Path))
+    if ([System.IO.Path]::IsPathRooted($Path)) {
+        throw "$FieldName must be repository-relative."
     }
+    if (@($Path -split '[\\/]' | Where-Object { $_ -eq '..' }).Count -gt 0) {
+        throw "$FieldName traversal is not allowed."
+    }
+    $resolved = [System.IO.Path]::GetFullPath((Join-Path $script:RunnerProjectRoot $Path))
     if (-not (Test-RunnerPathComponentsInsideRepository $resolved)) {
         throw "$FieldName must remain inside the repository."
     }

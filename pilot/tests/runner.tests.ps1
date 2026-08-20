@@ -969,6 +969,10 @@ Invoke-Assertion 'New-PilotPrompt rejects outside ContractPath and TaskPath valu
     $matrix = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'pilot/model_matrix.json') | ConvertFrom-Json
     $candidate = @($matrix.candidates | Select-Object -First 1)[0]
     $outside = Join-Path ([System.IO.Path]::GetTempPath()) ('task5-prompt-outside-{0}.md' -f [guid]::NewGuid().ToString('N'))
+    $internalContract = Join-Path $projectRoot 'pilot/shared/experiment_contract.md'
+    $internalTask = Join-Path $projectRoot 'pilot/tasks/001_smoke_test.md'
+    Assert-Throws { New-PilotPrompt -Candidate $candidate -ContractPath $internalContract }
+    Assert-Throws { New-PilotPrompt -Candidate $candidate -TaskPath $internalTask }
     Assert-Throws { New-PilotPrompt -Candidate $candidate -ContractPath $outside }
     Assert-Throws { New-PilotPrompt -Candidate $candidate -TaskPath $outside }
     Assert-Throws { New-PilotPrompt -Candidate $candidate -ContractPath '../outside-contract.md' }
