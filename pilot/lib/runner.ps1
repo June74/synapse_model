@@ -62,6 +62,22 @@ function New-RouteId {
     return ($parts -join '__')
 }
 
+function ConvertFrom-RunnerCanonicalJsonBody {
+    param([Parameter(Mandatory)][string]$Text)
+
+    $body = $Text.Trim()
+    $fence = [regex]::Match($body, '\A```json\s*(?<body>[\s\S]*?)\s*```\z', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+    if ($fence.Success) {
+        $body = $fence.Groups['body'].Value
+    }
+
+    try {
+        return ($body | ConvertFrom-Json -Depth 20)
+    } catch {
+        throw "Invalid canonical JSON body: $($_.Exception.Message)"
+    }
+}
+
 function ConvertFrom-CodexOutput {
     param([Parameter(Mandatory)][string]$Text)
 
@@ -84,11 +100,7 @@ function ConvertFrom-CodexOutput {
         throw 'Codex output did not contain a completed agent_message event.'
     }
 
-    try {
-        return ($lastMessage | ConvertFrom-Json -Depth 20)
-    } catch {
-        throw "Invalid inner JSON in Codex agent_message: $($_.Exception.Message)"
-    }
+    return (ConvertFrom-RunnerCanonicalJsonBody -Text $lastMessage)
 }
 
 function ConvertFrom-ClaudeOutput {
@@ -100,26 +112,81 @@ function ConvertFrom-ClaudeOutput {
         throw "Invalid Claude output JSON: $($_.Exception.Message)"
     }
 
-    if (-not ($outer.PSObject.Properties.Name -contains 'result') -or
-        $outer.result -isnot [string] -or [string]::IsNullOrWhiteSpace($outer.result)) {
-        throw 'Claude output is missing a usable result string.'
+    if (-not ($outer.PSObject.Properties.Name -contains 'result')) {
+        throw 'Claude output is missing a usable result.'
     }
 
-    try {
-        return ($outer.result | ConvertFrom-Json -Depth 20)
-    } catch {
-        throw "Invalid inner JSON in Claude result: $($_.Exception.Message)"
+    if ($outer.result -is [string]) {
+        if ([string]::IsNullOrWhiteSpace($outer.result)) {
+            throw 'Claude output is missing a usable result string.'
+        }
+        return (ConvertFrom-RunnerCanonicalJsonBody -Text $outer.result)
     }
+
+    if ($outer.result -is [System.Management.Automation.PSCustomObject]) {
+        return $outer.result
+    }
+
+    throw 'Claude output result must be a JSON string or object.'
 }
 
 function ConvertFrom-AgyOutput {
     param([Parameter(Mandatory)][string]$Text)
 
-    try {
-        $outer = $Text | ConvertFrom-Json -Depth 20
-    } catch {
-        throw "Invalid Agy output JSON: $($_.Exception.Message)"
+    $envelopes = [System.Collections.Generic.List[object]]::new()
+    $startIndex = -1
+    $depth = 0
+    $inString = $false
+    $escaped = $false
+    for ($index = 0; $index -lt $Text.Length; $index++) {
+        $character = $Text[$index]
+        if ($startIndex -lt 0) {
+            if ($character -eq '{') {
+                $startIndex = $index
+                $depth = 1
+                $inString = $false
+                $escaped = $false
+            }
+            continue
+        }
+
+        if ($inString) {
+            if ($escaped) {
+                $escaped = $false
+            } elseif ($character -eq '\') {
+                $escaped = $true
+            } elseif ($character -eq '"') {
+                $inString = $false
+            }
+            continue
+        }
+
+        if ($character -eq '"') {
+            $inString = $true
+        } elseif ($character -eq '{') {
+            $depth++
+        } elseif ($character -eq '}') {
+            $depth--
+            if ($depth -eq 0) {
+                $candidateText = $Text.Substring($startIndex, $index - $startIndex + 1)
+                try {
+                    $candidate = $candidateText | ConvertFrom-Json -Depth 20
+                    if (($candidate.PSObject.Properties.Name -contains 'structured_output') -or
+                        ($candidate.PSObject.Properties.Name -contains 'response')) {
+                        $envelopes.Add($candidate)
+                    }
+                } catch {
+                }
+                $startIndex = -1
+            }
+        }
     }
+
+    if ($envelopes.Count -ne 1) {
+        throw "Agy output must contain exactly one recognizable JSON envelope; found $($envelopes.Count)."
+    }
+
+    $outer = $envelopes[0]
 
     $hasStructured = $outer.PSObject.Properties.Name -contains 'structured_output'
     if ($hasStructured -and $null -ne $outer.structured_output) {
@@ -468,7 +535,7 @@ function New-CandidateCommand {
     switch ($Candidate.tool) {
         'codex' {
             $executable = 'codex'
-            $arguments.AddRange([string[]]@('exec', '--skip-git-repo-check', '--ephemeral', '--json', '-s', 'read-only', '--model', [string]$Candidate.model))
+            $arguments.AddRange([string[]]@('exec', '--skip-git-repo-check', '--ephemeral', '--json', '--output-schema', 'pilot/shared/response_schema.json', '-s', 'read-only', '--model', [string]$Candidate.model))
             if (-not [string]::IsNullOrWhiteSpace([string]$Candidate.effort)) {
                 $arguments.Add('-c')
                 $arguments.Add(('model_reasoning_effort="{0}"' -f $Candidate.effort))
@@ -484,7 +551,8 @@ function New-CandidateCommand {
             if ($Candidate.model -ne 'claude-haiku-4-5' -and -not [string]::IsNullOrWhiteSpace([string]$Candidate.effort)) {
                 $arguments.AddRange([string[]]@('--effort', [string]$Candidate.effort))
             }
-            $arguments.AddRange([string[]]@('--output-format', 'json', '--max-turns', '1', '--no-session-persistence', '--disable-slash-commands', '--tools', '', $Prompt))
+            $claudeSchema = '{"type":"object","additionalProperties":false,"properties":{"status":{"type":"string","enum":["success","failure"]},"answer":{"type":"string"},"error":{"type":["string","null"]}},"required":["status","answer","error"]}'
+            $arguments.AddRange([string[]]@('--output-format', 'json', '--json-schema', $claudeSchema, '--max-turns', '1', '--no-session-persistence', '--disable-slash-commands', $Prompt, '--tools', ''))
         }
         'agy' {
             $executable = 'agy'
