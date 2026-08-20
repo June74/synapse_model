@@ -1,4 +1,7 @@
 $script:RunnerProjectRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
+# Persisted strings redact exact prompt forms plus bounded 32-character prompt fragments.
+$script:RunnerPromptFragmentThreshold = 32
+$script:RunnerPromptFragmentVariantLimit = 4096
 
 if ($null -eq ('RunnerNativeStreamCapture' -as [type])) {
     Add-Type -TypeDefinition @'
@@ -610,7 +613,8 @@ function ConvertTo-RunnerRedactedText {
     param(
         [AllowNull()][string]$Text,
         [string[]]$PromptVariants,
-        [string]$PromptRegex
+        [string]$PromptRegex,
+        [string[]]$PromptFragmentVariants
     )
 
     $result = ConvertTo-RunnerNormalizedLineEndings $Text
@@ -620,6 +624,11 @@ function ConvertTo-RunnerRedactedText {
     foreach ($variant in @($PromptVariants)) {
         if (-not [string]::IsNullOrEmpty($variant)) {
             $result = $result.Replace($variant, '[prompt redacted]')
+        }
+    }
+    foreach ($fragment in @($PromptFragmentVariants)) {
+        if (-not [string]::IsNullOrEmpty($fragment)) {
+            $result = $result.Replace($fragment, '[prompt fragment redacted]')
         }
     }
     return $result
@@ -666,10 +675,26 @@ function New-RunnerPromptRedactionContext {
                 $promptVariants.Add($jsonSpelling.Substring(1, $jsonSpelling.Length - 2))
             }
         }
+        $base64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($variant))
+        $promptVariants.Add($base64)
+        $promptVariants.Add($base64.TrimEnd('='))
+        $promptVariants.Add($base64.Replace('+', '-').Replace('/', '_').TrimEnd('='))
+    }
+
+    $promptFragmentVariants = [System.Collections.Generic.List[string]]::new()
+    if ($normalizedPromptText.Length -ge $script:RunnerPromptFragmentThreshold) {
+        $maxStart = [Math]::Min(
+            $normalizedPromptText.Length - $script:RunnerPromptFragmentThreshold,
+            $script:RunnerPromptFragmentVariantLimit - 1
+        )
+        for ($index = 0; $index -le $maxStart; $index++) {
+            [void]$promptFragmentVariants.Add($normalizedPromptText.Substring($index, $script:RunnerPromptFragmentThreshold))
+        }
     }
 
     [pscustomobject]@{
         variants = @($promptVariants | Sort-Object Length -Descending | Select-Object -Unique)
+        fragments = @($promptFragmentVariants | Select-Object -Unique)
         regex = if ([string]::IsNullOrEmpty($normalizedPromptText)) { '' } else { ConvertTo-RunnerPromptRegex -Prompt $normalizedPromptText }
     }
 }
@@ -698,9 +723,10 @@ function Invoke-NativeCandidate {
     $promptText = if ($null -ne $promptProperty) { [string]$promptProperty.Value } else { '' }
     $redactionContext = New-RunnerPromptRedactionContext -Prompt $promptText
     $orderedPromptVariants = $redactionContext.variants
+    $promptFragmentVariants = $redactionContext.fragments
     $promptRegex = $redactionContext.regex
     $safeArguments = @($Command.arguments | ForEach-Object {
-        ConvertTo-RunnerRedactedText -Text ([string]$_) -PromptVariants $orderedPromptVariants -PromptRegex $promptRegex
+        ConvertTo-RunnerRedactedText -Text ([string]$_) -PromptVariants $orderedPromptVariants -PromptRegex $promptRegex -PromptFragmentVariants $promptFragmentVariants
     })
 
     $process = [System.Diagnostics.Process]::new()
@@ -755,8 +781,8 @@ function Invoke-NativeCandidate {
 
         $stdout = Receive-RunnerStreamOutput -Chunks $stdoutChunks
         $stderr = Receive-RunnerStreamOutput -Chunks $stderrChunks
-        $stdout = ConvertTo-RunnerRedactedText -Text $stdout -PromptVariants $orderedPromptVariants -PromptRegex $promptRegex
-        $stderr = ConvertTo-RunnerRedactedText -Text $stderr -PromptVariants $orderedPromptVariants -PromptRegex $promptRegex
+        $stdout = ConvertTo-RunnerRedactedText -Text $stdout -PromptVariants $orderedPromptVariants -PromptRegex $promptRegex -PromptFragmentVariants $promptFragmentVariants
+        $stderr = ConvertTo-RunnerRedactedText -Text $stderr -PromptVariants $orderedPromptVariants -PromptRegex $promptRegex -PromptFragmentVariants $promptFragmentVariants
         if ($cleanupIssues.Count -gt 0) {
             $cleanupFailed = $true
             if ($timedOut) {
@@ -777,10 +803,10 @@ function Invoke-NativeCandidate {
             cleanup_status = $cleanupStatus
             process_id = $processId
             process_exited = $processExited
-            executable = ConvertTo-RunnerRedactedText -Text ([string]$Command.executable) -PromptVariants $orderedPromptVariants -PromptRegex $promptRegex
-            tool = ConvertTo-RunnerRedactedText -Text ([string]$Command.tool) -PromptVariants $orderedPromptVariants -PromptRegex $promptRegex
-            route_id = ConvertTo-RunnerRedactedText -Text ([string]$Command.route_id) -PromptVariants $orderedPromptVariants -PromptRegex $promptRegex
-            working_directory = ConvertTo-RunnerRedactedText -Text ([string]$Command.working_directory) -PromptVariants $orderedPromptVariants -PromptRegex $promptRegex
+            executable = ConvertTo-RunnerRedactedText -Text ([string]$Command.executable) -PromptVariants $orderedPromptVariants -PromptRegex $promptRegex -PromptFragmentVariants $promptFragmentVariants
+            tool = ConvertTo-RunnerRedactedText -Text ([string]$Command.tool) -PromptVariants $orderedPromptVariants -PromptRegex $promptRegex -PromptFragmentVariants $promptFragmentVariants
+            route_id = ConvertTo-RunnerRedactedText -Text ([string]$Command.route_id) -PromptVariants $orderedPromptVariants -PromptRegex $promptRegex -PromptFragmentVariants $promptFragmentVariants
+            working_directory = ConvertTo-RunnerRedactedText -Text ([string]$Command.working_directory) -PromptVariants $orderedPromptVariants -PromptRegex $promptRegex -PromptFragmentVariants $promptFragmentVariants
             arguments = $safeArguments
         }
     } finally {
@@ -938,7 +964,7 @@ function Protect-PilotRecordStrings {
     $redactionContext = New-RunnerPromptRedactionContext -Prompt $Prompt
     foreach ($property in $Record.PSObject.Properties) {
         if ($property.Value -is [string]) {
-            $property.Value = ConvertTo-RunnerRedactedText -Text $property.Value -PromptVariants $redactionContext.variants -PromptRegex $redactionContext.regex
+            $property.Value = ConvertTo-RunnerRedactedText -Text $property.Value -PromptVariants $redactionContext.variants -PromptRegex $redactionContext.regex -PromptFragmentVariants $redactionContext.fragments
         }
     }
     return $Record
@@ -962,7 +988,7 @@ function New-ResultRecord {
         (-not [bool]$ProcessResult.cleanup_failed)
     $contractCompliant = $transportSuccess -and $null -ne $Canonical -and (Test-CanonicalResponse $Canonical).valid
     $answer = if ($contractCompliant) { [string]$Canonical.answer } else { '' }
-    $error = if ($contractCompliant) { $null } elseif ($null -ne $FailureError) { ConvertTo-PilotDiagnostic $FailureError } elseif ($null -ne $Canonical -and $Canonical.error -is [string]) { ConvertTo-PilotDiagnostic $Canonical.error } else { 'Candidate did not produce a contract-compliant response.' }
+    $error = if ($contractCompliant -and $Canonical.status -eq 'failure') { ConvertTo-PilotDiagnostic $Canonical.error } elseif ($contractCompliant) { $null } elseif ($null -ne $FailureError) { ConvertTo-PilotDiagnostic $FailureError } elseif ($null -ne $Canonical -and $Canonical.error -is [string]) { ConvertTo-PilotDiagnostic $Canonical.error } else { 'Candidate did not produce a contract-compliant response.' }
 
     $record = [ordered]@{
         run_id = $RunId

@@ -1059,6 +1059,60 @@ Invoke-Assertion 'Claude envelope cost metadata is recorded without persisting p
     }
 }
 
+Invoke-Assertion 'valid provider-declared failure preserves its canonical error' {
+    $matrix = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'pilot/model_matrix.json') | ConvertFrom-Json
+    $route = @($matrix.candidates | Where-Object { $_.tool -eq 'codex' } | Select-Object -First 1)[0]
+    $resultsPath = Join-Path $projectRoot 'pilot/tests/.runner-task5-canonical-failure.jsonl'
+    if (Test-Path -LiteralPath $resultsPath) { Remove-Item -LiteralPath $resultsPath -Force }
+    try {
+        $invoker = { [pscustomobject]@{ exit_code = 0; stdout = (Get-Content -Raw (Join-Path $projectRoot 'pilot/tests/fixtures/codex-failure.jsonl')); stderr = ''; duration_ms = 3 } }
+        Invoke-PilotRun -Matrix $matrix -RouteId $route.route_id -ResultsPath $resultsPath -NativeInvoker $invoker | Out-Null
+        $record = Get-Content -Raw -LiteralPath $resultsPath | ConvertFrom-Json
+        Assert-True $record.transport_success
+        Assert-True $record.contract_compliant
+        Assert-Equal $record.status 'failure'
+        Assert-Equal $record.answer ''
+        Assert-Equal $record.error 'provider declared failure'
+    } finally {
+        if (Test-Path -LiteralPath $resultsPath) { Remove-Item -LiteralPath $resultsPath -Force }
+    }
+}
+
+Invoke-Assertion 'bounded privacy sanitizer redacts long prompt fragments and Base64 while preserving unrelated answers' {
+    $matrix = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'pilot/model_matrix.json') | ConvertFrom-Json
+    $runMatrix = [pscustomobject]@{
+        candidates = @($matrix.candidates | Where-Object { $_.tool -eq 'codex' } | Select-Object -First 3)
+        special_routes = @()
+    }
+    $prompt = New-PilotPrompt -Candidate $runMatrix.candidates[0]
+    $fragment = $prompt.Substring(40, 96)
+    $base64Prompt = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($prompt))
+    $answers = @{
+        $runMatrix.candidates[0].route_id = "prefix $fragment suffix"
+        $runMatrix.candidates[1].route_id = $base64Prompt
+        $runMatrix.candidates[2].route_id = '4'
+    }
+    $resultsPath = Join-Path $projectRoot 'pilot/tests/.runner-task5-bounded-privacy.jsonl'
+    if (Test-Path -LiteralPath $resultsPath) { Remove-Item -LiteralPath $resultsPath -Force }
+    try {
+        $invoker = {
+            param($command)
+            $inner = [pscustomobject]@{ status = 'success'; answer = $answers[$command.route_id]; error = $null } | ConvertTo-Json -Compress
+            $outer = [pscustomobject]@{ type = 'item.completed'; item = [pscustomobject]@{ type = 'agent_message'; text = $inner } } | ConvertTo-Json -Compress
+            [pscustomobject]@{ exit_code = 0; stdout = $outer; stderr = ''; duration_ms = 2 }
+        }
+        Invoke-PilotRun -Matrix $runMatrix -RunAll -ResultsPath $resultsPath -NativeInvoker $invoker | Out-Null
+        $jsonl = Get-Content -Raw -LiteralPath $resultsPath
+        Assert-True (-not $jsonl.Contains($fragment))
+        Assert-True (-not $jsonl.Contains($base64Prompt))
+        $records = @(Get-Content -LiteralPath $resultsPath | ForEach-Object { $_ | ConvertFrom-Json })
+        Assert-Equal $records.Count 3
+        Assert-Equal (@($records | Where-Object { $_.answer -eq '4' }).Count) 1
+    } finally {
+        if (Test-Path -LiteralPath $resultsPath) { Remove-Item -LiteralPath $resultsPath -Force }
+    }
+}
+
 Invoke-Assertion 'RunAll continues after one injected candidate failure in the same invocation' {
     $matrix = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'pilot/model_matrix.json') | ConvertFrom-Json
     $runMatrix = [pscustomobject]@{
