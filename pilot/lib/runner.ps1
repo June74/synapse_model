@@ -1,7 +1,10 @@
 $script:RunnerProjectRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
-# Persisted strings redact exact prompt forms plus every 8-character prompt window.
-# Eight contiguous characters is the conservative minimum considered prompt material; shorter matches remain ordinary text.
-$script:RunnerPromptFragmentThreshold = 8
+# Persisted strings redact exact prompt forms plus every 4-character prompt window.
+# Four contiguous characters is the conservative minimum considered prompt material; shorter matches remain ordinary text.
+$script:RunnerPromptFragmentThreshold = 4
+# Embedded Base64 is searched at every offset through 128 encoded characters (up to 96 decoded bytes),
+# enough to cover the UTF-8/JSON representations of the minimum prompt window without quadratic long-run scans.
+$script:RunnerBase64ScanWindowLength = 128
 
 if ($null -eq ('RunnerNativeStreamCapture' -as [type])) {
     Add-Type -TypeDefinition @'
@@ -614,13 +617,15 @@ function ConvertTo-RunnerRedactedText {
         [AllowNull()][string]$Text,
         [string[]]$PromptVariants,
         [string]$PromptRegex,
-        [string[]]$PromptFragmentVariants
+        [string[]]$PromptFragmentVariants,
+        [string]$PromptFragmentRegex
     )
 
     $result = ConvertTo-RunnerNormalizedLineEndings $Text
-    $fullPromptMarker = '__RUNNER_FULL_PROMPT_REDACTED__'
-    $fragmentMarker = '__RUNNER_PROMPT_FRAGMENT_REDACTED__'
-    $base64Marker = '__RUNNER_PROMPT_BASE64_REDACTED__'
+    $markerToken = [guid]::NewGuid().ToString('N')
+    $fullPromptMarker = "`0${markerToken}F`0"
+    $fragmentMarker = "`0${markerToken}R`0"
+    $base64Marker = "`0${markerToken}B`0"
     if (-not [string]::IsNullOrEmpty($PromptRegex)) {
         $result = [regex]::Replace($result, $PromptRegex, $fullPromptMarker)
     }
@@ -629,32 +634,32 @@ function ConvertTo-RunnerRedactedText {
             $result = $result.Replace($variant, $fullPromptMarker)
         }
     }
-    foreach ($fragment in @($PromptFragmentVariants)) {
-        if (-not [string]::IsNullOrEmpty($fragment)) {
-            # A short bare word/identifier at or near the eight-character boundary is ordinary text often repeated by a provider.
-            # Mixed-content windows and longer excerpts still redact at the configured threshold.
-            if (($fragment.Trim() -match '^[\p{L}\p{N}_-]+$') -and $fragment.Length -le 10) { continue }
-            $result = $result.Replace($fragment, $fragmentMarker)
-        }
+    if (-not [string]::IsNullOrEmpty($PromptFragmentRegex)) {
+        $result = [regex]::Replace($result, $PromptFragmentRegex, $fragmentMarker)
     }
     $minimumBase64Length = [int]([Math]::Ceiling($script:RunnerPromptFragmentThreshold / 3.0) * 4)
-    $base64Pattern = '(?<![A-Za-z0-9+/=_-])[A-Za-z0-9+/=_-]{' + $minimumBase64Length + ',}(?![A-Za-z0-9+/=_-])'
+    $base64Pattern = '[A-Za-z0-9+/=_-]{' + $minimumBase64Length + ',}'
     $result = [regex]::Replace($result, $base64Pattern, {
         param($match)
-        $candidate = $match.Value.Replace('-', '+').Replace('_', '/')
-        $remainder = $candidate.Length % 4
-        if ($remainder -eq 1) { return $match.Value }
-        if ($remainder -gt 0) { $candidate += ('=' * (4 - $remainder)) }
-        try {
-            $decoded = [Text.UTF8Encoding]::new($false, $true).GetString([Convert]::FromBase64String($candidate))
-            $decoded = ConvertTo-RunnerNormalizedLineEndings $decoded
-            foreach ($fragment in @($PromptFragmentVariants)) {
-                if (-not [string]::IsNullOrEmpty($fragment) -and $decoded.Contains($fragment)) {
-                    return $base64Marker
-                }
+        $run = $match.Value
+        for ($start = 0; $start -le ($run.Length - $minimumBase64Length); $start++) {
+            $maximumLength = [Math]::Min($script:RunnerBase64ScanWindowLength, $run.Length - $start)
+            for ($length = $minimumBase64Length; $length -le $maximumLength; $length++) {
+                $candidate = $run.Substring($start, $length).Replace('-', '+').Replace('_', '/')
+                $remainder = $candidate.Length % 4
+                if ($remainder -eq 1) { continue }
+                if ($remainder -gt 0) { $candidate += ('=' * (4 - $remainder)) }
+                try {
+                    $decoded = [Text.UTF8Encoding]::new($false, $true).GetString([Convert]::FromBase64String($candidate))
+                    $decoded = ConvertTo-RunnerNormalizedLineEndings $decoded
+                    if (-not [string]::IsNullOrEmpty($PromptFragmentRegex) -and [regex]::IsMatch($decoded, $PromptFragmentRegex)) {
+                        # Redact the complete containing run after finding a matching substring so the encoded prompt cannot survive in its suffix.
+                        return $base64Marker
+                    }
+                } catch { }
             }
-        } catch { }
-        return $match.Value
+        }
+        return $run
     })
     return $result.Replace($fullPromptMarker, '[prompt redacted]').Replace($fragmentMarker, '[prompt fragment redacted]').Replace($base64Marker, '[prompt Base64 redacted]')
 }
@@ -724,9 +729,17 @@ function New-RunnerPromptRedactionContext {
         }
     }
 
+    # Four-character fragment matching is intentionally conservative: exact prompt variants are always removed,
+    # while fragment windows must carry punctuation, digits, escaping, or non-ASCII text that distinguishes prompt material
+    # from ordinary words in canonical provider errors.
+    $promptFragmentVariants = @($promptFragmentVariants | Where-Object { $_ -match '[^A-Za-z\s]' } | Select-Object -Unique)
+
     [pscustomobject]@{
         variants = @($promptVariants | Sort-Object Length -Descending | Select-Object -Unique)
         fragments = @($promptFragmentVariants | Select-Object -Unique)
+        fragment_regex = if ($promptFragmentVariants.Count -eq 0) { '' } else {
+            '(?:' + (($promptFragmentVariants | Where-Object { -not [string]::IsNullOrEmpty($_) } | Sort-Object Length -Descending | Select-Object -Unique | ForEach-Object { [regex]::Escape($_) }) -join '|') + ')'
+        }
         regex = if ([string]::IsNullOrEmpty($normalizedPromptText)) { '' } else { ConvertTo-RunnerPromptRegex -Prompt $normalizedPromptText }
     }
 }
@@ -757,8 +770,9 @@ function Invoke-NativeCandidate {
     $orderedPromptVariants = $redactionContext.variants
     $promptFragmentVariants = $redactionContext.fragments
     $promptRegex = $redactionContext.regex
+    $promptFragmentRegex = $redactionContext.fragment_regex
     $safeArguments = @($Command.arguments | ForEach-Object {
-        ConvertTo-RunnerRedactedText -Text ([string]$_) -PromptVariants $orderedPromptVariants -PromptRegex $promptRegex -PromptFragmentVariants $promptFragmentVariants
+        ConvertTo-RunnerRedactedText -Text ([string]$_) -PromptVariants $orderedPromptVariants -PromptRegex $promptRegex -PromptFragmentVariants $promptFragmentVariants -PromptFragmentRegex $promptFragmentRegex
     })
 
     $process = [System.Diagnostics.Process]::new()
@@ -813,8 +827,8 @@ function Invoke-NativeCandidate {
 
         $stdout = Receive-RunnerStreamOutput -Chunks $stdoutChunks
         $stderr = Receive-RunnerStreamOutput -Chunks $stderrChunks
-        $stdout = ConvertTo-RunnerRedactedText -Text $stdout -PromptVariants $orderedPromptVariants -PromptRegex $promptRegex -PromptFragmentVariants $promptFragmentVariants
-        $stderr = ConvertTo-RunnerRedactedText -Text $stderr -PromptVariants $orderedPromptVariants -PromptRegex $promptRegex -PromptFragmentVariants $promptFragmentVariants
+        $stdout = ConvertTo-RunnerRedactedText -Text $stdout -PromptVariants $orderedPromptVariants -PromptRegex $promptRegex -PromptFragmentVariants $promptFragmentVariants -PromptFragmentRegex $promptFragmentRegex
+        $stderr = ConvertTo-RunnerRedactedText -Text $stderr -PromptVariants $orderedPromptVariants -PromptRegex $promptRegex -PromptFragmentVariants $promptFragmentVariants -PromptFragmentRegex $promptFragmentRegex
         if ($cleanupIssues.Count -gt 0) {
             $cleanupFailed = $true
             if ($timedOut) {
@@ -835,10 +849,10 @@ function Invoke-NativeCandidate {
             cleanup_status = $cleanupStatus
             process_id = $processId
             process_exited = $processExited
-            executable = ConvertTo-RunnerRedactedText -Text ([string]$Command.executable) -PromptVariants $orderedPromptVariants -PromptRegex $promptRegex -PromptFragmentVariants $promptFragmentVariants
-            tool = ConvertTo-RunnerRedactedText -Text ([string]$Command.tool) -PromptVariants $orderedPromptVariants -PromptRegex $promptRegex -PromptFragmentVariants $promptFragmentVariants
-            route_id = ConvertTo-RunnerRedactedText -Text ([string]$Command.route_id) -PromptVariants $orderedPromptVariants -PromptRegex $promptRegex -PromptFragmentVariants $promptFragmentVariants
-            working_directory = ConvertTo-RunnerRedactedText -Text ([string]$Command.working_directory) -PromptVariants $orderedPromptVariants -PromptRegex $promptRegex -PromptFragmentVariants $promptFragmentVariants
+            executable = ConvertTo-RunnerRedactedText -Text ([string]$Command.executable) -PromptVariants $orderedPromptVariants -PromptRegex $promptRegex -PromptFragmentVariants $promptFragmentVariants -PromptFragmentRegex $promptFragmentRegex
+            tool = ConvertTo-RunnerRedactedText -Text ([string]$Command.tool) -PromptVariants $orderedPromptVariants -PromptRegex $promptRegex -PromptFragmentVariants $promptFragmentVariants -PromptFragmentRegex $promptFragmentRegex
+            route_id = ConvertTo-RunnerRedactedText -Text ([string]$Command.route_id) -PromptVariants $orderedPromptVariants -PromptRegex $promptRegex -PromptFragmentVariants $promptFragmentVariants -PromptFragmentRegex $promptFragmentRegex
+            working_directory = ConvertTo-RunnerRedactedText -Text ([string]$Command.working_directory) -PromptVariants $orderedPromptVariants -PromptRegex $promptRegex -PromptFragmentVariants $promptFragmentVariants -PromptFragmentRegex $promptFragmentRegex
             arguments = $safeArguments
         }
     } finally {
@@ -993,12 +1007,17 @@ function Protect-PilotRecordStrings {
     )
 
     $redactionContext = if ([string]::IsNullOrEmpty($Prompt)) { $null } else { New-RunnerPromptRedactionContext -Prompt $Prompt }
+    $structuralProperties = @('run_id', 'route_id', 'tool', 'provider', 'model', 'effort', 'status', 'exit_code', 'duration_ms')
     foreach ($property in $Record.PSObject.Properties) {
         if ($property.Value -is [string]) {
-            $safeText = if ($null -eq $redactionContext) {
+            # These values are generated identifiers/status metadata, not provider/freeform content;
+            # preserve them for result identity while sanitizing every freeform persisted string.
+            $safeText = if ($structuralProperties -contains $property.Name) {
+                [string]$property.Value
+            } elseif ($null -eq $redactionContext) {
                 [string]$property.Value
             } else {
-                ConvertTo-RunnerRedactedText -Text $property.Value -PromptVariants $redactionContext.variants -PromptRegex $redactionContext.regex -PromptFragmentVariants $redactionContext.fragments
+                ConvertTo-RunnerRedactedText -Text $property.Value -PromptVariants $redactionContext.variants -PromptRegex $redactionContext.regex -PromptFragmentVariants $redactionContext.fragments -PromptFragmentRegex $redactionContext.fragment_regex
             }
             $property.Value = ConvertTo-RunnerCredentialRedactedText -Text $safeText
         }
@@ -1011,7 +1030,8 @@ function ConvertTo-RunnerCredentialRedactedText {
 
     if ($null -eq $Text) { return $null }
     $result = $Text
-    $result = [regex]::Replace($result, '(?i)(\bAuthorization\s*:\s*Basic\s+)[A-Za-z0-9+/=_-]+', '$1[credential redacted]')
+    $result = [regex]::Replace($result, '(?i)(\b(?:(?:Authorization\s*:\s*)?Basic)\s+)[A-Za-z0-9+/=_-]+', '$1[credential redacted]')
+    $result = [regex]::Replace($result, '(?i)(\b(?:(?:Authorization\s*:\s*)?ApiKey)\s+)[^\s,;]+', '$1[credential redacted]')
     $result = [regex]::Replace($result, '(?i)(\bBearer\s+)[A-Za-z0-9._~+/=-]{8,}', '$1[credential redacted]')
     $result = [regex]::Replace($result, '(?i)(\b(?:api[_-]?key|access[_-]?token|auth(?:entication)?[_-]?token|token|secret)\s*[:=]\s*)[^\s,;]+', '$1[credential redacted]')
     $result = [regex]::Replace($result, '(?i)\bsk-(?:proj-|ant-)?[A-Za-z0-9_-]{8,}', '[credential redacted]')
