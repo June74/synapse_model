@@ -10,3 +10,4 @@
 | SB-2026-08-19-006 | Git index unavailable to sandbox | contained | 2026-08-19 | 2026-08-19 |
 | SB-2026-08-19-007 | Plan review command used an invalid PowerShell parameter | contained | 2026-08-19 | 2026-08-19 |
 | SB-2026-08-19-008 | Parser verification command used invalid PowerShell interpolation | closed | 2026-08-19 | 2026-08-19 |
+| SB-2026-08-19-009 | Existing descendant-drain test was transiently timing-sensitive | closed | 2026-08-19 | 2026-08-19 |

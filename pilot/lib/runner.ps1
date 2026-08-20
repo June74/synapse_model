@@ -647,6 +647,33 @@ function Receive-RunnerStreamOutput {
     return ($parts -join '')
 }
 
+function New-RunnerPromptRedactionContext {
+    param([AllowNull()][string]$Prompt)
+
+    $promptText = if ($null -eq $Prompt) { '' } else { [string]$Prompt }
+    $normalizedPromptText = ConvertTo-RunnerNormalizedLineEndings $promptText
+    $promptVariants = [System.Collections.Generic.List[string]]::new()
+    foreach ($variant in @($promptText, $normalizedPromptText)) {
+        if ([string]::IsNullOrEmpty($variant)) { continue }
+        $promptVariants.Add($variant)
+        $fullyUnicodeVariant = ConvertTo-RunnerFullyUnicodeEscaped -Text $variant
+        $promptVariants.Add($fullyUnicodeVariant)
+        $promptVariants.Add($fullyUnicodeVariant.ToLowerInvariant())
+        $jsonVariant = ConvertTo-Json -InputObject $variant -Compress
+        foreach ($jsonSpelling in @(Get-RunnerJsonPromptVariants -JsonText $jsonVariant)) {
+            $promptVariants.Add($jsonSpelling)
+            if ($jsonSpelling.Length -gt 1) {
+                $promptVariants.Add($jsonSpelling.Substring(1, $jsonSpelling.Length - 2))
+            }
+        }
+    }
+
+    [pscustomobject]@{
+        variants = @($promptVariants | Sort-Object Length -Descending | Select-Object -Unique)
+        regex = if ([string]::IsNullOrEmpty($normalizedPromptText)) { '' } else { ConvertTo-RunnerPromptRegex -Prompt $normalizedPromptText }
+    }
+}
+
 function Invoke-NativeCandidate {
     param(
         [Parameter(Mandatory)][object]$Command,
@@ -669,28 +696,9 @@ function Invoke-NativeCandidate {
 
     $promptProperty = $Command.PSObject.Properties['prompt']
     $promptText = if ($null -ne $promptProperty) { [string]$promptProperty.Value } else { '' }
-    $normalizedPromptText = ConvertTo-RunnerNormalizedLineEndings $promptText
-    $promptVariants = [System.Collections.Generic.List[string]]::new()
-    foreach ($variant in @($promptText, $normalizedPromptText)) {
-        if ([string]::IsNullOrEmpty($variant)) { continue }
-        $promptVariants.Add($variant)
-        $fullyUnicodeVariant = ConvertTo-RunnerFullyUnicodeEscaped -Text $variant
-        $promptVariants.Add($fullyUnicodeVariant)
-        $promptVariants.Add($fullyUnicodeVariant.ToLowerInvariant())
-        $jsonVariant = ConvertTo-Json -InputObject $variant -Compress
-        foreach ($jsonSpelling in @(Get-RunnerJsonPromptVariants -JsonText $jsonVariant)) {
-            $promptVariants.Add($jsonSpelling)
-            if ($jsonSpelling.Length -gt 1) {
-                $promptVariants.Add($jsonSpelling.Substring(1, $jsonSpelling.Length - 2))
-            }
-        }
-    }
-    $orderedPromptVariants = @($promptVariants | Sort-Object Length -Descending | Select-Object -Unique)
-    $promptRegex = if ([string]::IsNullOrEmpty($normalizedPromptText)) {
-        ''
-    } else {
-        ConvertTo-RunnerPromptRegex -Prompt $normalizedPromptText
-    }
+    $redactionContext = New-RunnerPromptRedactionContext -Prompt $promptText
+    $orderedPromptVariants = $redactionContext.variants
+    $promptRegex = $redactionContext.regex
     $safeArguments = @($Command.arguments | ForEach-Object {
         ConvertTo-RunnerRedactedText -Text ([string]$_) -PromptVariants $orderedPromptVariants -PromptRegex $promptRegex
     })
@@ -862,6 +870,80 @@ function ConvertTo-PilotDiagnostic {
     return $text
 }
 
+function ConvertTo-PilotSafeCost {
+    param([AllowNull()][object]$Value)
+
+    $numericTypes = @([byte], [sbyte], [int16], [uint16], [int32], [uint32], [int64], [uint64], [single], [double], [decimal])
+    if ($null -eq $Value -or $Value.GetType() -notin $numericTypes) { return $null }
+    $number = [double]$Value
+    if ([double]::IsNaN($number) -or [double]::IsInfinity($number) -or $number -lt 0) { return $null }
+    return $number
+}
+
+function Get-PilotCostFromEnvelope {
+    param([AllowNull()][object]$Envelope)
+
+    if ($null -eq $Envelope) { return $null }
+    $allowedCostFields = @('total_cost_usd', 'cost_usd', 'totalCostUsd', 'costUsd')
+    foreach ($container in @($Envelope, $Envelope.usage, $Envelope.metadata, $Envelope.cost)) {
+        if ($null -eq $container) { continue }
+        foreach ($field in $allowedCostFields) {
+            if ($container.PSObject.Properties.Name -contains $field) {
+                $cost = ConvertTo-PilotSafeCost $container.$field
+                if ($null -ne $cost) { return $cost }
+            }
+        }
+    }
+    return $null
+}
+
+function Get-PilotReportedCost {
+    param([AllowNull()][object]$ProcessResult)
+
+    if ($null -eq $ProcessResult) { return $null }
+    if ($ProcessResult.PSObject.Properties.Name -contains 'cli_reported_cost_usd') {
+        $directCost = ConvertTo-PilotSafeCost $ProcessResult.cli_reported_cost_usd
+        if ($null -ne $directCost) { return $directCost }
+    }
+    foreach ($metadataField in @('metadata', 'provider_metadata', 'cli_metadata')) {
+        if ($ProcessResult.PSObject.Properties.Name -contains $metadataField) {
+            $metadataCost = Get-PilotCostFromEnvelope $ProcessResult.$metadataField
+            if ($null -ne $metadataCost) { return $metadataCost }
+        }
+    }
+
+    $envelopes = [System.Collections.Generic.List[object]]::new()
+    $stdout = [string]$ProcessResult.stdout
+    if ([string]::IsNullOrWhiteSpace($stdout)) { return $null }
+    try { [void]$envelopes.Add(($stdout | ConvertFrom-Json -Depth 30)) } catch { }
+    foreach ($line in ($stdout -split "`r?`n")) {
+        if ([string]::IsNullOrWhiteSpace($line)) { continue }
+        try { [void]$envelopes.Add(($line | ConvertFrom-Json -Depth 30)) } catch { }
+    }
+
+    foreach ($envelope in @($envelopes)) {
+        $envelopeCost = Get-PilotCostFromEnvelope $envelope
+        if ($null -ne $envelopeCost) { return $envelopeCost }
+    }
+    return $null
+}
+
+function Protect-PilotRecordStrings {
+    param(
+        [Parameter(Mandatory)][object]$Record,
+        [AllowNull()][string]$Prompt
+    )
+
+    if ([string]::IsNullOrEmpty($Prompt)) { return $Record }
+    $redactionContext = New-RunnerPromptRedactionContext -Prompt $Prompt
+    foreach ($property in $Record.PSObject.Properties) {
+        if ($property.Value -is [string]) {
+            $property.Value = ConvertTo-RunnerRedactedText -Text $property.Value -PromptVariants $redactionContext.variants -PromptRegex $redactionContext.regex
+        }
+    }
+    return $Record
+}
+
 function New-ResultRecord {
     param(
         [Parameter(Mandatory)][object]$Candidate,
@@ -869,7 +951,9 @@ function New-ResultRecord {
         [AllowNull()][object]$Canonical,
         [Parameter(Mandatory)][string]$RunId,
         [AllowNull()][string]$DiagnosticNote,
-        [AllowNull()][string]$FailureError
+        [AllowNull()][string]$FailureError,
+        [AllowNull()][string]$Prompt,
+        [AllowNull()][object]$CliReportedCostUsd
     )
 
     $transportSuccess = $null -ne $ProcessResult -and
@@ -896,22 +980,29 @@ function New-ResultRecord {
         duration_ms = if ($null -ne $ProcessResult) { [int64]$ProcessResult.duration_ms } else { [int64]0 }
         diagnostic_note = ConvertTo-PilotDiagnostic $DiagnosticNote
     }
-    if ($null -ne $ProcessResult -and $ProcessResult.PSObject.Properties.Name -contains 'cli_reported_cost_usd' -and $null -ne $ProcessResult.cli_reported_cost_usd) {
-        $record.cli_reported_cost_usd = $ProcessResult.cli_reported_cost_usd
+    if ($null -ne $ProcessResult -and $ProcessResult.PSObject.Properties.Name -contains 'cli_reported_cost_usd') {
+        $processCost = ConvertTo-PilotSafeCost $ProcessResult.cli_reported_cost_usd
+        if ($null -ne $processCost) { $record.cli_reported_cost_usd = $processCost }
     }
-    return [pscustomobject]$record
+    if ($null -ne $CliReportedCostUsd) {
+        $safeCost = ConvertTo-PilotSafeCost $CliReportedCostUsd
+        if ($null -ne $safeCost) { $record.cli_reported_cost_usd = $safeCost }
+    }
+    return Protect-PilotRecordStrings -Record ([pscustomobject]$record) -Prompt $Prompt
 }
 
 function Add-PilotResultRecord {
     param(
         [Parameter(Mandatory)][object]$Record,
-        [Parameter(Mandatory)][string]$ResultsPath
+        [Parameter(Mandatory)][string]$ResultsPath,
+        [AllowNull()][string]$Prompt
     )
 
     $path = Resolve-PilotProjectPath $ResultsPath
     $parent = Split-Path -Parent $path
     if (-not (Test-Path -LiteralPath $parent)) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
-    $line = $Record | ConvertTo-Json -Compress -Depth 10
+    $safeRecord = Protect-PilotRecordStrings -Record $Record -Prompt $Prompt
+    $line = $safeRecord | ConvertTo-Json -Compress -Depth 10
     Add-Content -LiteralPath $path -Value $line -Encoding utf8
 }
 
@@ -937,11 +1028,14 @@ function Invoke-PilotRun {
         $processResult = $null
         $canonical = $null
         $failure = $null
+        $prompt = ''
+        $reportedCost = $null
         $note = 'completed'
         try {
             $prompt = New-PilotPrompt -Candidate $candidate
             $command = New-CandidateCommand -Candidate $candidate -Prompt $prompt
             $processResult = if ($null -ne $NativeInvoker) { & $NativeInvoker $command } else { Invoke-NativeCandidate -Command $command }
+            $reportedCost = Get-PilotReportedCost -ProcessResult $processResult
             if ($processResult.exit_code -ne 0) {
                 $note = 'transport failure'
                 $failure = "Process exited with code $($processResult.exit_code)."
@@ -966,8 +1060,8 @@ function Invoke-PilotRun {
             $note = 'candidate execution failure'
             $failure = $_.Exception.Message
         }
-        $record = New-ResultRecord -Candidate $candidate -ProcessResult $processResult -Canonical $canonical -RunId $runId -DiagnosticNote $note -FailureError $failure
-        Add-PilotResultRecord -Record $record -ResultsPath $ResultsPath
+        $record = New-ResultRecord -Candidate $candidate -ProcessResult $processResult -Canonical $canonical -RunId $runId -DiagnosticNote $note -FailureError $failure -Prompt $prompt -CliReportedCostUsd $reportedCost
+        Add-PilotResultRecord -Record $record -ResultsPath $ResultsPath -Prompt $prompt
         [void]$records.Add($record)
     }
     $summary.records = @($records)

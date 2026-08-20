@@ -1011,6 +1011,95 @@ Invoke-Assertion 'result normalization separates transport success from contract
     }
 }
 
+Invoke-Assertion 'persisted result strings redact the complete generated prompt and encoded variants' {
+    $matrix = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'pilot/model_matrix.json') | ConvertFrom-Json
+    $route = @($matrix.candidates | Where-Object { $_.tool -eq 'codex' } | Select-Object -First 1)[0]
+    $expectedPrompt = New-PilotPrompt -Candidate $route
+    $resultsPath = Join-Path $projectRoot 'pilot/tests/.runner-task5-prompt-leak.jsonl'
+    if (Test-Path -LiteralPath $resultsPath) { Remove-Item -LiteralPath $resultsPath -Force }
+    try {
+        $invoker = {
+            param($command)
+            $inner = [pscustomobject]@{ status = 'success'; answer = $expectedPrompt; error = $null } | ConvertTo-Json -Compress
+            $outer = [pscustomobject]@{ type = 'item.completed'; item = [pscustomobject]@{ type = 'agent_message'; text = $inner } } | ConvertTo-Json -Compress
+            [pscustomobject]@{ exit_code = 0; stdout = $outer; stderr = ''; duration_ms = 2 }
+        }
+        Invoke-PilotRun -Matrix $matrix -RouteId $route.route_id -ResultsPath $resultsPath -NativeInvoker $invoker | Out-Null
+        $jsonl = Get-Content -Raw -LiteralPath $resultsPath
+        $encodedPrompt = $expectedPrompt | ConvertTo-Json -Compress
+        $fullyEncodedPrompt = ConvertTo-RunnerFullyUnicodeEscaped -Text $expectedPrompt
+        Assert-True (-not $jsonl.Contains($expectedPrompt))
+        Assert-True (-not $jsonl.Contains($encodedPrompt))
+        Assert-True (-not $jsonl.Contains($fullyEncodedPrompt))
+        $record = $jsonl | ConvertFrom-Json
+        Assert-Equal $record.answer '[prompt redacted]'
+        Assert-Equal $record.error $null
+    } finally {
+        if (Test-Path -LiteralPath $resultsPath) { Remove-Item -LiteralPath $resultsPath -Force }
+    }
+}
+
+Invoke-Assertion 'Claude envelope cost metadata is recorded without persisting provider output' {
+    $matrix = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'pilot/model_matrix.json') | ConvertFrom-Json
+    $route = @($matrix.candidates | Where-Object { $_.tool -eq 'claude' } | Select-Object -First 1)[0]
+    $resultsPath = Join-Path $projectRoot 'pilot/tests/.runner-task5-cost.jsonl'
+    if (Test-Path -LiteralPath $resultsPath) { Remove-Item -LiteralPath $resultsPath -Force }
+    try {
+        $invoker = { [pscustomobject]@{ exit_code = 0; stdout = (Get-Content -Raw (Join-Path $projectRoot 'pilot/tests/fixtures/claude-cost-success.json')); stderr = ''; duration_ms = 4 } }
+        Invoke-PilotRun -Matrix $matrix -RouteId $route.route_id -ResultsPath $resultsPath -NativeInvoker $invoker | Out-Null
+        $jsonl = Get-Content -Raw -LiteralPath $resultsPath
+        $record = $jsonl | ConvertFrom-Json
+        Assert-Equal $record.cli_reported_cost_usd 0.0123
+        Assert-True (-not $jsonl.Contains('total_cost_usd'))
+        Assert-True (-not $jsonl.Contains('modelUsage'))
+        $metadataResult = [pscustomobject]@{ stdout = ''; metadata = [pscustomobject]@{ cost_usd = 0.045 } }
+        Assert-Equal (Get-PilotReportedCost -ProcessResult $metadataResult) 0.045
+    } finally {
+        if (Test-Path -LiteralPath $resultsPath) { Remove-Item -LiteralPath $resultsPath -Force }
+    }
+}
+
+Invoke-Assertion 'RunAll continues after one injected candidate failure in the same invocation' {
+    $matrix = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'pilot/model_matrix.json') | ConvertFrom-Json
+    $runMatrix = [pscustomobject]@{
+        candidates = @($matrix.candidates | Where-Object { $_.tool -eq 'codex' } | Select-Object -First 2)
+        special_routes = @()
+    }
+    $failedRoute = $runMatrix.candidates[0].route_id
+    $resultsPath = Join-Path $projectRoot 'pilot/tests/.runner-task5-runall.jsonl'
+    if (Test-Path -LiteralPath $resultsPath) { Remove-Item -LiteralPath $resultsPath -Force }
+    try {
+        $invoker = {
+            param($command)
+            if ($command.route_id -eq $failedRoute) { throw 'offline fixture transport failure' }
+            [pscustomobject]@{ exit_code = 0; stdout = (Get-Content -Raw (Join-Path $projectRoot 'pilot/tests/fixtures/codex-success.jsonl')); stderr = ''; duration_ms = 5 }
+        }
+        $run = Invoke-PilotRun -Matrix $runMatrix -RunAll -ResultsPath $resultsPath -NativeInvoker $invoker
+        $records = @(Get-Content -LiteralPath $resultsPath | ForEach-Object { $_ | ConvertFrom-Json })
+        Assert-Equal $run.records.Count 2
+        Assert-Equal $records.Count 2
+        Assert-True (-not $records[0].transport_success)
+        Assert-True $records[1].transport_success
+    } finally {
+        if (Test-Path -LiteralPath $resultsPath) { Remove-Item -LiteralPath $resultsPath -Force }
+    }
+}
+
+Invoke-Assertion 'public CLI no-switch entrypoint performs a 63-candidate dry-run without writing results' {
+    $resultsPath = Join-Path $projectRoot 'pilot/tests/.runner-task5-cli-dry-run.jsonl'
+    $sentinel = 'prior record must remain untouched'
+    Set-Content -LiteralPath $resultsPath -Value $sentinel -Encoding utf8
+    try {
+        $output = @(pwsh -NoProfile -File (Join-Path $projectRoot 'pilot/run_pilot.ps1') -ResultsPath 'pilot/tests/.runner-task5-cli-dry-run.jsonl' 2>&1)
+        Assert-Equal $LASTEXITCODE 0
+        $joinedOutput = $output -join "`n"
+        Assert-Contains $joinedOutput 'Dry run: 63 candidate(s) selected; no provider processes invoked.'
+        Assert-Equal (Get-Content -Raw -LiteralPath $resultsPath).Trim() $sentinel
+    } finally {
+        if (Test-Path -LiteralPath $resultsPath) { Remove-Item -LiteralPath $resultsPath -Force }
+    }
+}
+
 Invoke-Assertion 'special routes require explicit opt-in' {
     $matrix = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'pilot/model_matrix.json') | ConvertFrom-Json
     $special = @($matrix.special_routes | Select-Object -First 1)[0]
