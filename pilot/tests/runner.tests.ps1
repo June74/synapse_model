@@ -103,17 +103,45 @@ Invoke-Assertion 'New-CandidateCommand constructs a boundary-preserving Codex co
     Assert-Equal $command.route_id $candidate.route_id
     Assert-Equal $command.prompt 'quoted prompt "with spaces"'
     Assert-Equal $command.working_directory $projectRoot
-    Assert-SequenceEqual $command.arguments @('exec', '--skip-git-repo-check', '--ephemeral', '--json', '-s', 'read-only', '--model', 'gpt-5.6-sol', '-c', 'model_reasoning_effort="xhigh"', 'quoted prompt "with spaces"')
+    Assert-SequenceEqual $command.arguments @('exec', '--skip-git-repo-check', '--ephemeral', '--json', '--output-schema', 'pilot/shared/response_schema.json', '-s', 'read-only', '--model', 'gpt-5.6-sol', '-c', 'model_reasoning_effort="xhigh"', 'quoted prompt "with spaces"')
 }
 
 Invoke-Assertion 'New-CandidateCommand constructs native Claude commands and omits Haiku effort' {
     $candidate = [pscustomobject]@{ route_id = 'claude__claude_sonnet_4_6__medium'; tool = 'claude'; model = 'claude-sonnet-4-6'; effort = 'medium' }
     $command = New-CandidateCommand -Candidate $candidate -Prompt 'hello'
-    Assert-SequenceEqual $command.arguments @('-p', '--model', 'claude-sonnet-4-6', '--effort', 'medium', '--output-format', 'json', '--max-turns', '1', '--no-session-persistence', '--disable-slash-commands', '--tools', '', 'hello')
+    Assert-Equal $command.arguments[0] '-p'
+    Assert-Equal $command.arguments[1] '--model'
+    Assert-Equal $command.arguments[2] 'claude-sonnet-4-6'
+    Assert-Equal $command.arguments[3] '--effort'
+    Assert-Equal $command.arguments[4] 'medium'
+    Assert-Equal $command.arguments[5] '--output-format'
+    Assert-Equal $command.arguments[6] 'json'
+    Assert-Equal $command.arguments[7] '--json-schema'
+    Assert-Contains $command.arguments[8] '"status"'
+    Assert-Equal $command.arguments[9] '--max-turns'
+    Assert-Equal $command.arguments[10] '1'
+    Assert-Equal $command.arguments[11] '--no-session-persistence'
+    Assert-Equal $command.arguments[12] '--disable-slash-commands'
+    Assert-Equal $command.arguments[13] 'hello'
+    Assert-Equal $command.arguments[14] '--tools'
+    Assert-Equal $command.arguments[15] ''
 
     $haiku = [pscustomobject]@{ route_id = 'claude__claude_haiku_4_5__default'; tool = 'claude'; model = 'claude-haiku-4-5'; effort = 'medium' }
     $haikuCommand = New-CandidateCommand -Candidate $haiku -Prompt 'haiku prompt'
-    Assert-SequenceEqual $haikuCommand.arguments @('-p', '--model', 'claude-haiku-4-5', '--output-format', 'json', '--max-turns', '1', '--no-session-persistence', '--disable-slash-commands', '--tools', '', 'haiku prompt')
+    Assert-Equal $haikuCommand.arguments[0] '-p'
+    Assert-Equal $haikuCommand.arguments[1] '--model'
+    Assert-Equal $haikuCommand.arguments[2] 'claude-haiku-4-5'
+    Assert-Equal $haikuCommand.arguments[3] '--output-format'
+    Assert-Equal $haikuCommand.arguments[4] 'json'
+    Assert-Equal $haikuCommand.arguments[5] '--json-schema'
+    Assert-Contains $haikuCommand.arguments[6] '"status"'
+    Assert-Equal $haikuCommand.arguments[7] '--max-turns'
+    Assert-Equal $haikuCommand.arguments[8] '1'
+    Assert-Equal $haikuCommand.arguments[9] '--no-session-persistence'
+    Assert-Equal $haikuCommand.arguments[10] '--disable-slash-commands'
+    Assert-Equal $haikuCommand.arguments[11] 'haiku prompt'
+    Assert-Equal $haikuCommand.arguments[12] '--tools'
+    Assert-Equal $haikuCommand.arguments[13] ''
 }
 
 Invoke-Assertion 'New-CandidateCommand constructs an Agy command with repository-relative schema path' {
@@ -131,7 +159,7 @@ Invoke-Assertion 'New-CandidateCommand rejects blank effort for effort-required 
     Assert-Throws { New-CandidateCommand -Candidate $agy -Prompt 'invalid' }
     $codex = [pscustomobject]@{ route_id = 'codex__gpt_5_6_sol__default'; tool = 'codex'; model = 'gpt-5.6-sol'; effort = '' }
     $codexCommand = New-CandidateCommand -Candidate $codex -Prompt 'codex without effort'
-    Assert-SequenceEqual $codexCommand.arguments @('exec', '--skip-git-repo-check', '--ephemeral', '--json', '-s', 'read-only', '--model', 'gpt-5.6-sol', 'codex without effort')
+    Assert-SequenceEqual $codexCommand.arguments @('exec', '--skip-git-repo-check', '--ephemeral', '--json', '--output-schema', 'pilot/shared/response_schema.json', '-s', 'read-only', '--model', 'gpt-5.6-sol', 'codex without effort')
 }
 
 Invoke-Assertion 'Invoke-NativeCandidate captures stdout stderr exit code and duration' {
@@ -214,6 +242,21 @@ Invoke-Assertion 'Invoke-NativeCandidate redacts prompt content from returned me
     Assert-True (-not $result.stdout.Contains($sensitivePrompt))
     Assert-True (-not $result.stderr.Contains($sensitivePrompt))
     Assert-Contains ($result.arguments -join '|') '[prompt redacted]'
+}
+
+Invoke-Assertion 'Invoke-NativeCandidate keeps raw output available only for in-memory parsing' {
+    $prompt = 'status answer error'
+    $command = [pscustomobject]@{
+        executable = 'pwsh'
+        arguments = @('-NoProfile', '-Command', "Write-Output '$prompt'")
+        prompt = $prompt
+        tool = 'test'
+        route_id = 'test__raw_output_boundary'
+        working_directory = $projectRoot
+    }
+    $result = Invoke-NativeCandidate -Command $command -PreserveRawOutput -TimeoutSeconds 10
+    Assert-Equal $result.raw_stdout.Trim() $prompt
+    Assert-True (-not $result.stdout.Contains($prompt))
 }
 
 Invoke-Assertion 'Invoke-NativeCandidate redacts prompt echoes from both output streams' {
@@ -628,8 +671,34 @@ Invoke-Assertion 'ConvertFrom-CodexOutput reads the agent message envelope' {
     Assert-Equal $codex.error $null
 }
 
+Invoke-Assertion 'ConvertFrom-CodexOutput rejects a fenced canonical JSON agent message' {
+    $canonical = [ordered]@{ status = 'success'; answer = '4'; error = $null } | ConvertTo-Json -Compress
+    $payload = [ordered]@{
+        type = 'item.completed'
+        item = [ordered]@{
+            type = 'agent_message'
+            text = ('```json' + "`n" + $canonical + "`n" + '```')
+        }
+    }
+    Assert-Throws { ConvertFrom-CodexOutput ($payload | ConvertTo-Json -Compress -Depth 10) }
+}
+
 Invoke-Assertion 'ConvertFrom-ClaudeOutput reads the result envelope' {
     $claude = ConvertFrom-ClaudeOutput (Get-Content -Raw pilot/tests/fixtures/claude-success.json)
+    Assert-Equal $claude.status 'success'
+    Assert-Equal $claude.answer '4'
+    Assert-Equal $claude.error $null
+}
+
+Invoke-Assertion 'ConvertFrom-ClaudeOutput accepts an object-valued structured result' {
+    $claude = ConvertFrom-ClaudeOutput '{"result":{"status":"success","answer":"4","error":null}}'
+    Assert-Equal $claude.status 'success'
+    Assert-Equal $claude.answer '4'
+    Assert-Equal $claude.error $null
+}
+
+Invoke-Assertion 'ConvertFrom-ClaudeOutput reads schema-enforced structured_output' {
+    $claude = ConvertFrom-ClaudeOutput '{"result":"Emitted.","structured_output":{"status":"success","answer":"4","error":null}}'
     Assert-Equal $claude.status 'success'
     Assert-Equal $claude.answer '4'
     Assert-Equal $claude.error $null
@@ -640,6 +709,51 @@ Invoke-Assertion 'ConvertFrom-AgyOutput reads structured output' {
     Assert-Equal $agy.status 'success'
     Assert-Equal $agy.answer '4'
     Assert-Equal $agy.error $null
+}
+
+Invoke-Assertion 'ConvertFrom-AgyOutput accepts one JSON envelope surrounded by stdout noise' {
+    $agy = ConvertFrom-AgyOutput "agy startup`n{""status"":""SUCCESS"",""structured_output"":{""status"":""success"",""answer"":""4"",""error"":null},""response"":""4""}`nagy complete"
+    Assert-Equal $agy.status 'success'
+    Assert-Equal $agy.answer '4'
+    Assert-Equal $agy.error $null
+}
+
+Invoke-Assertion 'ConvertFrom-AgyOutput rejects ambiguous multiple JSON envelopes' {
+    Assert-Throws {
+        ConvertFrom-AgyOutput "{""status"":""SUCCESS"",""structured_output"":{""status"":""success"",""answer"":""4"",""error"":null}}`n{""status"":""SUCCESS"",""structured_output"":{""status"":""success"",""answer"":""5"",""error"":null}}"
+    }
+}
+
+Invoke-Assertion 'ConvertFrom-AgyOutput rejects an unrelated JSON object beside an envelope' {
+    Assert-Throws {
+        ConvertFrom-AgyOutput "{""diagnostic"":""startup""}`n{""status"":""SUCCESS"",""structured_output"":{""status"":""success"",""answer"":""4"",""error"":null}}"
+    }
+}
+
+Invoke-Assertion 'Invoke-PilotRun parses raw provider output before redaction' {
+    $matrix = Get-Content -Raw pilot/model_matrix.json | ConvertFrom-Json -Depth 20
+    $resultsPath = New-OfflineResultPath 'raw-output'
+    try {
+        $fixture = Get-Content -Raw pilot/tests/fixtures/codex-success.jsonl
+        $summary = Invoke-PilotRun -Matrix $matrix -RouteId 'codex__gpt_5_6_sol__medium' -ResultsPath $resultsPath -NativeInvoker {
+            param($command)
+            [pscustomobject]@{
+                exit_code = 0
+                stdout = 'redacted before parse'
+                raw_stdout = $fixture
+                stderr = ''
+                duration_ms = 1
+                timed_out = $false
+                cleanup_failed = $false
+                cli_reported_cost_usd = $null
+            }
+        }
+        Assert-True $summary.records[0].transport_success
+        Assert-True $summary.records[0].contract_compliant
+        Assert-Equal $summary.records[0].status 'success'
+    } finally {
+        if (Test-Path -LiteralPath $resultsPath) { Remove-Item -LiteralPath $resultsPath -Force }
+    }
 }
 
 Invoke-Assertion 'Test-CanonicalResponse rejects a non-string answer' {
