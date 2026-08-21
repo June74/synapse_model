@@ -136,7 +136,7 @@ Invoke-Assertion 'New-CandidateCommand constructs native Claude commands and omi
     Assert-Equal $haikuCommand.arguments[5] '--json-schema'
     Assert-Contains $haikuCommand.arguments[6] '"status"'
     Assert-Equal $haikuCommand.arguments[7] '--max-turns'
-    Assert-Equal $haikuCommand.arguments[8] '1'
+    Assert-Equal $haikuCommand.arguments[8] '3'
     Assert-Equal $haikuCommand.arguments[9] '--no-session-persistence'
     Assert-Equal $haikuCommand.arguments[10] '--disable-slash-commands'
     Assert-Equal $haikuCommand.arguments[11] 'haiku prompt'
@@ -152,6 +152,11 @@ Invoke-Assertion 'New-CandidateCommand constructs an Agy command with repository
     Assert-SequenceEqual $command.arguments @('-p', 'agy prompt', '--output-format', 'json', '--json-schema', 'pilot/shared/response_schema.json', '--model', 'gemini-3.7-flash-high', '--effort', 'high', '--print-timeout', '2m', '--disable-slash-commands')
 }
 
+Invoke-Assertion 'New-CandidateCommand omits unsupported Agy Anthropic effort' {
+    $candidate = [pscustomobject]@{ route_id = 'agy__claude_sonnet_4_6__default'; tool = 'agy'; model = 'claude-sonnet-4-6'; effort = '' }
+    $command = New-CandidateCommand -Candidate $candidate -Prompt 'agy anthropic prompt'
+    Assert-SequenceEqual $command.arguments @('-p', 'agy anthropic prompt', '--output-format', 'json', '--json-schema', 'pilot/shared/response_schema.json', '--model', 'claude-sonnet-4-6', '--print-timeout', '2m', '--disable-slash-commands')
+}
 Invoke-Assertion 'New-CandidateCommand rejects blank effort for effort-required candidates' {
     $claude = [pscustomobject]@{ route_id = 'claude__claude_sonnet_4_6__default'; tool = 'claude'; model = 'claude-sonnet-4-6'; effort = '' }
     $agy = [pscustomobject]@{ route_id = 'agy__gemini_3_7_flash_high__default'; tool = 'agy'; model = 'gemini-3.7-flash-high'; effort = '' }
@@ -711,6 +716,12 @@ Invoke-Assertion 'ConvertFrom-AgyOutput reads structured output' {
     Assert-Equal $agy.error $null
 }
 
+Invoke-Assertion 'ConvertFrom-AgyOutput normalizes empty success errors to null' {
+    $agy = ConvertFrom-AgyOutput '{"status":"SUCCESS","structured_output":{"status":"success","answer":"4","error":""}}'
+    Assert-Equal $agy.status 'success'
+    Assert-Equal $agy.answer '4'
+    Assert-Equal $agy.error $null
+}
 Invoke-Assertion 'ConvertFrom-AgyOutput accepts one JSON envelope surrounded by stdout noise' {
     $agy = ConvertFrom-AgyOutput "agy startup`n{""status"":""SUCCESS"",""structured_output"":{""status"":""success"",""answer"":""4"",""error"":null},""response"":""4""}`nagy complete"
     Assert-Equal $agy.status 'success'
@@ -730,6 +741,21 @@ Invoke-Assertion 'ConvertFrom-AgyOutput rejects an unrelated JSON object beside 
     }
 }
 
+Invoke-Assertion 'ConvertFrom-AgyOutput accepts repeated identical inner response objects' {
+    $inner = '{"status":"success","answer":"4","error":null}'
+    $envelope = [pscustomobject]@{ status = 'SUCCESS'; response = "$inner`n$inner`n$inner" } | ConvertTo-Json -Compress
+    $agy = ConvertFrom-AgyOutput $envelope
+    Assert-Equal $agy.status 'success'
+    Assert-Equal $agy.answer '4'
+    Assert-Equal $agy.error $null
+}
+
+Invoke-Assertion 'ConvertFrom-AgyOutput rejects conflicting inner response objects' {
+    $first = '{"status":"success","answer":"4","error":null}'
+    $second = '{"status":"success","answer":"5","error":null}'
+    $envelope = [pscustomobject]@{ status = 'SUCCESS'; response = "$first`n$second" } | ConvertTo-Json -Compress
+    Assert-Throws { ConvertFrom-AgyOutput $envelope }
+}
 Invoke-Assertion 'Invoke-PilotRun parses raw provider output before redaction' {
     $matrix = Get-Content -Raw pilot/model_matrix.json | ConvertFrom-Json -Depth 20
     $resultsPath = New-OfflineResultPath 'raw-output'

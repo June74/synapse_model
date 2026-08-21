@@ -138,11 +138,10 @@ function ConvertFrom-ClaudeOutput {
     throw 'Claude output result must be a JSON string or object.'
 }
 
-function ConvertFrom-AgyOutput {
+function Get-AgyJsonObjects {
     param([Parameter(Mandatory)][string]$Text)
 
     $objects = [System.Collections.Generic.List[object]]::new()
-    $envelopes = [System.Collections.Generic.List[object]]::new()
     $startIndex = -1
     $depth = 0
     $inString = $false
@@ -179,18 +178,46 @@ function ConvertFrom-AgyOutput {
             if ($depth -eq 0) {
                 $candidateText = $Text.Substring($startIndex, $index - $startIndex + 1)
                 try {
-                    $candidate = $candidateText | ConvertFrom-Json -Depth 20
-                    $objects.Add($candidate)
-                    if (($candidate.PSObject.Properties.Name -contains 'structured_output') -or
-                        ($candidate.PSObject.Properties.Name -contains 'response')) {
-                        $envelopes.Add($candidate)
-                    }
+                    $objects.Add(($candidateText | ConvertFrom-Json -Depth 20))
                 } catch {
                 }
                 $startIndex = -1
             }
         }
     }
+
+    return @($objects.ToArray())
+}
+
+function ConvertTo-AgyCanonicalResponse {
+    param([Parameter(Mandatory)][object]$Response)
+
+    $propertyNames = @($Response.PSObject.Properties.Name)
+    if ($propertyNames.Count -eq 3 -and
+        $propertyNames -contains 'status' -and
+        $propertyNames -contains 'answer' -and
+        $propertyNames -contains 'error' -and
+        $Response.status -eq 'success' -and
+        $Response.error -is [string] -and
+        [string]::IsNullOrEmpty($Response.error)) {
+        return [pscustomobject]@{
+            status = [string]$Response.status
+            answer = [string]$Response.answer
+            error = $null
+        }
+    }
+
+    return $Response
+}
+
+function ConvertFrom-AgyOutput {
+    param([Parameter(Mandatory)][string]$Text)
+
+    $objects = @(Get-AgyJsonObjects -Text $Text)
+    $envelopes = @($objects | Where-Object {
+        ($_.PSObject.Properties.Name -contains 'structured_output') -or
+        ($_.PSObject.Properties.Name -contains 'response')
+    })
 
     if ($objects.Count -ne 1 -or $envelopes.Count -ne 1) {
         throw "Agy output must contain exactly one top-level JSON object and one recognizable JSON envelope; found $($objects.Count) object(s) and $($envelopes.Count) envelope(s)."
@@ -202,19 +229,28 @@ function ConvertFrom-AgyOutput {
     if ($hasStructured -and $null -ne $outer.structured_output) {
         if ($outer.structured_output -is [string]) {
             try {
-                return ($outer.structured_output | ConvertFrom-Json -Depth 20)
+                return (ConvertTo-AgyCanonicalResponse -Response ($outer.structured_output | ConvertFrom-Json -Depth 20))
             } catch {
                 throw "Invalid inner JSON in Agy structured_output: $($_.Exception.Message)"
             }
         }
-        return $outer.structured_output
+        return (ConvertTo-AgyCanonicalResponse -Response $outer.structured_output)
     }
 
     if (($outer.PSObject.Properties.Name -contains 'response') -and
         $outer.response -is [string] -and -not [string]::IsNullOrWhiteSpace($outer.response)) {
         try {
-            return ($outer.response | ConvertFrom-Json -Depth 20)
+            return (ConvertTo-AgyCanonicalResponse -Response ($outer.response | ConvertFrom-Json -Depth 20))
         } catch {
+            $innerObjects = @(Get-AgyJsonObjects -Text $outer.response)
+            if ($innerObjects.Count -gt 1) {
+                $innerJson = @($innerObjects | ForEach-Object { $_ | ConvertTo-Json -Compress -Depth 20 })
+                $firstJson = $innerJson[0]
+                if (@($innerJson | Where-Object { $_ -ne $firstJson }).Count -eq 0) {
+                    return (ConvertTo-AgyCanonicalResponse -Response $innerObjects[0])
+                }
+                throw 'Agy response contained conflicting repeated JSON objects.'
+            }
             throw "Invalid inner JSON in Agy response: $($_.Exception.Message)"
         }
     }
@@ -424,9 +460,10 @@ function Test-CandidateDefinition {
             $reason = 'effort must be low, medium, high, xhigh, max, or ultra.'
         }
 
-        if ($null -eq $reason -and (-not $hasEffort -or [string]::IsNullOrWhiteSpace([string]$Candidate.effort)) -and
-            $Candidate.model -ne 'claude-haiku-4-5') {
-            $reason = 'effort is required except for claude-haiku-4-5.'
+        $effortOptional = $Candidate.model -eq 'claude-haiku-4-5' -or
+            ($Candidate.tool -eq 'agy' -and $Candidate.model -in @('claude-sonnet-4-6', 'claude-opus-4-6-thinking'))
+        if ($null -eq $reason -and (-not $hasEffort -or [string]::IsNullOrWhiteSpace([string]$Candidate.effort)) -and -not $effortOptional) {
+            $reason = 'effort is required for this tool and model.'
         }
 
         $codexCatalog = @{
@@ -456,8 +493,8 @@ function Test-CandidateDefinition {
             'gemini-3.5-flash-low' = @{ provider = 'google'; effort = 'low' }
             'gemini-3.1-pro-high' = @{ provider = 'google'; effort = 'high' }
             'gemini-3.1-pro-low' = @{ provider = 'google'; effort = 'low' }
-            'claude-sonnet-4-6' = @{ provider = 'anthropic'; effort = 'medium' }
-            'claude-opus-4-6-thinking' = @{ provider = 'anthropic'; effort = 'medium' }
+            'claude-sonnet-4-6' = @{ provider = 'anthropic'; effort = $null }
+            'claude-opus-4-6-thinking' = @{ provider = 'anthropic'; effort = $null }
             'gpt-oss-120b-medium' = @{ provider = 'openai'; effort = 'medium' }
         }
 
@@ -495,6 +532,10 @@ function Test-CandidateDefinition {
                         $reason = "Unsupported agy model '$($Candidate.model)'."
                     } elseif ($Candidate.provider -ne $agyCatalog[$Candidate.model].provider) {
                         $reason = "agy model '$($Candidate.model)' must use provider $($agyCatalog[$Candidate.model].provider)."
+                    } elseif ($null -eq $agyCatalog[$Candidate.model].effort) {
+                        if ($hasUsableEffort) {
+                            $reason = "agy model '$($Candidate.model)' does not support effort."
+                        }
                     } elseif (-not $hasUsableEffort -or $Candidate.effort -ne $agyCatalog[$Candidate.model].effort) {
                         $reason = "agy model '$($Candidate.model)' requires registered effort $($agyCatalog[$Candidate.model].effort)."
                     }
@@ -562,13 +603,16 @@ function New-CandidateCommand {
                 $arguments.AddRange([string[]]@('--effort', [string]$Candidate.effort))
             }
             $claudeSchema = '{"type":"object","additionalProperties":false,"properties":{"status":{"type":"string","enum":["success","failure"]},"answer":{"type":"string"},"error":{"type":["string","null"]}},"required":["status","answer","error"]}'
-            $arguments.AddRange([string[]]@('--output-format', 'json', '--json-schema', $claudeSchema, '--max-turns', '1', '--no-session-persistence', '--disable-slash-commands', $Prompt, '--tools', ''))
+            $maxTurns = if ($Candidate.model -eq 'claude-haiku-4-5') { '3' } else { '1' }
+            $arguments.AddRange([string[]]@('--output-format', 'json', '--json-schema', $claudeSchema, '--max-turns', $maxTurns, '--no-session-persistence', '--disable-slash-commands', $Prompt, '--tools', ''))
         }
         'agy' {
             $executable = 'agy'
-            if ([string]::IsNullOrWhiteSpace([string]$Candidate.effort)) {
+            $agyNoEffortModels = @('claude-sonnet-4-6', 'claude-opus-4-6-thinking')
+            if ([string]::IsNullOrWhiteSpace([string]$Candidate.effort) -and $Candidate.model -notin $agyNoEffortModels) {
                 throw "agy model '$($Candidate.model)' requires effort."
             }
+
             $arguments.AddRange([string[]]@('-p', $Prompt, '--output-format', 'json', '--json-schema', 'pilot/shared/response_schema.json', '--model', [string]$Candidate.model))
             if (-not [string]::IsNullOrWhiteSpace([string]$Candidate.effort)) {
                 $arguments.AddRange([string[]]@('--effort', [string]$Candidate.effort))
@@ -1344,7 +1388,12 @@ function Invoke-PilotRun {
         try {
             $prompt = New-PilotPrompt -Candidate $candidate
             $command = New-CandidateCommand -Candidate $candidate -Prompt $prompt
-            $processResult = if ($null -ne $NativeInvoker) { & $NativeInvoker $command } else { Invoke-NativeCandidate -Command $command -PreserveRawOutput }
+            $processResult = if ($null -ne $NativeInvoker) {
+                & $NativeInvoker $command
+            } else {
+                $nativeTimeoutSeconds = if ($candidate.tool -in @('agy', 'claude')) { 120 } else { 0 }
+                Invoke-NativeCandidate -Command $command -TimeoutSeconds $nativeTimeoutSeconds -PreserveRawOutput
+            }
             $reportedCost = Get-PilotReportedCost -ProcessResult $processResult
             if ($processResult.exit_code -ne 0) {
                 $note = 'transport failure'

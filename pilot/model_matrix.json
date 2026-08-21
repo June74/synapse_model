@@ -165,21 +165,19 @@
       "enabled": true
     },
     {
-      "route_id": "agy__claude_sonnet_4_6__medium",
+      "route_id": "agy__claude_sonnet_4_6__default",
       "tool": "agy",
       "provider": "anthropic",
       "model": "claude-sonnet-4-6",
-      "effort": "medium",
       "candidate_kind": "model",
       "instruction_file": "pilot/providers/google/GEMINI.md",
       "enabled": true
     },
     {
-      "route_id": "agy__claude_opus_4_6_thinking__medium",
+      "route_id": "agy__claude_opus_4_6_thinking__default",
       "tool": "agy",
       "provider": "anthropic",
       "model": "claude-opus-4-6-thinking",
-      "effort": "medium",
       "candidate_kind": "model",
       "instruction_file": "pilot/providers/google/GEMINI.md",
       "enabled": true
