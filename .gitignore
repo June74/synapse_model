@@ -1,3 +1,6 @@
 .worktrees/
 
 *.BACKUP_*.docx
+
+# Local pilot results are runtime outputs and must never be committed.
+pilot/results/*.jsonl

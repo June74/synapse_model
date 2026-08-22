@@ -1,0 +1,1430 @@
+$script:RunnerProjectRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
+# Persisted strings redact exact prompt forms plus every 4-character prompt window.
+# Four contiguous characters is the conservative minimum considered prompt material.
+$script:RunnerPromptFragmentThreshold = 4
+
+if ($null -eq ('RunnerNativeStreamCapture' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Collections.Concurrent;
+using System.Diagnostics;
+using System.IO;
+using System.Threading.Tasks;
+using System.Threading;
+
+public sealed class RunnerNativeStreamCapture
+{
+    public readonly ConcurrentQueue<string> Chunks;
+    public readonly ManualResetEventSlim Closed = new ManualResetEventSlim(false);
+    public Task ReaderTask;
+
+    private RunnerNativeStreamCapture(ConcurrentQueue<string> chunks)
+    {
+        Chunks = chunks;
+    }
+
+    public static RunnerNativeStreamCapture Attach(Process process, ConcurrentQueue<string> chunks, bool stdout)
+    {
+        StreamReader reader = stdout ? process.StandardOutput : process.StandardError;
+        var capture = new RunnerNativeStreamCapture(chunks);
+        capture.ReaderTask = Task.Run(async () =>
+        {
+            var buffer = new char[4096];
+            int count;
+            while ((count = await reader.ReadAsync(buffer, 0, buffer.Length).ConfigureAwait(false)) > 0)
+            {
+                capture.Chunks.Enqueue(new string(buffer, 0, count));
+            }
+            capture.Closed.Set();
+        });
+
+        return capture;
+    }
+}
+'@
+}
+
+function New-RouteId {
+    param(
+        [Parameter(Mandatory)][string]$Tool,
+        [Parameter(Mandatory)][string]$Model,
+        [AllowNull()][string]$Effort
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Effort)) {
+        $Effort = 'default'
+    }
+
+    $parts = @($Tool, $Model, $Effort) | ForEach-Object {
+        ($_ -replace '[^a-zA-Z0-9]+', '_').Trim('_').ToLowerInvariant()
+    }
+
+    return ($parts -join '__')
+}
+
+function ConvertFrom-RunnerCanonicalJsonBody {
+    param([Parameter(Mandatory)][string]$Text)
+
+    $body = $Text.Trim()
+    try {
+        return ($body | ConvertFrom-Json -Depth 20)
+    } catch {
+        throw "Invalid canonical JSON body: $($_.Exception.Message)"
+    }
+}
+
+function ConvertFrom-CodexOutput {
+    param([Parameter(Mandatory)][string]$Text)
+
+    $lastMessage = $null
+    foreach ($line in ($Text -split "`r?`n")) {
+        if ([string]::IsNullOrWhiteSpace($line)) { continue }
+
+        try {
+            $outer = $line | ConvertFrom-Json -Depth 20
+        } catch {
+            throw "Invalid Codex JSONL output: $($_.Exception.Message)"
+        }
+
+        if ($outer.type -eq 'item.completed' -and $outer.item.type -eq 'agent_message') {
+            $lastMessage = $outer.item.text
+        }
+    }
+
+    if ($null -eq $lastMessage) {
+        throw 'Codex output did not contain a completed agent_message event.'
+    }
+
+    return (ConvertFrom-RunnerCanonicalJsonBody -Text $lastMessage)
+}
+
+function ConvertFrom-ClaudeOutput {
+    param([Parameter(Mandatory)][string]$Text)
+
+    try {
+        $outer = $Text | ConvertFrom-Json -Depth 20
+    } catch {
+        throw "Invalid Claude output JSON: $($_.Exception.Message)"
+    }
+
+    if ($outer.PSObject.Properties.Name -contains 'structured_output') {
+        if ($outer.structured_output -is [string]) {
+            if ([string]::IsNullOrWhiteSpace($outer.structured_output)) {
+                throw 'Claude output contains an unusable structured_output string.'
+            }
+            return (ConvertFrom-RunnerCanonicalJsonBody -Text $outer.structured_output)
+        }
+        if ($outer.structured_output -is [System.Management.Automation.PSCustomObject]) {
+            return $outer.structured_output
+        }
+        throw 'Claude output structured_output must be a JSON string or object.'
+    }
+
+    if (-not ($outer.PSObject.Properties.Name -contains 'result')) {
+        throw 'Claude output is missing a usable result.'
+    }
+
+    if ($outer.result -is [string]) {
+        if ([string]::IsNullOrWhiteSpace($outer.result)) {
+            throw 'Claude output is missing a usable result string.'
+        }
+        return (ConvertFrom-RunnerCanonicalJsonBody -Text $outer.result)
+    }
+
+    if ($outer.result -is [System.Management.Automation.PSCustomObject]) {
+        return $outer.result
+    }
+
+    throw 'Claude output result must be a JSON string or object.'
+}
+
+function Get-AgyJsonObjects {
+    param([Parameter(Mandatory)][string]$Text)
+
+    $objects = [System.Collections.Generic.List[object]]::new()
+    $startIndex = -1
+    $depth = 0
+    $inString = $false
+    $escaped = $false
+    for ($index = 0; $index -lt $Text.Length; $index++) {
+        $character = $Text[$index]
+        if ($startIndex -lt 0) {
+            if ($character -eq '{') {
+                $startIndex = $index
+                $depth = 1
+                $inString = $false
+                $escaped = $false
+            }
+            continue
+        }
+
+        if ($inString) {
+            if ($escaped) {
+                $escaped = $false
+            } elseif ($character -eq '\') {
+                $escaped = $true
+            } elseif ($character -eq '"') {
+                $inString = $false
+            }
+            continue
+        }
+
+        if ($character -eq '"') {
+            $inString = $true
+        } elseif ($character -eq '{') {
+            $depth++
+        } elseif ($character -eq '}') {
+            $depth--
+            if ($depth -eq 0) {
+                $candidateText = $Text.Substring($startIndex, $index - $startIndex + 1)
+                try {
+                    $objects.Add(($candidateText | ConvertFrom-Json -Depth 20))
+                } catch {
+                }
+                $startIndex = -1
+            }
+        }
+    }
+
+    return @($objects.ToArray())
+}
+
+function ConvertTo-AgyCanonicalResponse {
+    param([Parameter(Mandatory)][object]$Response)
+
+    $propertyNames = @($Response.PSObject.Properties.Name)
+    if ($propertyNames.Count -eq 3 -and
+        $propertyNames -contains 'status' -and
+        $propertyNames -contains 'answer' -and
+        $propertyNames -contains 'error' -and
+        $Response.status -eq 'success' -and
+        $Response.error -is [string] -and
+        [string]::IsNullOrEmpty($Response.error)) {
+        return [pscustomobject]@{
+            status = [string]$Response.status
+            answer = [string]$Response.answer
+            error = $null
+        }
+    }
+
+    return $Response
+}
+
+function ConvertFrom-AgyOutput {
+    param([Parameter(Mandatory)][string]$Text)
+
+    $objects = @(Get-AgyJsonObjects -Text $Text)
+    $envelopes = @($objects | Where-Object {
+        ($_.PSObject.Properties.Name -contains 'structured_output') -or
+        ($_.PSObject.Properties.Name -contains 'response')
+    })
+
+    if ($objects.Count -ne 1 -or $envelopes.Count -ne 1) {
+        throw "Agy output must contain exactly one top-level JSON object and one recognizable JSON envelope; found $($objects.Count) object(s) and $($envelopes.Count) envelope(s)."
+    }
+
+    $outer = $envelopes[0]
+
+    $hasStructured = $outer.PSObject.Properties.Name -contains 'structured_output'
+    if ($hasStructured -and $null -ne $outer.structured_output) {
+        if ($outer.structured_output -is [string]) {
+            try {
+                return (ConvertTo-AgyCanonicalResponse -Response ($outer.structured_output | ConvertFrom-Json -Depth 20))
+            } catch {
+                throw "Invalid inner JSON in Agy structured_output: $($_.Exception.Message)"
+            }
+        }
+        return (ConvertTo-AgyCanonicalResponse -Response $outer.structured_output)
+    }
+
+    if (($outer.PSObject.Properties.Name -contains 'response') -and
+        $outer.response -is [string] -and -not [string]::IsNullOrWhiteSpace($outer.response)) {
+        try {
+            return (ConvertTo-AgyCanonicalResponse -Response ($outer.response | ConvertFrom-Json -Depth 20))
+        } catch {
+            $innerObjects = @(Get-AgyJsonObjects -Text $outer.response)
+            if ($innerObjects.Count -gt 1) {
+                $innerJson = @($innerObjects | ForEach-Object { $_ | ConvertTo-Json -Compress -Depth 20 })
+                $firstJson = $innerJson[0]
+                if (@($innerJson | Where-Object { $_ -ne $firstJson }).Count -eq 0) {
+                    return (ConvertTo-AgyCanonicalResponse -Response $innerObjects[0])
+                }
+                throw 'Agy response contained conflicting repeated JSON objects.'
+            }
+            throw "Invalid inner JSON in Agy response: $($_.Exception.Message)"
+        }
+    }
+
+    throw 'Agy output contains neither usable structured_output nor response.'
+}
+
+function Test-CanonicalResponse {
+    param([Parameter(Mandatory)][object]$Response)
+
+    $reason = $null
+    if ($null -eq $Response) {
+        $reason = 'Response is null.'
+    } else {
+        $propertyNames = @($Response.PSObject.Properties.Name)
+        foreach ($required in @('status', 'answer', 'error')) {
+            if ($required -notin $propertyNames) {
+                $reason = "Missing required property '$required'."
+                break
+            }
+        }
+
+        if ($null -eq $reason) {
+            $unexpected = @($propertyNames | Where-Object { $_ -notin @('status', 'answer', 'error') })
+            if ($unexpected.Count -gt 0) {
+                $reason = "Unexpected properties: $($unexpected -join ', ')."
+            }
+        }
+
+        if ($null -eq $reason -and ($Response.status -isnot [string] -or $Response.status -notin @('success', 'failure'))) {
+            $reason = 'status must be exactly success or failure.'
+        } elseif ($null -eq $reason -and $Response.answer -isnot [string]) {
+            $reason = 'answer must be a string.'
+        } elseif ($null -eq $reason -and $null -ne $Response.error -and $Response.error -isnot [string]) {
+            $reason = 'error must be null or a string.'
+        } elseif ($null -eq $reason -and $Response.status -eq 'success' -and $null -ne $Response.error) {
+            $reason = 'success responses must have null error.'
+        } elseif ($null -eq $reason -and $Response.status -eq 'success' -and $Response.answer -eq '') {
+            $reason = 'success responses must have a nonempty answer.'
+        } elseif ($null -eq $reason -and $Response.status -eq 'failure' -and
+            ($Response.answer -ne '' -or $Response.error -isnot [string] -or [string]::IsNullOrWhiteSpace($Response.error))) {
+            $reason = 'failure responses must have an empty answer and a nonempty error.'
+        }
+    }
+
+    [pscustomobject]@{
+        valid = $null -eq $reason
+        reason = $reason
+        response = $Response
+    }
+}
+
+function Test-RunnerResolvedTargetInsideRepository {
+    param([Parameter(Mandatory)][string]$TargetPath)
+
+    try {
+        $rootPath = [System.IO.Path]::GetFullPath($script:RunnerProjectRoot).TrimEnd('\')
+        $target = [System.IO.Path]::GetFullPath($TargetPath).TrimEnd('\')
+        return $target.Equals($rootPath, [System.StringComparison]::OrdinalIgnoreCase) -or
+            $target.StartsWith("$rootPath\", [System.StringComparison]::OrdinalIgnoreCase)
+    } catch {
+        return $false
+    }
+}
+
+function Test-RunnerPathComponentsInsideRepository {
+    param([Parameter(Mandatory)][string]$CandidatePath)
+
+    try {
+        $rootPath = [System.IO.Path]::GetFullPath($script:RunnerProjectRoot).TrimEnd('\')
+        $rootPrefix = "$rootPath\"
+        $candidate = [System.IO.Path]::GetFullPath($CandidatePath)
+        if (-not $candidate.StartsWith($rootPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+            return $false
+        }
+
+        $current = $rootPath
+        $relative = $candidate.Substring($rootPrefix.Length)
+        foreach ($component in ($relative -split '[\\/]')) {
+            if ([string]::IsNullOrWhiteSpace($component)) { continue }
+            $current = Join-Path $current $component
+            if (-not (Test-Path -LiteralPath $current)) { break }
+
+            $item = Get-Item -LiteralPath $current -Force -ErrorAction Stop
+            if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                $targetInfo = $item.ResolveLinkTarget($true)
+                if ($null -eq $targetInfo -or
+                    -not (Test-RunnerResolvedTargetInsideRepository $targetInfo.FullName)) {
+                    return $false
+                }
+            }
+        }
+        return $true
+    } catch {
+        return $false
+    }
+}
+
+function Resolve-RunnerInstructionFile {
+    param([Parameter(Mandatory)][string]$InstructionFile)
+
+    try {
+        $rootPath = [System.IO.Path]::GetFullPath($script:RunnerProjectRoot).TrimEnd('\')
+        $instructionPath = if ([System.IO.Path]::IsPathRooted($InstructionFile)) {
+            [System.IO.Path]::GetFullPath($InstructionFile)
+        } else {
+            [System.IO.Path]::GetFullPath((Join-Path $rootPath $InstructionFile))
+        }
+        $rootPrefix = "$rootPath\"
+        if (-not $instructionPath.StartsWith($rootPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+            return $null
+        }
+        if (-not (Test-RunnerPathComponentsInsideRepository $instructionPath)) {
+            return $null
+        }
+
+        $linkItem = Get-Item -LiteralPath $instructionPath -ErrorAction Stop
+        if ($linkItem.PSIsContainer) {
+            return $null
+        }
+
+        $fileInfo = [System.IO.FileInfo]::new($linkItem.FullName)
+        $targetInfo = $fileInfo.ResolveLinkTarget($true)
+        $finalPath = if ($null -ne $targetInfo) { $targetInfo.FullName } else { $fileInfo.FullName }
+        $finalPath = [System.IO.Path]::GetFullPath($finalPath)
+        if (-not (Test-RunnerResolvedTargetInsideRepository $finalPath)) {
+            return $null
+        }
+        if (-not [System.IO.File]::Exists($finalPath)) {
+            return $null
+        }
+
+        $finalItem = Get-Item -LiteralPath $finalPath -ErrorAction Stop
+        if ($finalItem.PSIsContainer) {
+            return $null
+        }
+        return $finalItem
+    } catch {
+        return $null
+    }
+}
+
+function Test-CandidateDefinition {
+    param([Parameter(Mandatory)][object]$Candidate)
+
+    $reason = $null
+    if ($null -eq $Candidate) {
+        $reason = 'Candidate is null.'
+    } else {
+        $propertyNames = @($Candidate.PSObject.Properties.Name)
+        $allowedProperties = @('route_id', 'tool', 'provider', 'model', 'effort', 'enabled', 'candidate_kind', 'instruction_file')
+        $unexpected = @($propertyNames | Where-Object { $_ -notin $allowedProperties })
+        if ($unexpected.Count -gt 0) {
+            $reason = "Unexpected candidate properties: $($unexpected -join ', ')."
+        }
+
+        foreach ($field in @('route_id', 'tool', 'provider', 'model', 'candidate_kind', 'instruction_file')) {
+            if ($null -eq $reason -and -not ($propertyNames -contains $field)) {
+                $reason = "$field must be present."
+            } elseif ($null -eq $reason -and $Candidate.$field -isnot [string]) {
+                $reason = "$field must be a string."
+            } elseif ($null -eq $reason -and [string]::IsNullOrWhiteSpace($Candidate.$field)) {
+                $reason = "$field must be nonempty."
+            }
+        }
+
+        if ($null -eq $reason -and $Candidate.candidate_kind -notin @('model', 'special_route')) {
+            $reason = 'candidate_kind must be model or special_route.'
+        }
+
+        $hasEffort = $propertyNames -contains 'effort'
+        if ($null -eq $reason -and $hasEffort -and $Candidate.effort -isnot [string]) {
+            $reason = 'effort must be a string when present.'
+        }
+
+        if ($null -eq $reason -and $null -eq (Resolve-RunnerInstructionFile $Candidate.instruction_file)) {
+            $reason = 'instruction_file must resolve to an existing regular file inside the project repository.'
+        }
+
+        if ($null -eq $reason -and $Candidate.tool -notin @('codex', 'claude', 'agy')) {
+            $reason = 'tool must be codex, claude, or agy.'
+        }
+
+        $hasEnabled = $Candidate.PSObject.Properties.Name -contains 'enabled'
+        if ($null -eq $reason -and (-not $hasEnabled -or $Candidate.enabled -isnot [bool])) {
+            $reason = 'enabled must be a Boolean.'
+        }
+
+        $isCodexAutoReview = $Candidate.tool -eq 'codex' -and
+            $Candidate.provider -eq 'openai' -and
+            $Candidate.model -eq 'codex-auto-review'
+        if ($null -eq $reason -and $Candidate.candidate_kind -eq 'special_route' -and -not $isCodexAutoReview) {
+            $reason = 'special_route must be the Codex/OpenAI codex-auto-review route.'
+        }
+
+        if ($null -eq $reason -and $Candidate.model -eq 'codex-auto-review' -and $Candidate.candidate_kind -eq 'model') {
+            $reason = 'codex-auto-review must be a special_route.'
+        }
+
+        if ($null -eq $reason -and $isCodexAutoReview -and $Candidate.enabled -ne $false) {
+            $reason = 'codex-auto-review must be disabled.'
+        }
+
+        $hasEffort = $Candidate.PSObject.Properties.Name -contains 'effort'
+        if ($null -eq $reason -and $hasEffort -and -not [string]::IsNullOrWhiteSpace([string]$Candidate.effort) -and
+            $Candidate.effort -notin @('low', 'medium', 'high', 'xhigh', 'max', 'ultra')) {
+            $reason = 'effort must be low, medium, high, xhigh, max, or ultra.'
+        }
+
+        $effortOptional = $Candidate.model -eq 'claude-haiku-4-5' -or
+            ($Candidate.tool -eq 'agy' -and $Candidate.model -in @('claude-sonnet-4-6', 'claude-opus-4-6-thinking'))
+        if ($null -eq $reason -and (-not $hasEffort -or [string]::IsNullOrWhiteSpace([string]$Candidate.effort)) -and -not $effortOptional) {
+            $reason = 'effort is required for this tool and model.'
+        }
+
+        $codexCatalog = @{
+            'gpt-5.6-sol' = @('low', 'medium', 'high', 'xhigh', 'max', 'ultra')
+            'gpt-5.6-terra' = @('low', 'medium', 'high', 'xhigh', 'max', 'ultra')
+            'gpt-5.6-luna' = @('low', 'medium', 'high', 'xhigh', 'max')
+            'gpt-5.5' = @('low', 'medium', 'high', 'xhigh')
+            'gpt-5.4' = @('low', 'medium', 'high', 'xhigh')
+            'gpt-5.4-mini' = @('low', 'medium', 'high', 'xhigh')
+            'gpt-5.3-codex-spark' = @('low', 'medium', 'high', 'xhigh')
+        }
+        $claudeCatalog = @{
+            'claude-opus-5' = @('low', 'medium', 'high', 'xhigh', 'max')
+            'claude-sonnet-5' = @('low', 'medium', 'high', 'xhigh', 'max')
+            'claude-fable-5' = @('low', 'medium', 'high', 'xhigh', 'max')
+            'claude-haiku-4-5' = @()
+        }
+        $agyCatalog = @{
+            'gemini-3.7-flash-high' = @{ provider = 'google'; effort = 'high' }
+            'gemini-3.7-flash-medium' = @{ provider = 'google'; effort = 'medium' }
+            'gemini-3.7-flash-low' = @{ provider = 'google'; effort = 'low' }
+            'gemini-3.6-flash-high' = @{ provider = 'google'; effort = 'high' }
+            'gemini-3.6-flash-medium' = @{ provider = 'google'; effort = 'medium' }
+            'gemini-3.6-flash-low' = @{ provider = 'google'; effort = 'low' }
+            'gemini-3.5-flash-high' = @{ provider = 'google'; effort = 'high' }
+            'gemini-3.5-flash-medium' = @{ provider = 'google'; effort = 'medium' }
+            'gemini-3.5-flash-low' = @{ provider = 'google'; effort = 'low' }
+            'gemini-3.1-pro-high' = @{ provider = 'google'; effort = 'high' }
+            'gemini-3.1-pro-low' = @{ provider = 'google'; effort = 'low' }
+            'claude-sonnet-4-6' = @{ provider = 'anthropic'; effort = $null }
+            'claude-opus-4-6-thinking' = @{ provider = 'anthropic'; effort = $null }
+            'gpt-oss-120b-medium' = @{ provider = 'openai'; effort = 'medium' }
+        }
+
+        if ($null -eq $reason) {
+            $hasUsableEffort = $hasEffort -and -not [string]::IsNullOrWhiteSpace([string]$Candidate.effort)
+            switch ($Candidate.tool) {
+                'codex' {
+                    if ($Candidate.provider -ne 'openai') {
+                        $reason = 'codex candidates must use provider openai.'
+                    } elseif ($Candidate.model -eq 'codex-auto-review') {
+                        if (-not $hasUsableEffort -or $Candidate.effort -notin @('low', 'medium', 'high', 'xhigh', 'max')) {
+                            $reason = 'codex-auto-review effort must be low, medium, high, xhigh, or max.'
+                        }
+                    } elseif (-not $codexCatalog.ContainsKey($Candidate.model)) {
+                        $reason = "Unsupported codex model '$($Candidate.model)'."
+                    } elseif (-not $hasUsableEffort -or $Candidate.effort -notin $codexCatalog[$Candidate.model]) {
+                        $reason = "effort '$($Candidate.effort)' is not supported for codex model '$($Candidate.model)'."
+                    }
+                }
+                'claude' {
+                    if ($Candidate.provider -ne 'anthropic') {
+                        $reason = 'claude candidates must use provider anthropic.'
+                    } elseif (-not $claudeCatalog.ContainsKey($Candidate.model)) {
+                        $reason = "Unsupported claude model '$($Candidate.model)'."
+                    } elseif ($Candidate.model -eq 'claude-haiku-4-5') {
+                        if ($hasUsableEffort) {
+                            $reason = 'claude-haiku-4-5 permits omitted effort only.'
+                        }
+                    } elseif (-not $hasUsableEffort -or $Candidate.effort -notin $claudeCatalog[$Candidate.model]) {
+                        $reason = "effort '$($Candidate.effort)' is not supported for claude model '$($Candidate.model)'."
+                    }
+                }
+                'agy' {
+                    if (-not $agyCatalog.ContainsKey($Candidate.model)) {
+                        $reason = "Unsupported agy model '$($Candidate.model)'."
+                    } elseif ($Candidate.provider -ne $agyCatalog[$Candidate.model].provider) {
+                        $reason = "agy model '$($Candidate.model)' must use provider $($agyCatalog[$Candidate.model].provider)."
+                    } elseif ($null -eq $agyCatalog[$Candidate.model].effort) {
+                        if ($hasUsableEffort) {
+                            $reason = "agy model '$($Candidate.model)' does not support effort."
+                        }
+                    } elseif (-not $hasUsableEffort -or $Candidate.effort -ne $agyCatalog[$Candidate.model].effort) {
+                        $reason = "agy model '$($Candidate.model)' requires registered effort $($agyCatalog[$Candidate.model].effort)."
+                    }
+                }
+            }
+        }
+
+        if ($null -eq $reason) {
+            $expectedRouteId = New-RouteId -Tool $Candidate.tool -Model $Candidate.model -Effort $Candidate.effort
+            if ($Candidate.route_id -ne $expectedRouteId) {
+                $reason = "route_id must equal '$expectedRouteId'."
+            }
+        }
+    }
+
+    [pscustomobject]@{
+        valid = $null -eq $reason
+        reason = $reason
+        candidate = $Candidate
+    }
+}
+
+function Test-CandidateMatrix {
+    param([Parameter(Mandatory)][object[]]$Candidates)
+
+    $seen = @{}
+    foreach ($candidate in $Candidates) {
+        $validation = Test-CandidateDefinition $candidate
+        if (-not $validation.valid) {
+            return [pscustomobject]@{ valid = $false; reason = $validation.reason; candidates = $Candidates }
+        }
+        if ($seen.ContainsKey($candidate.route_id)) {
+            return [pscustomobject]@{ valid = $false; reason = "Duplicate route_id '$($candidate.route_id)'."; candidates = $Candidates }
+        }
+        $seen[$candidate.route_id] = $true
+    }
+
+    [pscustomobject]@{ valid = $true; reason = $null; candidates = $Candidates }
+}
+
+function New-CandidateCommand {
+    param(
+        [Parameter(Mandatory)][object]$Candidate,
+        [Parameter(Mandatory)][string]$Prompt
+    )
+
+    $arguments = [System.Collections.Generic.List[string]]::new()
+    switch ($Candidate.tool) {
+        'codex' {
+            $executable = 'codex'
+            $arguments.AddRange([string[]]@('exec', '--skip-git-repo-check', '--ephemeral', '--json', '--output-schema', 'pilot/shared/response_schema.json', '-s', 'read-only', '--model', [string]$Candidate.model))
+            if (-not [string]::IsNullOrWhiteSpace([string]$Candidate.effort)) {
+                $arguments.Add('-c')
+                $arguments.Add(('model_reasoning_effort="{0}"' -f $Candidate.effort))
+            }
+            $arguments.Add($Prompt)
+        }
+        'claude' {
+            $executable = 'claude'
+            if ($Candidate.model -ne 'claude-haiku-4-5' -and [string]::IsNullOrWhiteSpace([string]$Candidate.effort)) {
+                throw "Claude model '$($Candidate.model)' requires effort."
+            }
+            $arguments.AddRange([string[]]@('-p', '--model', [string]$Candidate.model))
+            if ($Candidate.model -ne 'claude-haiku-4-5' -and -not [string]::IsNullOrWhiteSpace([string]$Candidate.effort)) {
+                $arguments.AddRange([string[]]@('--effort', [string]$Candidate.effort))
+            }
+            $claudeSchema = '{"type":"object","additionalProperties":false,"properties":{"status":{"type":"string","enum":["success","failure"]},"answer":{"type":"string"},"error":{"type":["string","null"]}},"required":["status","answer","error"]}'
+            $maxTurns = if ($Candidate.model -eq 'claude-haiku-4-5') { '3' } else { '1' }
+            $arguments.AddRange([string[]]@('--output-format', 'json', '--json-schema', $claudeSchema, '--max-turns', $maxTurns, '--no-session-persistence', '--disable-slash-commands', $Prompt, '--tools', ''))
+        }
+        'agy' {
+            $executable = 'agy'
+            $agyNoEffortModels = @('claude-sonnet-4-6', 'claude-opus-4-6-thinking')
+            if ([string]::IsNullOrWhiteSpace([string]$Candidate.effort) -and $Candidate.model -notin $agyNoEffortModels) {
+                throw "agy model '$($Candidate.model)' requires effort."
+            }
+
+            $arguments.AddRange([string[]]@('-p', $Prompt, '--output-format', 'json', '--json-schema', 'pilot/shared/response_schema.json', '--model', [string]$Candidate.model))
+            if (-not [string]::IsNullOrWhiteSpace([string]$Candidate.effort)) {
+                $arguments.AddRange([string[]]@('--effort', [string]$Candidate.effort))
+            }
+            $arguments.AddRange([string[]]@('--print-timeout', '2m', '--disable-slash-commands'))
+        }
+        default { throw "Unsupported candidate tool '$($Candidate.tool)'." }
+    }
+
+    [pscustomobject]@{
+        executable = $executable
+        arguments = @($arguments)
+        prompt = $Prompt
+        tool = [string]$Candidate.tool
+        route_id = [string]$Candidate.route_id
+        working_directory = $script:RunnerProjectRoot
+    }
+}
+
+function Resolve-RunnerNativeCommand {
+    param([Parameter(Mandatory)][object]$Command)
+
+    $commandInfo = @(Get-Command -Name ([string]$Command.executable) -ErrorAction Stop |
+        Where-Object { $_.CommandType -in @('Application', 'ExternalScript') } |
+        Select-Object -First 1)[0]
+    if ($null -eq $commandInfo) {
+        throw "Native executable '$($Command.executable)' could not be resolved."
+    }
+
+    $resolvedPath = [string]$commandInfo.Path
+    if ([string]::IsNullOrWhiteSpace($resolvedPath)) {
+        $resolvedPath = [string]$commandInfo.Source
+    }
+    if ([string]::IsNullOrWhiteSpace($resolvedPath)) {
+        throw "Native executable '$($Command.executable)' did not resolve to a file."
+    }
+
+    $isPowerShellShim = [System.IO.Path]::GetExtension($resolvedPath).Equals('.ps1', [System.StringComparison]::OrdinalIgnoreCase)
+    $requestedName = [System.IO.Path]::GetFileNameWithoutExtension([System.IO.Path]::GetFileName([string]$Command.executable))
+    $arguments = [System.Collections.Generic.List[string]]::new()
+    $executable = $resolvedPath
+    if ($isPowerShellShim) {
+        $launcherName = if ($requestedName -in @('pwsh', 'powershell')) { $requestedName } else { $null }
+        if ($null -ne $launcherName) {
+            $launcherInfo = @(Get-Command -Name $launcherName -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1)[0]
+            if ($null -ne $launcherInfo -and [System.IO.Path]::GetExtension([string]$launcherInfo.Path) -ne '.ps1') {
+                $executable = [string]$launcherInfo.Path
+                $isPowerShellShim = $false
+            }
+        }
+    }
+    if ($isPowerShellShim) {
+        $pwshInfo = @(Get-Command -Name 'pwsh' -CommandType Application -ErrorAction Stop | Select-Object -First 1)[0]
+        $executable = if ($null -ne $pwshInfo -and -not [string]::IsNullOrWhiteSpace([string]$pwshInfo.Path)) {
+            [string]$pwshInfo.Path
+        } else { [System.IO.Path]::Combine($PSHOME, 'pwsh.exe') }
+        $arguments.Add('-NoProfile')
+        $arguments.Add('-File')
+        $arguments.Add($resolvedPath)
+    }
+    foreach ($argument in @($Command.arguments)) {
+        $arguments.Add([string]$argument)
+    }
+
+    [pscustomobject]@{
+        executable = $executable
+        arguments = @($arguments)
+        prompt = [string]$Command.prompt
+        tool = [string]$Command.tool
+        route_id = [string]$Command.route_id
+        working_directory = [string]$Command.working_directory
+    }
+}
+
+function ConvertTo-RunnerNormalizedLineEndings {
+    param([AllowNull()][string]$Text)
+
+    if ($null -eq $Text) { return '' }
+    return [System.Text.RegularExpressions.Regex]::Replace($Text, "`r`n|`r", "`n")
+}
+
+function ConvertTo-RunnerJsonUnicodeEscaped {
+    param(
+        [Parameter(Mandatory)][string]$JsonText,
+        [switch]$Lowercase
+    )
+
+    $format = if ($Lowercase) { 'x4' } else { 'X4' }
+    $builder = [System.Text.StringBuilder]::new()
+    foreach ($character in $JsonText.ToCharArray()) {
+        if ([int][char]$character -gt 127) {
+            [void]$builder.Append(('\u{0}' -f ([int][char]$character).ToString($format)))
+        } else {
+            [void]$builder.Append($character)
+        }
+    }
+    return $builder.ToString()
+}
+
+function ConvertTo-RunnerFullyUnicodeEscaped {
+    param([Parameter(Mandatory)][string]$Text)
+
+    $builder = [System.Text.StringBuilder]::new()
+    foreach ($character in $Text.ToCharArray()) {
+        [void]$builder.Append(('\u{0}' -f ([int][char]$character).ToString('X4')))
+    }
+    return $builder.ToString()
+}
+
+function Get-RunnerJsonPromptVariants {
+    param([Parameter(Mandatory)][string]$JsonText)
+
+    $variants = [System.Collections.Generic.List[string]]::new()
+    $slash = $JsonText.Replace('/', '\/')
+    foreach ($unicode in @(
+        (ConvertTo-RunnerJsonUnicodeEscaped -JsonText $JsonText),
+        (ConvertTo-RunnerJsonUnicodeEscaped -JsonText $JsonText -Lowercase)
+    )) {
+        $variants.Add($unicode)
+        $variants.Add($unicode.Replace('/', '\/'))
+    }
+    $variants.Add($JsonText)
+    $variants.Add($slash)
+    return @($variants | Select-Object -Unique)
+}
+
+function ConvertTo-RunnerPromptRegex {
+    param([Parameter(Mandatory)][string]$Prompt)
+
+    $characterPatterns = [System.Collections.Generic.List[string]]::new()
+    foreach ($character in $Prompt.ToCharArray()) {
+        $alternatives = [System.Collections.Generic.List[string]]::new()
+        $literal = [string]$character
+        $alternatives.Add(('(?i:' + [regex]::Escape($literal) + ')'))
+        $code = ([int][char]$character).ToString('X4')
+        $alternatives.Add(('(?i:' + [regex]::Escape(('\u{0}' -f $code)) + ')'))
+        switch ($character) {
+            '/' { $alternatives.Add([regex]::Escape('\/')) }
+            '"' { $alternatives.Add([regex]::Escape('\"')) }
+            '\' { $alternatives.Add([regex]::Escape('\\')) }
+            "`n" {
+                $alternatives.Add([regex]::Escape('\n'))
+                $alternatives.Add([regex]::Escape('\r\n'))
+                $lineFeedRepresentations = @(
+                    [regex]::Escape("`n"),
+                    [regex]::Escape('\n'),
+                    [regex]::Escape('\r\n'),
+                    ('(?i:' + [regex]::Escape('\u000A') + ')')
+                )
+                $carriageReturnRepresentations = @(
+                    [regex]::Escape("`n"),
+                    [regex]::Escape('\r'),
+                    ('(?i:' + [regex]::Escape('\u000D') + ')')
+                )
+                foreach ($lineFeedRepresentation in $lineFeedRepresentations) {
+                    $alternatives.Add($lineFeedRepresentation)
+                }
+                foreach ($carriageReturnRepresentation in $carriageReturnRepresentations) {
+                    foreach ($lineFeedRepresentation in $lineFeedRepresentations) {
+                        $alternatives.Add($carriageReturnRepresentation + $lineFeedRepresentation)
+                    }
+                }
+            }
+            "`t" { $alternatives.Add([regex]::Escape('\t')) }
+            "`b" { $alternatives.Add([regex]::Escape('\b')) }
+            "`f" { $alternatives.Add([regex]::Escape('\f')) }
+            "`r" { $alternatives.Add([regex]::Escape('\r')) }
+        }
+        $characterPatterns.Add('(?:' + (($alternatives | Select-Object -Unique) -join '|') + ')')
+    }
+    return ($characterPatterns -join '')
+}
+
+function ConvertTo-RunnerRedactedText {
+    param(
+        [AllowNull()][string]$Text,
+        [string[]]$PromptVariants,
+        [string]$PromptRegex,
+        [string[]]$PromptFragmentVariants,
+        [string]$PromptFragmentRegex,
+        [string]$PromptBase64FragmentRegex
+    )
+
+    $result = ConvertTo-RunnerNormalizedLineEndings $Text
+    # Separators keep our temporary markers from looking like the long Base64-looking
+    # carriers redacted below.
+    $markerToken = ([guid]::NewGuid().ToString('N') -replace '(.{4})', '$1:')
+    $fullPromptMarker = "`0${markerToken}F`0"
+    $fragmentMarker = "`0${markerToken}R`0"
+    $base64Marker = "`0${markerToken}B`0"
+    $encodedMarker = "`0${markerToken}E`0"
+    if (-not [string]::IsNullOrEmpty($PromptRegex)) {
+        $result = [regex]::Replace($result, $PromptRegex, $fullPromptMarker)
+    }
+    foreach ($variant in @($PromptVariants)) {
+        if (-not [string]::IsNullOrEmpty($variant)) {
+            $result = $result.Replace($variant, $fullPromptMarker)
+        }
+    }
+    # A provider can return a shifted, wrapped, or embedded UTF-8 Base64 carrier that
+    # is not one of the prompt-derived encodings. This boundary-free linear scan is
+    # deliberately conservative: any contiguous run of 32+ Base64/URL-safe chars,
+    # including padding, is treated as encoded content and never persisted.
+    $result = [regex]::Replace($result, '(?i)[A-Za-z0-9+/=_-]{32,}', $encodedMarker)
+    if (-not [string]::IsNullOrEmpty($PromptFragmentRegex)) {
+        $result = [regex]::Replace($result, $PromptFragmentRegex, $fragmentMarker)
+    }
+    if (-not [string]::IsNullOrEmpty($PromptBase64FragmentRegex)) {
+        # Generated Base64 fragment variants are replaced directly in one regex pass; no candidate substrings are decoded.
+        $result = [regex]::Replace($result, $PromptBase64FragmentRegex, $base64Marker)
+    }
+    return $result.Replace($fullPromptMarker, '[prompt redacted]').Replace($fragmentMarker, '[prompt fragment redacted]').Replace($base64Marker, '[prompt Base64 redacted]').Replace($encodedMarker, '[encoded content redacted]')
+}
+
+function New-RunnerStreamCapture {
+    param(
+        [Parameter(Mandatory)][System.Diagnostics.Process]$Process,
+        [Parameter(Mandatory)][System.Collections.Concurrent.ConcurrentQueue[string]]$Chunks,
+        [Parameter(Mandatory)][ValidateSet('stdout', 'stderr')][string]$Stream
+    )
+
+    return [RunnerNativeStreamCapture]::Attach($Process, $Chunks, $Stream -eq 'stdout')
+}
+
+function Receive-RunnerStreamOutput {
+    param([Parameter(Mandatory)][System.Collections.Concurrent.ConcurrentQueue[string]]$Chunks)
+
+    $parts = [System.Collections.Generic.List[string]]::new()
+    $chunk = $null
+    while ($Chunks.TryDequeue([ref]$chunk)) {
+        [void]$parts.Add($chunk)
+        $chunk = $null
+    }
+    return ($parts -join '')
+}
+
+function New-RunnerPromptRedactionContext {
+    param([AllowNull()][string]$Prompt)
+
+    $promptText = if ($null -eq $Prompt) { '' } else { [string]$Prompt }
+    $normalizedPromptText = ConvertTo-RunnerNormalizedLineEndings $promptText
+    $promptVariants = [System.Collections.Generic.List[string]]::new()
+    foreach ($variant in @($promptText, $normalizedPromptText)) {
+        if ([string]::IsNullOrEmpty($variant)) { continue }
+        $promptVariants.Add($variant)
+        $fullyUnicodeVariant = ConvertTo-RunnerFullyUnicodeEscaped -Text $variant
+        $promptVariants.Add($fullyUnicodeVariant)
+        $promptVariants.Add($fullyUnicodeVariant.ToLowerInvariant())
+        $jsonVariant = ConvertTo-Json -InputObject $variant -Compress
+        foreach ($jsonSpelling in @(Get-RunnerJsonPromptVariants -JsonText $jsonVariant)) {
+            $promptVariants.Add($jsonSpelling)
+            if ($jsonSpelling.Length -gt 1) {
+                $promptVariants.Add($jsonSpelling.Substring(1, $jsonSpelling.Length - 2))
+            }
+        }
+        $base64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($variant))
+        $promptVariants.Add($base64)
+        $promptVariants.Add($base64.TrimEnd('='))
+        $promptVariants.Add($base64.Replace('+', '-').Replace('/', '_').TrimEnd('='))
+    }
+
+    $promptFragmentVariants = [System.Collections.Generic.List[string]]::new()
+    if ($normalizedPromptText.Length -ge $script:RunnerPromptFragmentThreshold) {
+        $maxStart = $normalizedPromptText.Length - $script:RunnerPromptFragmentThreshold
+        for ($index = 0; $index -le $maxStart; $index++) {
+            $fragment = $normalizedPromptText.Substring($index, $script:RunnerPromptFragmentThreshold)
+            [void]$promptFragmentVariants.Add($fragment)
+            if ($fragment -match '[^\x20-\x7E]' -or $fragment.IndexOfAny([char[]]'"\/') -ge 0) {
+                [void]$promptFragmentVariants.Add((ConvertTo-RunnerFullyUnicodeEscaped -Text $fragment))
+                [void]$promptFragmentVariants.Add((ConvertTo-RunnerFullyUnicodeEscaped -Text $fragment).ToLowerInvariant())
+                $jsonFragment = ConvertTo-Json -InputObject $fragment -Compress
+                foreach ($jsonSpelling in @(Get-RunnerJsonPromptVariants -JsonText $jsonFragment)) {
+                    [void]$promptFragmentVariants.Add($jsonSpelling)
+                    if ($jsonSpelling.Length -gt 1) {
+                        [void]$promptFragmentVariants.Add($jsonSpelling.Substring(1, $jsonSpelling.Length - 2))
+                    }
+                }
+            }
+        }
+    }
+
+    $promptFragmentVariants = @($promptFragmentVariants | Select-Object -Unique)
+    $promptBase64FragmentVariants = [System.Collections.Generic.List[string]]::new()
+    foreach ($fragment in @($promptFragmentVariants)) {
+        if ([string]::IsNullOrEmpty($fragment)) { continue }
+        $base64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($fragment))
+        [void]$promptBase64FragmentVariants.Add($base64)
+        [void]$promptBase64FragmentVariants.Add($base64.TrimEnd('='))
+        $urlSafe = $base64.Replace('+', '-').Replace('/', '_')
+        [void]$promptBase64FragmentVariants.Add($urlSafe)
+        [void]$promptBase64FragmentVariants.Add($urlSafe.TrimEnd('='))
+    }
+    # Six-character raw probes cover the two Base64 3-byte groups that occur inside longer embedded excerpts;
+    # together with the four-character windows above this stays linear in prompt length while handling padded variants.
+    $base64ProbeLength = $script:RunnerPromptFragmentThreshold + 2
+    if ($normalizedPromptText.Length -ge $base64ProbeLength) {
+        for ($index = 0; $index -le ($normalizedPromptText.Length - $base64ProbeLength); $index++) {
+            $probe = $normalizedPromptText.Substring($index, $base64ProbeLength)
+            $base64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($probe))
+            [void]$promptBase64FragmentVariants.Add($base64)
+            [void]$promptBase64FragmentVariants.Add($base64.TrimEnd('='))
+            $urlSafe = $base64.Replace('+', '-').Replace('/', '_')
+            [void]$promptBase64FragmentVariants.Add($urlSafe)
+            [void]$promptBase64FragmentVariants.Add($urlSafe.TrimEnd('='))
+        }
+    }
+    $promptBase64FragmentVariants = @($promptBase64FragmentVariants | Select-Object -Unique)
+
+    [pscustomobject]@{
+        variants = @($promptVariants | Sort-Object Length -Descending | Select-Object -Unique)
+        fragments = @($promptFragmentVariants | Select-Object -Unique)
+        fragment_regex = if ($promptFragmentVariants.Count -eq 0) { '' } else {
+            '(?:' + (($promptFragmentVariants | Where-Object { -not [string]::IsNullOrEmpty($_) } | Sort-Object Length -Descending | Select-Object -Unique | ForEach-Object { [regex]::Escape($_) }) -join '|') + ')'
+        }
+        base64_fragment_regex = if ($promptBase64FragmentVariants.Count -eq 0) { '' } else {
+            '(?:' + (($promptBase64FragmentVariants | Where-Object { -not [string]::IsNullOrEmpty($_) } | Sort-Object Length -Descending | Select-Object -Unique | ForEach-Object { [regex]::Escape($_) }) -join '|') + ')'
+        }
+        regex = if ([string]::IsNullOrEmpty($normalizedPromptText)) { '' } else { ConvertTo-RunnerPromptRegex -Prompt $normalizedPromptText }
+    }
+}
+
+function Invoke-NativeCandidate {
+    param(
+        [Parameter(Mandatory)][object]$Command,
+        [int]$TimeoutSeconds = 0,
+        [switch]$PreserveRawOutput
+    )
+
+    $resolvedCommand = Resolve-RunnerNativeCommand -Command $Command
+    $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = [string]$resolvedCommand.executable
+    $startInfo.WorkingDirectory = [string]$resolvedCommand.working_directory
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $utf8Encoding = [System.Text.UTF8Encoding]::new($false)
+    $startInfo.StandardOutputEncoding = $utf8Encoding
+    $startInfo.StandardErrorEncoding = $utf8Encoding
+    foreach ($argument in @($resolvedCommand.arguments)) {
+        [void]$startInfo.ArgumentList.Add([string]$argument)
+    }
+
+    $promptProperty = $Command.PSObject.Properties['prompt']
+    $promptText = if ($null -ne $promptProperty) { [string]$promptProperty.Value } else { '' }
+    $redactionContext = New-RunnerPromptRedactionContext -Prompt $promptText
+    $orderedPromptVariants = $redactionContext.variants
+    $promptFragmentVariants = $redactionContext.fragments
+    $promptRegex = $redactionContext.regex
+    $promptFragmentRegex = $redactionContext.fragment_regex
+    $promptBase64FragmentRegex = $redactionContext.base64_fragment_regex
+    $safeArguments = @($resolvedCommand.arguments | ForEach-Object {
+        ConvertTo-RunnerRedactedText -Text ([string]$_) -PromptVariants $orderedPromptVariants -PromptRegex $promptRegex -PromptFragmentVariants $promptFragmentVariants -PromptFragmentRegex $promptFragmentRegex -PromptBase64FragmentRegex $promptBase64FragmentRegex
+    })
+
+    $process = [System.Diagnostics.Process]::new()
+    $process.StartInfo = $startInfo
+    $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+    try {
+        [void]$process.Start()
+        $processId = $process.Id
+        $stdoutChunks = [System.Collections.Concurrent.ConcurrentQueue[string]]::new()
+        $stderrChunks = [System.Collections.Concurrent.ConcurrentQueue[string]]::new()
+        $stdoutCapture = New-RunnerStreamCapture -Process $process -Chunks $stdoutChunks -Stream stdout
+        $stderrCapture = New-RunnerStreamCapture -Process $process -Chunks $stderrChunks -Stream stderr
+
+        $timedOut = $false
+        $cleanupFailed = $false
+        $cleanupStatus = 'not_required'
+        $cleanupIssues = [System.Collections.Generic.List[string]]::new()
+        $processWaitMilliseconds = if ($TimeoutSeconds -gt 0) { $TimeoutSeconds * 1000 } else { 30000 }
+        if (-not $process.WaitForExit($processWaitMilliseconds)) {
+                $timedOut = $true
+                $cleanupStatus = 'timeout_cleanup_complete'
+                try {
+                    $process.Kill($true)
+                } catch {
+                    $cleanupIssues.Add('kill_failed')
+                }
+                if (-not $process.WaitForExit(1000)) {
+                    $cleanupIssues.Add('process_exit_timeout')
+                }
+                if (-not $stdoutCapture.ReaderTask.Wait(1000)) {
+                    $cleanupIssues.Add('stdout_read_timeout')
+                }
+                if (-not $stderrCapture.ReaderTask.Wait(1000)) {
+                    $cleanupIssues.Add('stderr_read_timeout')
+                }
+        } else {
+            $drainWaitMilliseconds = if ($TimeoutSeconds -gt 0) {
+                [Math]::Max(1000, $TimeoutSeconds * 1000)
+            } else {
+                1000
+            }
+            if (-not $stdoutCapture.ReaderTask.Wait($drainWaitMilliseconds)) {
+                $cleanupIssues.Add('stdout_drain_timeout')
+            }
+            if (-not $stderrCapture.ReaderTask.Wait($drainWaitMilliseconds)) {
+                $cleanupIssues.Add('stderr_drain_timeout')
+            }
+            if ($cleanupIssues.Count -gt 0) {
+                $cleanupStatus = 'output_drain_timeout'
+            }
+        }
+
+        $rawStdout = Receive-RunnerStreamOutput -Chunks $stdoutChunks
+        $rawStderr = Receive-RunnerStreamOutput -Chunks $stderrChunks
+        $stdout = ConvertTo-RunnerRedactedText -Text $rawStdout -PromptVariants $orderedPromptVariants -PromptRegex $promptRegex -PromptFragmentVariants $promptFragmentVariants -PromptFragmentRegex $promptFragmentRegex -PromptBase64FragmentRegex $promptBase64FragmentRegex
+        $stderr = ConvertTo-RunnerRedactedText -Text $rawStderr -PromptVariants $orderedPromptVariants -PromptRegex $promptRegex -PromptFragmentVariants $promptFragmentVariants -PromptFragmentRegex $promptFragmentRegex -PromptBase64FragmentRegex $promptBase64FragmentRegex
+        if ($cleanupIssues.Count -gt 0) {
+            $cleanupFailed = $true
+            if ($timedOut) {
+                $cleanupStatus = 'timeout_cleanup_failed'
+            }
+        }
+        $processExited = $process.HasExited
+        $exitCode = if ($processExited) { $process.ExitCode } else { $null }
+        $stopwatch.Stop()
+
+        $result = [ordered]@{
+            exit_code = $exitCode
+            stdout = $stdout
+            stderr = $stderr
+            duration_ms = [int64]$stopwatch.ElapsedMilliseconds
+            timed_out = $timedOut
+            cleanup_failed = $cleanupFailed
+            cleanup_status = $cleanupStatus
+            process_id = $processId
+            process_exited = $processExited
+            executable = ConvertTo-RunnerRedactedText -Text ([string]$resolvedCommand.executable) -PromptVariants $orderedPromptVariants -PromptRegex $promptRegex -PromptFragmentVariants $promptFragmentVariants -PromptFragmentRegex $promptFragmentRegex -PromptBase64FragmentRegex $promptBase64FragmentRegex
+            tool = [string]$Command.tool
+            route_id = [string]$Command.route_id
+            working_directory = ConvertTo-RunnerRedactedText -Text ([string]$resolvedCommand.working_directory) -PromptVariants $orderedPromptVariants -PromptRegex $promptRegex -PromptFragmentVariants $promptFragmentVariants -PromptFragmentRegex $promptFragmentRegex -PromptBase64FragmentRegex $promptBase64FragmentRegex
+            arguments = $safeArguments
+        }
+        if ($PreserveRawOutput) {
+            $result.raw_stdout = $rawStdout
+            $result.raw_stderr = $rawStderr
+        }
+        [pscustomobject]$result
+    } finally {
+        $stopwatch.Stop()
+        $process.Dispose()
+    }
+}
+
+function Resolve-PilotProjectPath {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [string]$FieldName = 'Path'
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        throw "$FieldName must be a nonempty repository path."
+    }
+    if ([System.IO.Path]::IsPathRooted($Path)) {
+        throw "$FieldName must be repository-relative."
+    }
+    if (@($Path -split '[\\/]' | Where-Object { $_ -eq '..' }).Count -gt 0) {
+        throw "$FieldName traversal is not allowed."
+    }
+    $resolved = [System.IO.Path]::GetFullPath((Join-Path $script:RunnerProjectRoot $Path))
+    if (-not (Test-RunnerPathComponentsInsideRepository $resolved)) {
+        throw "$FieldName must remain inside the repository."
+    }
+    return $resolved
+}
+
+function Resolve-PilotResultsPath {
+    param([Parameter(Mandatory)][string]$Path)
+
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        throw 'ResultsPath must be a nonempty repository-relative path.'
+    }
+    if ([System.IO.Path]::IsPathRooted($Path)) {
+        throw 'ResultsPath must be repository-relative.'
+    }
+    if (@($Path -split '[\\/]' | Where-Object { $_ -eq '..' }).Count -gt 0) {
+        throw 'ResultsPath traversal is not allowed.'
+    }
+
+    $resolved = [System.IO.Path]::GetFullPath((Join-Path $script:RunnerProjectRoot $Path))
+    if (-not (Test-RunnerPathComponentsInsideRepository $resolved)) {
+        throw 'ResultsPath must remain inside the repository.'
+    }
+    return $resolved
+}
+
+function New-PilotPrompt {
+    param(
+        [Parameter(Mandatory)][object]$Candidate,
+        [string]$ContractPath = 'pilot/shared/experiment_contract.md',
+        [string]$TaskPath = 'pilot/tasks/001_smoke_test.md'
+    )
+
+    $wrapper = Resolve-RunnerInstructionFile $Candidate.instruction_file
+    if ($null -eq $wrapper) {
+        throw "Instruction file could not be resolved for route '$($Candidate.route_id)'."
+    }
+    $contractFile = Resolve-PilotProjectPath -Path $ContractPath -FieldName 'ContractPath'
+    $taskFile = Resolve-PilotProjectPath -Path $TaskPath -FieldName 'TaskPath'
+    if (-not (Test-Path -LiteralPath $contractFile -PathType Leaf)) { throw "Contract file not found: $ContractPath" }
+    if (-not (Test-Path -LiteralPath $taskFile -PathType Leaf)) { throw "Task file not found: $TaskPath" }
+
+    return @(
+        '=== Shared experiment contract ==='
+        (Get-Content -Raw -LiteralPath $contractFile)
+        '=== Provider wrapper instructions ==='
+        (Get-Content -Raw -LiteralPath $wrapper.FullName)
+        '=== Experiment task ==='
+        (Get-Content -Raw -LiteralPath $taskFile)
+    ) -join "`n`n"
+}
+
+function Select-PilotCandidates {
+    param(
+        [Parameter(Mandatory)][object]$Matrix,
+        [switch]$RunAll,
+        [switch]$IncludeSpecialRoutes,
+        [AllowEmptyString()][string]$RouteId
+    )
+
+    if ($RunAll -and -not [string]::IsNullOrWhiteSpace($RouteId)) {
+        throw '-RunAll and -RouteId cannot be used together.'
+    }
+
+    $normal = @($Matrix.candidates)
+    $special = @($Matrix.special_routes)
+    $all = @($normal + $special)
+    if ($null -eq $Matrix.candidates -or $null -eq $Matrix.special_routes) {
+        throw 'Model matrix must contain candidates and special_routes arrays.'
+    }
+    $validation = Test-CandidateMatrix $all
+    if (-not $validation.valid) { throw "Invalid model matrix: $($validation.reason)" }
+
+    if (-not [string]::IsNullOrWhiteSpace($RouteId)) {
+        $match = @($all | Where-Object { $_.route_id -ceq $RouteId })
+        if ($match.Count -ne 1) { throw "RouteId '$RouteId' did not resolve to exactly one candidate." }
+        if ($match[0].candidate_kind -eq 'special_route' -and -not $IncludeSpecialRoutes) {
+            throw "Special route '$RouteId' requires -IncludeSpecialRoutes."
+        }
+        return $match
+    }
+
+    $selected = @($normal | Where-Object { $_.enabled })
+    if ($IncludeSpecialRoutes) {
+        $selected += @($special)
+    }
+    return @($selected)
+}
+
+function ConvertTo-PilotDiagnostic {
+    param([AllowNull()][object]$Value)
+
+    if ($null -eq $Value) { return $null }
+    $text = ([string]$Value -replace '[\r\n\t]+', ' ' -replace '\s{2,}', ' ').Trim()
+    if ($text.Length -gt 300) { $text = $text.Substring(0, 300) + '...' }
+    return $text
+}
+
+function ConvertTo-PilotSafeCost {
+    param([AllowNull()][object]$Value)
+
+    $numericTypes = @([byte], [sbyte], [int16], [uint16], [int32], [uint32], [int64], [uint64], [single], [double], [decimal])
+    if ($null -eq $Value -or $Value.GetType() -notin $numericTypes) { return $null }
+    $number = [double]$Value
+    if ([double]::IsNaN($number) -or [double]::IsInfinity($number) -or $number -lt 0) { return $null }
+    return $number
+}
+
+function Get-PilotCostFromEnvelope {
+    param([AllowNull()][object]$Envelope)
+
+    if ($null -eq $Envelope) { return $null }
+    $allowedCostFields = @('total_cost_usd', 'cost_usd', 'totalCostUsd', 'costUsd')
+    foreach ($container in @($Envelope, $Envelope.usage, $Envelope.metadata, $Envelope.cost)) {
+        if ($null -eq $container) { continue }
+        foreach ($field in $allowedCostFields) {
+            if ($container.PSObject.Properties.Name -contains $field) {
+                $cost = ConvertTo-PilotSafeCost $container.$field
+                if ($null -ne $cost) { return $cost }
+            }
+        }
+    }
+    return $null
+}
+
+function Get-PilotReportedCost {
+    param([AllowNull()][object]$ProcessResult)
+
+    if ($null -eq $ProcessResult) { return $null }
+    if ($ProcessResult.PSObject.Properties.Name -contains 'cli_reported_cost_usd') {
+        $directCost = ConvertTo-PilotSafeCost $ProcessResult.cli_reported_cost_usd
+        if ($null -ne $directCost) { return $directCost }
+    }
+    foreach ($metadataField in @('metadata', 'provider_metadata', 'cli_metadata')) {
+        if ($ProcessResult.PSObject.Properties.Name -contains $metadataField) {
+            $metadataCost = Get-PilotCostFromEnvelope $ProcessResult.$metadataField
+            if ($null -ne $metadataCost) { return $metadataCost }
+        }
+    }
+
+    $envelopes = [System.Collections.Generic.List[object]]::new()
+    $stdout = [string]$ProcessResult.stdout
+    if ([string]::IsNullOrWhiteSpace($stdout)) { return $null }
+    try { [void]$envelopes.Add(($stdout | ConvertFrom-Json -Depth 30)) } catch { }
+    foreach ($line in ($stdout -split "`r?`n")) {
+        if ([string]::IsNullOrWhiteSpace($line)) { continue }
+        try { [void]$envelopes.Add(($line | ConvertFrom-Json -Depth 30)) } catch { }
+    }
+
+    foreach ($envelope in @($envelopes)) {
+        $envelopeCost = Get-PilotCostFromEnvelope $envelope
+        if ($null -ne $envelopeCost) { return $envelopeCost }
+    }
+    return $null
+}
+
+function Protect-PilotRecordStrings {
+    param(
+        [Parameter(Mandatory)][object]$Record,
+        [AllowNull()][string]$Prompt,
+        [AllowNull()][object]$RedactionContext
+    )
+
+    $structuralProperties = @('run_id', 'route_id', 'tool', 'provider', 'model', 'effort', 'status', 'exit_code', 'duration_ms')
+    $safeDiagnosticCodes = @('completed', 'provider-declared failure', 'transport failure', 'parse failure', 'contract failure', 'execution failure')
+    $status = if ($Record.PSObject.Properties.Name -contains 'status') { [string]$Record.status } else { 'failure' }
+    $isFailure = $status -eq 'failure'
+    $isContractCompliant = ($Record.PSObject.Properties.Name -contains 'contract_compliant') -and [bool]$Record.contract_compliant
+    foreach ($property in $Record.PSObject.Properties) {
+        if ($structuralProperties -contains $property.Name) { continue }
+        switch ($property.Name) {
+            'answer' {
+                $property.Value = if ($isFailure) { '' } else { '[provider answer omitted from JSONL for privacy]' }
+            }
+            'error' {
+                if (-not $isFailure) {
+                    $property.Value = $null
+                } elseif ($isContractCompliant) {
+                    $property.Value = 'provider-declared failure'
+                } elseif (($Record.PSObject.Properties.Name -contains 'diagnostic_note') -and $safeDiagnosticCodes -contains [string]$Record.diagnostic_note) {
+                    $property.Value = [string]$Record.diagnostic_note
+                } else {
+                    $property.Value = 'execution failure'
+                }
+            }
+            'diagnostic_note' {
+                if ($safeDiagnosticCodes -notcontains [string]$property.Value) {
+                    $property.Value = 'execution failure'
+                }
+            }
+            default {
+                if ($property.Value -is [string]) {
+                    $property.Value = '[record text omitted]'
+                }
+            }
+        }
+    }
+    return $Record
+}
+
+function ConvertTo-RunnerCredentialRedactedText {
+    param([AllowNull()][string]$Text)
+
+    if ($null -eq $Text) { return $null }
+    $result = $Text
+    $result = [regex]::Replace($result, '(?i)(\b(?:(?:Authorization\s*:\s*)?Basic)\s+)[A-Za-z0-9+/=_-]+', '$1[credential redacted]')
+    $result = [regex]::Replace($result, '(?i)(\b(?:(?:Authorization\s*:\s*)?Api[-_]?Key)\s+)[^\s,;]+', '$1[credential redacted]')
+    $result = [regex]::Replace($result, '(?i)(\bBearer\s+)[A-Za-z0-9._~+/=-]+', '$1[credential redacted]')
+    $result = [regex]::Replace($result, '(?i)(\b(?:[A-Za-z0-9]+[_-])*(?:api[_-]?key|access[_-]?token|auth(?:entication)?[_-]?token|token|secret)\s*[:=]\s*)[^\s,;]+', '$1[credential redacted]')
+    $result = [regex]::Replace($result, '(?i)\bsk-(?:proj-|ant-)?[A-Za-z0-9_-]{8,}', '[credential redacted]')
+    $result = [regex]::Replace($result, '(?i)\bAIza[0-9A-Za-z_-]{8,}', '[credential redacted]')
+    return $result
+}
+
+function New-ResultRecord {
+    param(
+        [Parameter(Mandatory)][object]$Candidate,
+        [AllowNull()][object]$ProcessResult,
+        [AllowNull()][object]$Canonical,
+        [Parameter(Mandatory)][string]$RunId,
+        [AllowNull()][string]$DiagnosticNote,
+        [AllowNull()][string]$FailureError,
+        [AllowNull()][string]$Prompt,
+        [AllowNull()][object]$CliReportedCostUsd
+    )
+
+    $transportSuccess = $null -ne $ProcessResult -and
+        $ProcessResult.exit_code -eq 0 -and
+        (-not [bool]$ProcessResult.timed_out) -and
+        (-not [bool]$ProcessResult.cleanup_failed)
+    $contractCompliant = $transportSuccess -and $null -ne $Canonical -and (Test-CanonicalResponse $Canonical).valid
+    $safeDiagnosticCodes = @('completed', 'provider-declared failure', 'transport failure', 'parse failure', 'contract failure', 'execution failure')
+    $safeNote = if ($safeDiagnosticCodes -contains $DiagnosticNote) { $DiagnosticNote } else { 'execution failure' }
+    if ($contractCompliant -and $Canonical.status -eq 'failure') {
+        $safeNote = 'provider-declared failure'
+    }
+    $answer = if ($contractCompliant -and $Canonical.status -eq 'success') { '[provider answer omitted from JSONL for privacy]' } else { '' }
+    $error = if ($contractCompliant -and $Canonical.status -eq 'failure') { 'provider-declared failure' } elseif ($contractCompliant) { $null } else { $safeNote }
+
+    $record = [ordered]@{
+        run_id = $RunId
+        route_id = [string]$Candidate.route_id
+        tool = [string]$Candidate.tool
+        provider = [string]$Candidate.provider
+        model = [string]$Candidate.model
+        effort = if ($Candidate.PSObject.Properties.Name -contains 'effort') { [string]$Candidate.effort } else { 'default' }
+        transport_success = [bool]$transportSuccess
+        contract_compliant = [bool]$contractCompliant
+        status = if ($contractCompliant) { [string]$Canonical.status } else { 'failure' }
+        answer = [string]$answer
+        error = $error
+        exit_code = if ($null -ne $ProcessResult) { $ProcessResult.exit_code } else { $null }
+        duration_ms = if ($null -ne $ProcessResult) { [int64]$ProcessResult.duration_ms } else { [int64]0 }
+        diagnostic_note = $safeNote
+    }
+    if ($null -ne $ProcessResult -and $ProcessResult.PSObject.Properties.Name -contains 'cli_reported_cost_usd') {
+        $processCost = ConvertTo-PilotSafeCost $ProcessResult.cli_reported_cost_usd
+        if ($null -ne $processCost) { $record.cli_reported_cost_usd = $processCost }
+    }
+    if ($null -ne $CliReportedCostUsd) {
+        $safeCost = ConvertTo-PilotSafeCost $CliReportedCostUsd
+        if ($null -ne $safeCost) { $record.cli_reported_cost_usd = $safeCost }
+    }
+    return [pscustomobject]$record
+}
+
+function Add-PilotResultRecord {
+    param(
+        [Parameter(Mandatory)][object]$Record,
+        [Parameter(Mandatory)][string]$ResultsPath,
+        [AllowNull()][string]$Prompt,
+        [AllowNull()][object]$RedactionContext
+    )
+
+    $path = Resolve-PilotResultsPath $ResultsPath
+    $parent = Split-Path -Parent $path
+    if (-not (Test-Path -LiteralPath $parent)) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
+    $safeRecord = Protect-PilotRecordStrings -Record $Record -Prompt $Prompt -RedactionContext $RedactionContext
+    $line = $safeRecord | ConvertTo-Json -Compress -Depth 10
+    Add-Content -LiteralPath $path -Value $line -Encoding utf8
+}
+
+function Invoke-PilotRun {
+    param(
+        [Parameter(Mandatory)][object]$Matrix,
+        [switch]$RunAll,
+        [switch]$IncludeSpecialRoutes,
+        [AllowEmptyString()][string]$RouteId,
+        # Deliberate migration boundary: legacy pilot/results/test-run.jsonl is preserved;
+        # new runner writes use this separate normalized-results target by default.
+        [string]$ResultsPath = 'pilot/results/runner-test-run.jsonl',
+        [switch]$DryRun,
+        [scriptblock]$NativeInvoker
+    )
+
+    [void](Resolve-PilotResultsPath $ResultsPath)
+    $selected = @(Select-PilotCandidates -Matrix $Matrix -RunAll:$RunAll -IncludeSpecialRoutes:$IncludeSpecialRoutes -RouteId $RouteId)
+    if (-not $RunAll -and [string]::IsNullOrWhiteSpace($RouteId)) { $DryRun = $true }
+    $summary = [pscustomobject]@{ mode = if ($DryRun) { 'dry-run' } else { 'run' }; selected = $selected; records = @() }
+    if ($DryRun) { return $summary }
+
+    $runId = [guid]::NewGuid().ToString('N')
+    $records = [System.Collections.Generic.List[object]]::new()
+    foreach ($candidate in $selected) {
+        $processResult = $null
+        $canonical = $null
+        $failure = $null
+        $prompt = ''
+        $reportedCost = $null
+        $note = 'completed'
+        try {
+            $prompt = New-PilotPrompt -Candidate $candidate
+            $command = New-CandidateCommand -Candidate $candidate -Prompt $prompt
+            $processResult = if ($null -ne $NativeInvoker) {
+                & $NativeInvoker $command
+            } else {
+                $nativeTimeoutSeconds = if ($candidate.tool -in @('agy', 'claude')) { 120 } else { 0 }
+                Invoke-NativeCandidate -Command $command -TimeoutSeconds $nativeTimeoutSeconds -PreserveRawOutput
+            }
+            $reportedCost = Get-PilotReportedCost -ProcessResult $processResult
+            if ($processResult.exit_code -ne 0) {
+                $note = 'transport failure'
+                $failure = "Process exited with code $($processResult.exit_code)."
+            } else {
+                try {
+                    $providerOutput = if ($processResult.PSObject.Properties.Name -contains 'raw_stdout') { $processResult.raw_stdout } else { $processResult.stdout }
+                    $canonical = switch ($candidate.tool) {
+                        'codex' { ConvertFrom-CodexOutput $providerOutput }
+                        'claude' { ConvertFrom-ClaudeOutput $providerOutput }
+                        'agy' { ConvertFrom-AgyOutput $providerOutput }
+                    }
+                    $canonicalCheck = Test-CanonicalResponse $canonical
+                    if (-not $canonicalCheck.valid) {
+                        $note = 'contract failure'
+                        $failure = $canonicalCheck.reason
+                    }
+                } catch {
+                    $note = 'parse failure'
+                    $failure = $_.Exception.Message
+                }
+            }
+        } catch {
+            $note = 'execution failure'
+            $failure = $_.Exception.Message
+        }
+        $safeProcessResult = if ($null -ne $processResult) { $processResult | Select-Object -Property * -ExcludeProperty raw_stdout, raw_stderr } else { $null }
+        $record = New-ResultRecord -Candidate $candidate -ProcessResult $safeProcessResult -Canonical $canonical -RunId $runId -DiagnosticNote $note -FailureError $failure -Prompt $prompt -CliReportedCostUsd $reportedCost
+        Add-PilotResultRecord -Record $record -ResultsPath $ResultsPath
+        [void]$records.Add($record)
+    }
+    $summary.records = @($records)
+    return $summary
+}
