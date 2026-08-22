@@ -1,6 +1,6 @@
 # SB-20260822-190417-main-feature-branch-divergence: Fast-forward merge unavailable after main advanced
 
-- **Status:** contained
+- **Status:** closed
 - **First observed:** 2026-08-22T19:04:17.449130Z
 - **Last observed:** 2026-08-22T19:04:17.449130Z
 - **Phase/task:** integration
@@ -36,14 +36,14 @@ The fast-forward-only merge exited nonzero with a divergence message; no refs or
 
 ## Correction and prevention
 
-- **Correction:** Use a normal non-fast-forward merge, then rerun the regression suite.
+- **Correction:** Completed a normal non-fast-forward merge and reran the full regression suite.
 - **Prevention:** Check merge-base and branch divergence before assuming fast-forward integration.
 - **Owner:** Codex and project owner.
-- **Next diagnostic step:** Perform the normal merge and verify the merged tree.
+- **Next diagnostic step:** None; monitor future integrations.
 
 ## Verification and related work
 
-A normal merge and post-merge regression run.
+Merged main regression suite exited 0.
 
 ## Recurrence history
 
