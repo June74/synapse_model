@@ -2,6 +2,7 @@
 
 | ID | Title | Status | First observed | Last observed |
 |---|---|---|---|---|
+| [SB-20260822-190417-main-feature-branch-divergence](incidents/2026-08-22T190417Z-main-feature-branch-divergence.md) | open | 2026-08-22T19:04:17.449130Z | integration | Fast-forward merge unavailable after main advanced |
 | SB-2026-08-19-001 | PowerShell DOCX paragraph extraction syntax error | closed | 2026-08-19 | 2026-08-19 |
 | SB-2026-08-19-002 | Current DOCX locked during full-document scan | closed | 2026-08-19 | 2026-08-19 |
 | SB-2026-08-19-003 | Skill path lookup mismatch | closed | 2026-08-19 | 2026-08-19 |
