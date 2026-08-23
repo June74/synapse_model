@@ -475,6 +475,8 @@ function New-TestQualitySnapshot {
                                 benchmark_slice = 'minimal-tied-policy-fixture'
                                 category = 'strong'
                                 evidence_kind = 'artificial_analysis'
+                                exact_model_match = $true
+                                exact_effort_match = $true
                                 source_url = 'https://fixtures.invalid/artificial-analysis/shared-model-medium'
                                 retrieved_on = '2026-08-22'
                             }
@@ -554,6 +556,27 @@ function Assert-PricingSnapshotMutationRejected {
         $mutatedSnapshot = if ($null -eq $Snapshot) { New-TestPricingSnapshot } else { Copy-TestObject $Snapshot }
         & $Mutation $mutatedSnapshot
         Write-TestJson -Path $testPricingPath -Value $mutatedSnapshot
+
+        $catalog = Import-TestRouterProfileCatalog -ProfilesRoot (Join-Path $root 'profiles') -MatrixPath $testMatrixPath -ProfileSchemaPath $profileSchemaPath -PricingSnapshotPath $testPricingPath -QualitySnapshotPath $testQualityPath
+        Assert-Equal $catalog.valid $false
+        Assert-CatalogError -Catalog $catalog -Code $ExpectedCode
+    }
+}
+
+function Assert-QualitySnapshotMutationRejected {
+    param(
+        [Parameter(Mandatory)][scriptblock]$Mutation,
+        [string]$ExpectedCode
+    )
+
+    Invoke-WithTemporaryCatalog {
+        param($root, $testPricingPath, $testQualityPath)
+        $testMatrixPath = Join-Path $root 'matrix.json'
+        Write-TestJson -Path $testMatrixPath -Value (New-TestMatrix)
+        Write-TestJson -Path (Join-Path $root 'profiles/agy/shared-model__medium.json') -Value (Copy-TestObject @(Get-MinimalProfiles)[0])
+        $snapshot = New-TestQualitySnapshot
+        & $Mutation $snapshot
+        Write-TestJson -Path $testQualityPath -Value $snapshot
 
         $catalog = Import-TestRouterProfileCatalog -ProfilesRoot (Join-Path $root 'profiles') -MatrixPath $testMatrixPath -ProfileSchemaPath $profileSchemaPath -PricingSnapshotPath $testPricingPath -QualitySnapshotPath $testQualityPath
         Assert-Equal $catalog.valid $false
@@ -754,6 +777,20 @@ Invoke-Assertion 'pricing snapshot requires exact ISO dates and ordered effectiv
     Assert-PricingSnapshotMutationRejected -Mutation {
         param($snapshot)
         $snapshot.schedules[0].rate_periods[0].effective_through = '2026-08-21'
+    }
+}
+
+Invoke-Assertion 'pricing snapshot rejects gaps and overlaps between effective date intervals' {
+    $productionSnapshot = Get-Content -LiteralPath $pricingSnapshotPath -Raw | ConvertFrom-Json -Depth 100
+    Assert-PricingSnapshotMutationRejected -Snapshot $productionSnapshot -Mutation {
+        param($snapshot)
+        $sonnet5 = @($snapshot.schedules | Where-Object { $_.model -ceq 'claude-sonnet-5' })[0]
+        $sonnet5.rate_periods[1].effective_from = '2026-09-02'
+    }
+    Assert-PricingSnapshotMutationRejected -Snapshot $productionSnapshot -Mutation {
+        param($snapshot)
+        $sonnet5 = @($snapshot.schedules | Where-Object { $_.model -ceq 'claude-sonnet-5' })[0]
+        $sonnet5.rate_periods[1].effective_from = '2026-08-31'
     }
 }
 
@@ -960,6 +997,8 @@ Invoke-Assertion 'unsupported quality remains valid without exact benchmark evid
                 benchmark_slice = 'provider_capability'
                 category = 'unsupported'
                 evidence_kind = 'provider'
+                exact_model_match = $true
+                exact_effort_match = $true
                 source_url = 'https://fixtures.invalid/providers/google/shared-model'
                 retrieved_on = '2026-08-22'
             }
@@ -995,6 +1034,8 @@ Invoke-Assertion 'exact relevant benchmark evidence permits measured quality cat
                 benchmark_slice = 'coding'
                 category = 'strong'
                 evidence_kind = 'artificial_analysis'
+                exact_model_match = $true
+                exact_effort_match = $true
                 source_url = 'https://fixtures.invalid/artificial-analysis/coding'
                 retrieved_on = '2026-08-22'
             }
@@ -1004,6 +1045,75 @@ Invoke-Assertion 'exact relevant benchmark evidence permits measured quality cat
         $catalog = Import-RouterProfileCatalog -ProfilesRoot (Join-Path $root 'profiles') -MatrixPath $testMatrixPath -ProfileSchemaPath $profileSchemaPath -PricingSnapshotPath $testPricingPath -QualitySnapshotPath $testQualityPath
         Assert-Equal $catalog.valid $true
         Assert-Equal @($catalog.errors).Count 0
+    }
+}
+
+Invoke-Assertion 'quality authorizations require local exactness booleans and reject unknown fields' {
+    if (-not $profilesAvailable) { throw 'Import-RouterProfileCatalog is unavailable.' }
+    Invoke-WithTemporaryCatalog {
+        param($root, $testPricingPath, $testQualityPath)
+        $testMatrixPath = Join-Path $root 'matrix.json'
+        Write-TestJson -Path $testMatrixPath -Value (New-TestMatrix)
+        $profilePath = Join-Path $root 'profiles/agy/shared-model__medium.json'
+        Write-TestJson -Path $profilePath -Value (Copy-TestObject @(Get-MinimalProfiles)[0])
+
+        $missingExactness = New-TestQualitySnapshot
+        $missingExactness.records[0].quality_authorizations = @($missingExactness.records[0].quality_authorizations[0])
+        $missingExactness.records[0].quality_authorizations[0].PSObject.Properties.Remove('exact_model_match')
+        Write-TestJson -Path $testQualityPath -Value $missingExactness
+        $missingCatalog = Import-TestRouterProfileCatalog -ProfilesRoot (Join-Path $root 'profiles') -MatrixPath $testMatrixPath -ProfileSchemaPath $profileSchemaPath -PricingSnapshotPath $testPricingPath -QualitySnapshotPath $testQualityPath
+        Assert-CatalogError -Catalog $missingCatalog -Code 'quality_snapshot_authorization_invalid'
+
+        $falseExactness = New-TestQualitySnapshot
+        $falseExactness.records[0].quality_authorizations = @($falseExactness.records[0].quality_authorizations[0])
+        $falseExactness.records[0].quality_authorizations[0].exact_effort_match = $false
+        Write-TestJson -Path $testQualityPath -Value $falseExactness
+        $falseCatalog = Import-TestRouterProfileCatalog -ProfilesRoot (Join-Path $root 'profiles') -MatrixPath $testMatrixPath -ProfileSchemaPath $profileSchemaPath -PricingSnapshotPath $testPricingPath -QualitySnapshotPath $testQualityPath
+        Assert-CatalogError -Catalog $falseCatalog -Code 'quality_snapshot_authorization_invalid'
+
+        $wrongTypeExactness = New-TestQualitySnapshot
+        $wrongTypeExactness.records[0].quality_authorizations = @($wrongTypeExactness.records[0].quality_authorizations[0])
+        $wrongTypeExactness.records[0].quality_authorizations[0].exact_model_match = 'true'
+        Write-TestJson -Path $testQualityPath -Value $wrongTypeExactness
+        $wrongTypeCatalog = Import-TestRouterProfileCatalog -ProfilesRoot (Join-Path $root 'profiles') -MatrixPath $testMatrixPath -ProfileSchemaPath $profileSchemaPath -PricingSnapshotPath $testPricingPath -QualitySnapshotPath $testQualityPath
+        Assert-CatalogError -Catalog $wrongTypeCatalog -Code 'quality_snapshot_authorization_invalid'
+
+        $unknownField = New-TestQualitySnapshot
+        $unknownField.records[0].quality_authorizations = @($unknownField.records[0].quality_authorizations[0])
+        $unknownField.records[0].quality_authorizations[0] | Add-Member -NotePropertyName exact_model_mach -NotePropertyValue $true
+        Write-TestJson -Path $testQualityPath -Value $unknownField
+        $unknownFieldCatalog = Import-TestRouterProfileCatalog -ProfilesRoot (Join-Path $root 'profiles') -MatrixPath $testMatrixPath -ProfileSchemaPath $profileSchemaPath -PricingSnapshotPath $testPricingPath -QualitySnapshotPath $testQualityPath
+        Assert-CatalogError -Catalog $unknownFieldCatalog -Code 'quality_snapshot_authorization_invalid'
+
+        $providerProfile = Copy-TestObject @(Get-MinimalProfiles)[0]
+        foreach ($mapName in $requiredQualityKeys.Keys) {
+            foreach ($qualityKey in $requiredQualityKeys[$mapName]) { $providerProfile.quality.$mapName.$qualityKey = 'unknown' }
+        }
+        $providerProfile.quality.capabilities.long_context = 'unsupported'
+        $providerProfile.evidence.artificial_analysis.exact_model_match = $false
+        $providerProfile.evidence.artificial_analysis.exact_effort_match = $false
+        $providerProfile.evidence.artificial_analysis.benchmark_slice = 'unavailable'
+        Write-TestJson -Path $profilePath -Value $providerProfile
+        $providerSnapshot = New-TestQualitySnapshot
+        $providerSnapshot.records[0].exact_model_match = $false
+        $providerSnapshot.records[0].exact_effort_match = $false
+        $providerSnapshot.records[0].benchmark_slice = 'unavailable'
+        $providerSnapshot.records[0].provisional_category = 'unknown'
+        $providerSnapshot.records[0].quality_authorizations = @(
+            [pscustomobject]@{
+                path = '$.quality.capabilities.long_context'
+                benchmark_slice = 'provider_capability'
+                category = 'unsupported'
+                evidence_kind = 'provider'
+                exact_model_match = $true
+                exact_effort_match = $false
+                source_url = 'https://fixtures.invalid/providers/google/shared-model'
+                retrieved_on = '2026-08-22'
+            }
+        )
+        Write-TestJson -Path $testQualityPath -Value $providerSnapshot
+        $providerCatalog = Import-TestRouterProfileCatalog -ProfilesRoot (Join-Path $root 'profiles') -MatrixPath $testMatrixPath -ProfileSchemaPath $profileSchemaPath -PricingSnapshotPath $testPricingPath -QualitySnapshotPath $testQualityPath
+        Assert-CatalogError -Catalog $providerCatalog -Code 'quality_snapshot_authorization_invalid'
     }
 }
 
@@ -1020,20 +1130,22 @@ Invoke-Assertion 'independent quality authorizations support multiple relevant b
         }
         $profile.quality.task_types.coding = 'strong'
         $profile.quality.domains.mathematics = 'frontier'
-        $profile.evidence.artificial_analysis.exact_model_match = $true
-        $profile.evidence.artificial_analysis.exact_effort_match = $true
+        $profile.evidence.artificial_analysis.exact_model_match = $false
+        $profile.evidence.artificial_analysis.exact_effort_match = $false
         $profile.evidence.artificial_analysis.benchmark_slice = 'unavailable'
         Write-TestJson -Path $profilePath -Value $profile
 
         $snapshot = New-TestQualitySnapshot
-        $snapshot.records[0].exact_model_match = $true
-        $snapshot.records[0].exact_effort_match = $true
+        $snapshot.records[0].exact_model_match = $false
+        $snapshot.records[0].exact_effort_match = $false
         $snapshot.records[0].benchmark_slice = 'unavailable'
         $snapshot.records[0].provisional_category = 'unknown'
         $snapshot.records[0].quality_authorizations = @(
             [pscustomobject]@{
                 path = '$.quality.task_types.coding'
                 evidence_kind = 'artificial_analysis'
+                exact_model_match = $true
+                exact_effort_match = $true
                 source_url = 'https://fixtures.invalid/artificial-analysis/coding'
                 retrieved_on = '2026-08-22'
                 benchmark_slice = 'coding'
@@ -1042,6 +1154,8 @@ Invoke-Assertion 'independent quality authorizations support multiple relevant b
             [pscustomobject]@{
                 path = '$.quality.domains.mathematics'
                 evidence_kind = 'artificial_analysis'
+                exact_model_match = $true
+                exact_effort_match = $true
                 source_url = 'https://fixtures.invalid/artificial-analysis/scientific-reasoning'
                 retrieved_on = '2026-08-22'
                 benchmark_slice = 'scientific_reasoning'
@@ -1087,6 +1201,8 @@ Invoke-Assertion 'coding authorization cannot authorize mathematics domain quali
                 benchmark_slice = 'coding'
                 category = 'frontier'
                 evidence_kind = 'artificial_analysis'
+                exact_model_match = $true
+                exact_effort_match = $true
                 source_url = 'https://fixtures.invalid/artificial-analysis/coding'
                 retrieved_on = '2026-08-22'
             }
@@ -1126,7 +1242,7 @@ Invoke-Assertion 'legacy unsupported path cannot replace provider authorization'
 
         $catalog = Import-TestRouterProfileCatalog -ProfilesRoot (Join-Path $root 'profiles') -MatrixPath $testMatrixPath -ProfileSchemaPath $profileSchemaPath -PricingSnapshotPath $testPricingPath -QualitySnapshotPath $testQualityPath
         Assert-Equal $catalog.valid $false
-        Assert-CatalogError -Catalog $catalog -Code 'profile_quality_snapshot_mismatch'
+        Assert-CatalogError -Catalog $catalog -Code 'quality_snapshot_record_invalid'
     }
 }
 
@@ -1193,6 +1309,8 @@ Invoke-Assertion 'quality snapshot rejects invalid path-specific authorizations'
                 benchmark_slice = 'coding'
                 category = 'strong'
                 evidence_kind = 'artificial_analysis'
+                exact_model_match = $true
+                exact_effort_match = $true
                 source_url = 'https://fixtures.invalid/artificial-analysis/coding'
                 retrieved_on = '2026-08-22'
             }
@@ -1209,7 +1327,7 @@ Invoke-Assertion 'quality snapshot rejects invalid path-specific authorizations'
         $contradictoryEvidence.records[0].provisional_category = 'unknown'
         Write-TestJson -Path $testQualityPath -Value $contradictoryEvidence
         $evidenceCatalog = Import-TestRouterProfileCatalog -ProfilesRoot (Join-Path $root 'profiles') -MatrixPath $testMatrixPath -ProfileSchemaPath $profileSchemaPath -PricingSnapshotPath $testPricingPath -QualitySnapshotPath $testQualityPath
-        Assert-CatalogError -Catalog $evidenceCatalog -Code 'quality_snapshot_authorization_invalid'
+        Assert-CatalogError -Catalog $evidenceCatalog -Code 'profile_quality_snapshot_mismatch'
 
         $providerSliceMismatch = New-TestQualitySnapshot
         $providerSliceMismatch.records[0].quality_authorizations = @(
@@ -1218,6 +1336,8 @@ Invoke-Assertion 'quality snapshot rejects invalid path-specific authorizations'
                 benchmark_slice = 'coding'
                 category = 'unsupported'
                 evidence_kind = 'provider'
+                exact_model_match = $true
+                exact_effort_match = $true
                 source_url = 'https://fixtures.invalid/providers/google/shared-model'
                 retrieved_on = '2026-08-22'
             }
@@ -1272,6 +1392,70 @@ Invoke-Assertion 'quality snapshot record metadata conflict invalidates the prof
         $catalog = Import-TestRouterProfileCatalog -ProfilesRoot (Join-Path $root 'profiles') -MatrixPath $testMatrixPath -ProfileSchemaPath $profileSchemaPath -PricingSnapshotPath $testPricingPath -QualitySnapshotPath $testQualityPath
         Assert-Equal $catalog.valid $false
         Assert-CatalogError -Catalog $catalog -Code 'profile_quality_snapshot_mismatch'
+    }
+}
+
+Invoke-Assertion 'quality snapshot requires typed dated top-level provenance metadata' {
+    Assert-QualitySnapshotMutationRejected -ExpectedCode 'quality_snapshot_invalid' -Mutation {
+        param($snapshot)
+        $snapshot.retrieved_on = 123
+    }
+    Assert-QualitySnapshotMutationRejected -ExpectedCode 'quality_snapshot_invalid' -Mutation {
+        param($snapshot)
+        $snapshot.methodology_url = $true
+    }
+    Assert-QualitySnapshotMutationRejected -ExpectedCode 'quality_snapshot_invalid' -Mutation {
+        param($snapshot)
+        $snapshot.policy = 7
+    }
+    Assert-QualitySnapshotMutationRejected -ExpectedCode 'quality_snapshot_invalid' -Mutation {
+        param($snapshot)
+        $snapshot.snapshot_date = '2026-02-30'
+    }
+    Assert-QualitySnapshotMutationRejected -ExpectedCode 'quality_snapshot_invalid' -Mutation {
+        param($snapshot)
+        $snapshot.methodology_url = 'ftp://fixtures.invalid/methodology'
+    }
+}
+
+Invoke-Assertion 'quality snapshot records require strict provenance types URLs dates and fields' {
+    Assert-QualitySnapshotMutationRejected -ExpectedCode 'quality_snapshot_record_invalid' -Mutation {
+        param($snapshot)
+        $snapshot.records[0].source_url = 123
+    }
+    Assert-QualitySnapshotMutationRejected -ExpectedCode 'quality_snapshot_record_invalid' -Mutation {
+        param($snapshot)
+        $snapshot.records[0].retrieved_on = '2026-02-30'
+    }
+    Assert-QualitySnapshotMutationRejected -ExpectedCode 'quality_snapshot_record_invalid' -Mutation {
+        param($snapshot)
+        $snapshot.records[0].launcher = $true
+    }
+    Assert-QualitySnapshotMutationRejected -ExpectedCode 'quality_snapshot_record_invalid' -Mutation {
+        param($snapshot)
+        $snapshot.records[0].source_url = 'mailto:evidence@fixtures.invalid'
+    }
+    Assert-QualitySnapshotMutationRejected -ExpectedCode 'quality_snapshot_record_invalid' -Mutation {
+        param($snapshot)
+        $snapshot.records[0] | Add-Member -NotePropertyName exact_effot_match -NotePropertyValue $true
+    }
+}
+
+Invoke-Assertion 'quality authorization provenance rejects coercion and non-HTTP sources' {
+    Assert-QualitySnapshotMutationRejected -ExpectedCode 'quality_snapshot_authorization_invalid' -Mutation {
+        param($snapshot)
+        $snapshot.records[0].quality_authorizations = @($snapshot.records[0].quality_authorizations[0])
+        $snapshot.records[0].quality_authorizations[0].source_url = 123
+    }
+    Assert-QualitySnapshotMutationRejected -ExpectedCode 'quality_snapshot_authorization_invalid' -Mutation {
+        param($snapshot)
+        $snapshot.records[0].quality_authorizations = @($snapshot.records[0].quality_authorizations[0])
+        $snapshot.records[0].quality_authorizations[0].retrieved_on = 123
+    }
+    Assert-QualitySnapshotMutationRejected -ExpectedCode 'quality_snapshot_authorization_invalid' -Mutation {
+        param($snapshot)
+        $snapshot.records[0].quality_authorizations = @($snapshot.records[0].quality_authorizations[0])
+        $snapshot.records[0].quality_authorizations[0].source_url = 'file:///tmp/evidence.json'
     }
 }
 
@@ -1434,17 +1618,25 @@ Invoke-Assertion 'catalog schema validation cannot be bypassed by an ambient sha
         $invalidProfile.quality.task_types.PSObject.Properties.Remove('coding')
         Write-TestJson -Path (Join-Path $root 'profiles/agy/shared-model__medium.json') -Value $invalidProfile
 
-        & {
-            function Test-RouterSchema {
-                [pscustomobject]@{ valid = $true; errors = @(); shadow = $true }
-            }
+        $originalSchemaCache = $script:RouterSchemaContextCache
+        $schemaCacheSentinel = [pscustomobject]@{ marker = 'caller-cache-sentinel' }
+        $script:RouterSchemaContextCache = $schemaCacheSentinel
+        try {
+            & {
+                function Test-RouterSchema {
+                    [pscustomobject]@{ valid = $true; errors = @(); shadow = $true }
+                }
 
-            $locationBefore = (Get-Location).Path
-            $catalog = Import-TestRouterProfileCatalog -ProfilesRoot (Join-Path $root 'profiles') -MatrixPath $testMatrixPath -ProfileSchemaPath $profileSchemaPath -PricingSnapshotPath $testPricingPath -QualitySnapshotPath $testQualityPath
-            Assert-Equal $catalog.valid $false
-            Assert-CatalogError -Catalog $catalog -Code 'profile_schema_invalid'
-            Assert-Equal (Get-Location).Path $locationBefore
-            Assert-Equal (Test-RouterSchema).shadow $true
+                $locationBefore = (Get-Location).Path
+                $catalog = Import-TestRouterProfileCatalog -ProfilesRoot (Join-Path $root 'profiles') -MatrixPath $testMatrixPath -ProfileSchemaPath $profileSchemaPath -PricingSnapshotPath $testPricingPath -QualitySnapshotPath $testQualityPath
+                Assert-Equal $catalog.valid $false
+                Assert-CatalogError -Catalog $catalog -Code 'profile_schema_invalid'
+                Assert-Equal (Get-Location).Path $locationBefore
+                Assert-Equal (Test-RouterSchema).shadow $true
+                Assert-Equal ([object]::ReferenceEquals($script:RouterSchemaContextCache, $schemaCacheSentinel)) $true
+            }
+        } finally {
+            $script:RouterSchemaContextCache = $originalSchemaCache
         }
     }
 }

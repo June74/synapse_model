@@ -126,6 +126,31 @@ function ConvertFrom-RouterCatalogIsoDate {
     return $parsed
 }
 
+function Test-RouterCatalogExactProperties {
+    param(
+        [AllowNull()][object]$Value,
+        [Parameter(Mandatory)][string[]]$ExpectedNames
+    )
+
+    if ($null -eq $Value) { return $false }
+    [string[]]$actualNames = @($Value.PSObject.Properties.Name)
+    if ($actualNames.Count -ne $ExpectedNames.Count) { return $false }
+    foreach ($expectedName in $ExpectedNames) {
+        if ($actualNames -cnotcontains $expectedName) { return $false }
+    }
+    return $true
+}
+
+function Test-RouterCatalogHttpUrl {
+    param([AllowNull()][object]$Value)
+
+    if ($Value -isnot [string] -or [string]::IsNullOrWhiteSpace($Value)) { return $false }
+    $uri = $null
+    if (-not [Uri]::TryCreate($Value, [UriKind]::Absolute, [ref]$uri)) { return $false }
+    return ($uri.Scheme -ceq 'http' -or $uri.Scheme -ceq 'https') -and
+        -not [string]::IsNullOrWhiteSpace($uri.Host)
+}
+
 function Get-RouterCatalogQualityPaths {
     $qualityKeys = [ordered]@{
         task_types = @('general', 'coding', 'math', 'reasoning', 'writing', 'summarization', 'extraction', 'research_synthesis')
@@ -197,12 +222,14 @@ function Import-RouterProfileCatalog {
         [Parameter(Mandatory)][string]$QualitySnapshotPath
     )
 
-    # Load the audited schema implementation into this invocation's local scope.
-    # Dot-sourcing unconditionally here replaces any caller-supplied shadow while
-    # keeping the project validator and its helper functions out of global scope.
-    . (Join-Path $PSScriptRoot 'schema.ps1')
-    $projectSchemaValidator = ${function:Test-RouterSchema}
+    $schemaImplementationPath = Join-Path $PSScriptRoot 'schema.ps1'
+    $schemaModule = New-Module -Name ('RouterSchemaValidation_{0}' -f [guid]::NewGuid().ToString('N')) -ScriptBlock {
+        param($ImplementationPath)
+        . $ImplementationPath
+        Export-ModuleMember -Function @() -Variable @()
+    } -ArgumentList $schemaImplementationPath
 
+    try {
     $errors = [Collections.Generic.List[object]]::new()
     $loaded = [Collections.Generic.List[object]]::new()
     $matrixRead = Read-RouterCatalogJson -FilePath $MatrixPath
@@ -272,6 +299,7 @@ function Import-RouterProfileCatalog {
         }
 
         $periodsByEffectiveInterval = [Collections.Generic.Dictionary[string, Collections.Generic.List[object]]]::new([StringComparer]::Ordinal)
+        $effectiveIntervals = [Collections.Generic.Dictionary[string, object]]::new([StringComparer]::Ordinal)
         $periodIndex = 0
         foreach ($period in @($schedule.rate_periods)) {
             $periodPath = '{0}.rate_periods[{1}]' -f $schedulePath, $periodIndex
@@ -309,6 +337,10 @@ function Import-RouterProfileCatalog {
             $intervalKey = '{0}|{1}' -f $period.effective_from, $(if ($null -eq $period.effective_through) { '<null>' } else { $period.effective_through })
             if (-not $periodsByEffectiveInterval.ContainsKey($intervalKey)) {
                 $periodsByEffectiveInterval.Add($intervalKey, [Collections.Generic.List[object]]::new())
+                $effectiveIntervals.Add($intervalKey, [pscustomobject]@{
+                    effective_from = $effectiveFrom
+                    effective_through = $effectiveThrough
+                })
             }
             $periodsByEffectiveInterval[$intervalKey].Add([pscustomobject]@{
                 value = $period
@@ -334,6 +366,18 @@ function Import-RouterProfileCatalog {
                     $errors.Add((New-RouterCatalogError -Code 'pricing_snapshot_invalid' -File $PricingSnapshotPath -Path ($schedulePath + '.rate_periods') -Identity $null -Message 'Token ranges must form one contiguous non-overlapping partition for each effective-date interval.'))
                     $scheduleValid = $false
                 }
+            }
+            $orderedIntervals = @($effectiveIntervals.Values | Sort-Object effective_from, effective_through)
+            $timelineValid = $orderedIntervals.Count -gt 0 -and $orderedIntervals[0].effective_from -eq $snapshotDate
+            for ($intervalIndex = 0; $timelineValid -and $intervalIndex -lt ($orderedIntervals.Count - 1); $intervalIndex++) {
+                $currentInterval = $orderedIntervals[$intervalIndex]
+                $nextInterval = $orderedIntervals[$intervalIndex + 1]
+                $timelineValid = $null -ne $currentInterval.effective_through -and
+                    $nextInterval.effective_from -eq $currentInterval.effective_through.AddDays(1)
+            }
+            if (-not $timelineValid) {
+                $errors.Add((New-RouterCatalogError -Code 'pricing_snapshot_invalid' -File $PricingSnapshotPath -Path ($schedulePath + '.rate_periods') -Identity $null -Message 'Effective date intervals must continuously cover time from the snapshot date without gaps, overlaps, or a non-final open interval.'))
+                $scheduleValid = $false
             }
         }
         if (-not $scheduleValid) { continue }
@@ -363,12 +407,13 @@ function Import-RouterProfileCatalog {
     $requiredQualitySnapshotFields = @('snapshot_date', 'retrieved_on', 'methodology_url', 'policy', 'records')
     $missingQualitySnapshotFields = @($requiredQualitySnapshotFields | Where-Object { $qualitySnapshot.PSObject.Properties.Name -cnotcontains $_ })
     if ($missingQualitySnapshotFields.Count -gt 0 -or
-        [string]::IsNullOrWhiteSpace([string]$qualitySnapshot.snapshot_date) -or
-        [string]::IsNullOrWhiteSpace([string]$qualitySnapshot.retrieved_on) -or
-        [string]::IsNullOrWhiteSpace([string]$qualitySnapshot.methodology_url) -or
-        [string]::IsNullOrWhiteSpace([string]$qualitySnapshot.policy) -or
+        -not (Test-RouterCatalogExactProperties -Value $qualitySnapshot -ExpectedNames $requiredQualitySnapshotFields) -or
+        $null -eq (ConvertFrom-RouterCatalogIsoDate $qualitySnapshot.snapshot_date) -or
+        $null -eq (ConvertFrom-RouterCatalogIsoDate $qualitySnapshot.retrieved_on) -or
+        -not (Test-RouterCatalogHttpUrl $qualitySnapshot.methodology_url) -or
+        $qualitySnapshot.policy -isnot [string] -or [string]::IsNullOrWhiteSpace($qualitySnapshot.policy) -or
         $qualitySnapshot.records -isnot [Collections.IList]) {
-        $errors.Add((New-RouterCatalogError -Code 'quality_snapshot_invalid' -File $QualitySnapshotPath -Path '$' -Identity $null -Message 'Quality snapshot lacks required top-level fields.'))
+        $errors.Add((New-RouterCatalogError -Code 'quality_snapshot_invalid' -File $QualitySnapshotPath -Path '$' -Identity $null -Message 'Quality snapshot has invalid or unexpected top-level provenance fields.'))
         return [pscustomobject]@{ valid = $false; profiles = @(); errors = @($errors) }
     }
 
@@ -394,13 +439,17 @@ function Import-RouterProfileCatalog {
             $qualityRecord.PSObject.Properties.Name -ccontains 'configuration_id') {
             '{0}|{1}' -f $qualityRecord.launcher, $qualityRecord.configuration_id
         } else { $null }
-        $recordValid = $recordMissingFields.Count -eq 0
+        $recordValid = $recordMissingFields.Count -eq 0 -and
+            (Test-RouterCatalogExactProperties -Value $qualityRecord -ExpectedNames $requiredRecordFields)
         $authorizationByPath = [Collections.Generic.Dictionary[string, object]]::new([StringComparer]::Ordinal)
         if ($recordValid) {
             foreach ($stringField in @('launcher', 'configuration_id', 'model', 'effort', 'source_url', 'retrieved_on', 'benchmark_slice', 'note')) {
-                if ([string]::IsNullOrWhiteSpace([string]$qualityRecord.$stringField)) { $recordValid = $false }
+                if ($qualityRecord.$stringField -isnot [string] -or [string]::IsNullOrWhiteSpace($qualityRecord.$stringField)) { $recordValid = $false }
             }
-            if ($qualityRecord.exact_model_match -isnot [bool] -or $qualityRecord.exact_effort_match -isnot [bool] -or
+            if (-not (Test-RouterCatalogHttpUrl $qualityRecord.source_url) -or
+                $null -eq (ConvertFrom-RouterCatalogIsoDate $qualityRecord.retrieved_on) -or
+                $qualityRecord.exact_model_match -isnot [bool] -or $qualityRecord.exact_effort_match -isnot [bool] -or
+                $qualityRecord.provisional_category -isnot [string] -or
                 $qualityRecord.provisional_category -cnotin @('unknown', 'standard', 'strong', 'frontier')) {
                 $recordValid = $false
             }
@@ -411,20 +460,28 @@ function Import-RouterProfileCatalog {
                 foreach ($authorization in @($qualityRecord.quality_authorizations)) {
                     $authorizationPath = '{0}.quality_authorizations[{1}]' -f $recordPath, $authorizationIndex
                     $authorizationIndex++
-                    $requiredAuthorizationFields = @('path', 'benchmark_slice', 'category', 'evidence_kind', 'source_url', 'retrieved_on')
+                    $requiredAuthorizationFields = @(
+                        'path', 'benchmark_slice', 'category', 'evidence_kind',
+                        'exact_model_match', 'exact_effort_match', 'source_url', 'retrieved_on'
+                    )
                     $missingAuthorizationFields = if ($null -eq $authorization) { $requiredAuthorizationFields } else {
                         @($requiredAuthorizationFields | Where-Object { $authorization.PSObject.Properties.Name -cnotcontains $_ })
                     }
-                    $authorizationValid = $missingAuthorizationFields.Count -eq 0
+                    $authorizationValid = $missingAuthorizationFields.Count -eq 0 -and
+                        (Test-RouterCatalogExactProperties -Value $authorization -ExpectedNames $requiredAuthorizationFields)
                     if ($authorizationValid) {
-                        foreach ($stringField in $requiredAuthorizationFields) {
+                        foreach ($stringField in @('path', 'benchmark_slice', 'category', 'evidence_kind', 'source_url', 'retrieved_on')) {
                             if ($authorization.$stringField -isnot [string] -or [string]::IsNullOrWhiteSpace($authorization.$stringField)) { $authorizationValid = $false }
                         }
+                        if ($authorization.exact_model_match -isnot [bool] -or -not $authorization.exact_model_match -or
+                            $authorization.exact_effort_match -isnot [bool] -or -not $authorization.exact_effort_match) {
+                            $authorizationValid = $false
+                        }
+                        if (-not (Test-RouterCatalogHttpUrl $authorization.source_url)) { $authorizationValid = $false }
                         if ($null -eq (ConvertFrom-RouterCatalogIsoDate $authorization.retrieved_on)) { $authorizationValid = $false }
                         if (-not $allowedQualityPaths.Contains([string]$authorization.path)) { $authorizationValid = $false }
                         if ($authorization.evidence_kind -ceq 'artificial_analysis') {
                             if ($authorization.category -cnotin @('standard', 'strong', 'frontier') -or
-                                -not $qualityRecord.exact_model_match -or -not $qualityRecord.exact_effort_match -or
                                 $authorization.benchmark_slice -ceq 'unavailable' -or
                                 -not (Test-RouterCatalogQualitySlicePath -BenchmarkSlice $authorization.benchmark_slice -QualityPath $authorization.path)) {
                                 $authorizationValid = $false
@@ -494,7 +551,10 @@ function Import-RouterProfileCatalog {
         $launcher = if ($profile.PSObject.Properties.Name -ccontains 'launcher') { [string]$profile.launcher } else { '' }
         $configurationId = if ($profile.PSObject.Properties.Name -ccontains 'configuration_id') { [string]$profile.configuration_id } else { '' }
         $identity = if ($launcher -and $configurationId) { '{0}|{1}' -f $launcher, $configurationId } else { $null }
-        $schemaResult = & $projectSchemaValidator -Value $profile -SchemaPath $ProfileSchemaPath
+        $schemaResult = & $schemaModule {
+            param($Value, $SchemaPath)
+            Test-RouterSchema -Value $Value -SchemaPath $SchemaPath
+        } $profile $ProfileSchemaPath
         if (-not $schemaResult.valid) {
             $firstSchemaError = @($schemaResult.errors)[0]
             $errors.Add((New-RouterCatalogError -Code 'profile_schema_invalid' -File $relativeFile -Path $firstSchemaError.path -Identity $identity -Message ('Profile schema validation failed: {0}.' -f $firstSchemaError.code)))
@@ -628,6 +688,7 @@ function Import-RouterProfileCatalog {
                         if ($qualityProperty.Value -ceq 'unsupported') {
                             if ($authorization.category -cne 'unsupported' -or
                                 $authorization.evidence_kind -cne 'provider' -or
+                                -not $authorization.exact_model_match -or -not $authorization.exact_effort_match -or
                                 $authorization.benchmark_slice -cne 'provider_capability' -or
                                 $authorization.source_url -cne $profile.evidence.provider.source_url -or
                                 $authorization.retrieved_on -cne $profile.evidence.provider.retrieved_on) {
@@ -636,8 +697,8 @@ function Import-RouterProfileCatalog {
                         } elseif ($qualityProperty.Value -cin @('standard', 'strong', 'frontier')) {
                             if ($authorization.category -cne $qualityProperty.Value -or
                                 $authorization.evidence_kind -cne 'artificial_analysis' -or
-                                -not (Test-RouterCatalogQualitySlicePath -BenchmarkSlice $authorization.benchmark_slice -QualityPath $qualityPath) -or
-                                -not $qualityRecord.exact_model_match -or -not $qualityRecord.exact_effort_match) {
+                                -not $authorization.exact_model_match -or -not $authorization.exact_effort_match -or
+                                -not (Test-RouterCatalogQualitySlicePath -BenchmarkSlice $authorization.benchmark_slice -QualityPath $qualityPath)) {
                                 $qualitySnapshotValid = $false
                             }
                         } else {
@@ -664,7 +725,7 @@ function Import-RouterProfileCatalog {
                 if ($null -eq $authorization -or
                     $authorization.evidence_kind -cne 'artificial_analysis' -or
                     $authorization.category -cne $qualityProperty.Value -or
-                    -not $artificialAnalysis.exact_model_match -or -not $artificialAnalysis.exact_effort_match -or
+                    -not $authorization.exact_model_match -or -not $authorization.exact_effort_match -or
                     -not (Test-RouterCatalogQualitySlicePath -BenchmarkSlice ([string]$authorization.benchmark_slice) -QualityPath $qualityPath)) {
                     $invalidMeasuredQualityPaths.Add($qualityPath)
                 }
@@ -705,5 +766,8 @@ function Import-RouterProfileCatalog {
         valid = $sortedErrors.Count -eq 0
         profiles = @($sortedEntries | ForEach-Object { $_.profile })
         errors = $sortedErrors
+    }
+    } finally {
+        Remove-Module -ModuleInfo $schemaModule -Force -ErrorAction SilentlyContinue
     }
 }
