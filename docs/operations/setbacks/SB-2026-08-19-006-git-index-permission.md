@@ -46,3 +46,13 @@
 - **Correction:** Retry the same bounded Git staging and commit operation through approved Git-metadata access.
 - **Prevention:** Treat all worktree index and commit operations as requiring approved Git-metadata access in this repository.
 - **Related verification:** Documentation passed `git diff --check`; no product code changed during the failed commit attempt.
+
+## Recurrence: 2026-08-23, Task 4 code-quality review
+
+- **Phase/task:** Deterministic router V1 Task 4, fixture-path setback documentation commit.
+- **Symptom:** Scoped staging and commit could not create `.git/worktrees/deterministic-router-v1/index.lock`; Git returned permission denied.
+- **Confirmed cause:** The worktree files are writable, but its Git index metadata remains outside the managed write boundary under the parent repository `.git` directory.
+- **Impact:** The closed fixture-path incident remains intact and unstaged; no product code changed and no commit was created.
+- **Correction:** Retry only the bounded documentation staging and commit commands through approved Git-metadata access.
+- **Prevention:** Continue treating worktree index and commit operations as requiring approved Git-metadata access in this repository.
+- **Related verification:** The corrected fixture load succeeded and the documentation passed `git diff --check` before this commit attempt.
