@@ -36,3 +36,13 @@
 - **Correction:** Retry only the bounded staging and commit commands with explicit Git-metadata write approval.
 - **Prevention:** Continue treating index and commit operations in this worktree as requiring approved Git-metadata access.
 - **Verification:** The approved retry committed Task 3 as `e3c00ea` and the recurrence record as `2b9cf3f`; `git status --short --branch` then showed a clean worktree. Pre-commit router and pilot suites both completed with exit code 0.
+
+## Recurrence: 2026-08-23, Task 4 setback records
+
+- **Phase/task:** Deterministic router V1 Task 4, setback documentation commit.
+- **Symptom:** Scoped staging and commit could not create `.git/worktrees/deterministic-router-v1/index.lock`; Git returned permission denied.
+- **Confirmed cause:** The worktree files are writable, but the worktree Git index is stored under the parent repository `.git` metadata outside the managed write boundary.
+- **Impact:** The Task 4 implementation commits remain intact; only verified setback documentation is uncommitted.
+- **Correction:** Retry the same bounded Git staging and commit operation through approved Git-metadata access.
+- **Prevention:** Treat all worktree index and commit operations as requiring approved Git-metadata access in this repository.
+- **Related verification:** Documentation passed `git diff --check`; no product code changed during the failed commit attempt.

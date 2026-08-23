@@ -53,3 +53,13 @@
 - **Correction:** Count only lines beginning with `FAIL ` or `Write-Error:` and preserve the suite's own exit code separately.
 - **Prevention:** Verification summaries must anchor status-token matches at the beginning of each output line.
 - **Related verification:** Corrected counted run reported exit 0, 112 passes, zero failures, and one planned Task 6 pending marker.
+
+## Recurrence: 2026-08-23, Task 4 unsupported-dimension reproduction
+
+- **Phase/task:** Task 4 specification-fix RED reproduction
+- **Symptom:** The reproduction command failed with `An empty pipe element is not allowed` at a direct `foreach`-to-`ConvertTo-Json` pipeline.
+- **Impact:** The first reproduction did not run; no project file or external state changed, and verification was briefly delayed.
+- **Confirmed cause:** A standalone PowerShell `foreach` statement was piped directly instead of collecting its output first.
+- **Correction:** Assign the loop output to `$results`, then pipe `$results` to `ConvertTo-Json`.
+- **Prevention:** Collect statement output before piping it in bounded PowerShell verification snippets.
+- **Related verification:** The corrected reproduction ran and exposed all three unsupported-dimension pass defects, after which the full corrected router suite passed 177 assertions with exit 0.
