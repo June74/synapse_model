@@ -129,6 +129,9 @@ function Get-RouterRequirements {
             single_turn = $true
             privacy_level = 'standard'
             risk_level = 'standard'
+            task_type = $Request.task_type
+            domain = $Request.domain
+            complexity = $Request.complexity
             estimated_prompt_tokens = $context.estimated_prompt_tokens
             estimated_project_instruction_tokens = $context.estimated_project_instruction_tokens
             estimated_input_tokens = $context.estimated_input_tokens
@@ -151,6 +154,7 @@ function Test-RouterCandidateRequirements {
 
     $reasonCodes = [Collections.Generic.List[string]]::new()
     $unavailableCapabilities = [Collections.Generic.List[string]]::new()
+    $unsupportedRequirements = [Collections.Generic.List[object]]::new()
     $addReason = {
         param([Parameter(Mandatory)][string]$Code)
         if (-not $reasonCodes.Contains($Code)) {
@@ -202,6 +206,26 @@ function Test-RouterCandidateRequirements {
         & $addReason 'output_window_exceeded'
     }
 
+    foreach ($dimension in @(
+        [pscustomobject]@{ name = 'task_type'; profile_map = 'task_types'; value = $Requirements.task_type }
+        [pscustomobject]@{ name = 'domain'; profile_map = 'domains'; value = $Requirements.domain }
+        [pscustomobject]@{ name = 'complexity'; profile_map = 'complexities'; value = $Requirements.complexity }
+    )) {
+        $property = $Candidate.quality.($dimension.profile_map).PSObject.Properties |
+            Where-Object { $_.Name -ceq $dimension.value } |
+            Select-Object -First 1
+        if ($null -ne $property -and $property.Value -ceq 'unsupported') {
+            $unsupportedRequirements.Add([pscustomobject][ordered]@{
+                dimension = $dimension.name
+                value = $dimension.value
+                profile_path = ('quality.{0}.{1}' -f $dimension.profile_map, $dimension.value)
+            })
+        }
+    }
+    if ($unsupportedRequirements.Count -gt 0) {
+        & $addReason 'required_function_unsupported'
+    }
+
     foreach ($capability in @($Requirements.required_capabilities)) {
         $property = $Candidate.quality.capabilities.PSObject.Properties |
             Where-Object { $_.Name -ceq $capability } |
@@ -219,5 +243,6 @@ function Test-RouterCandidateRequirements {
         passed = $reasonCodes.Count -eq 0
         reason_codes = @($reasonCodes)
         unavailable_capabilities = @($unavailableCapabilities)
+        unsupported_requirements = @($unsupportedRequirements)
     }
 }

@@ -81,6 +81,9 @@ Invoke-Assertion 'requirements accept the English text single-turn V1 boundary w
         'single_turn'
         'privacy_level'
         'risk_level'
+        'task_type'
+        'domain'
+        'complexity'
         'estimated_prompt_tokens'
         'estimated_project_instruction_tokens'
         'estimated_input_tokens'
@@ -95,6 +98,9 @@ Invoke-Assertion 'requirements accept the English text single-turn V1 boundary w
     Assert-Equal $result.requirements.single_turn $true
     Assert-Equal $result.requirements.privacy_level 'standard'
     Assert-Equal $result.requirements.risk_level 'standard'
+    Assert-Equal $result.requirements.task_type 'coding'
+    Assert-Equal $result.requirements.domain 'computer_science'
+    Assert-Equal $result.requirements.complexity 'medium'
 }
 
 $requestBoundaryCases = @(
@@ -219,6 +225,9 @@ $candidateRequirements = [pscustomobject]@{
     single_turn = $true
     privacy_level = 'standard'
     risk_level = 'standard'
+    task_type = 'coding'
+    domain = 'computer_science'
+    complexity = 'medium'
     estimated_prompt_tokens = 768
     estimated_project_instruction_tokens = 128
     estimated_input_tokens = 896
@@ -240,6 +249,64 @@ foreach ($candidateCase in $candidateFailureCases) {
         if ($candidateCase.code -ceq 'required_capability_unavailable') {
             Assert-SequenceEqual @($evaluation.unavailable_capabilities) @('reasoning')
         }
+    }
+}
+
+$unsupportedDimensionCases = @(
+    [pscustomobject]@{
+        name = 'requested task type'
+        profile_map = 'task_types'
+        dimension = 'task_type'
+        value = 'coding'
+        profile_path = 'quality.task_types.coding'
+    }
+    [pscustomobject]@{
+        name = 'requested domain'
+        profile_map = 'domains'
+        dimension = 'domain'
+        value = 'computer_science'
+        profile_path = 'quality.domains.computer_science'
+    }
+    [pscustomobject]@{
+        name = 'requested complexity'
+        profile_map = 'complexities'
+        dimension = 'complexity'
+        value = 'medium'
+        profile_path = 'quality.complexities.medium'
+    }
+)
+foreach ($dimensionCase in $unsupportedDimensionCases) {
+    Invoke-Assertion ("candidate requirements hard-fail unsupported {0}" -f $dimensionCase.name) {
+        $candidate = Copy-TestObject @(Get-MinimalProfiles)[0]
+        $candidate.quality.($dimensionCase.profile_map).($dimensionCase.value) = 'unsupported'
+        $evaluation = Test-RouterCandidateRequirements -Candidate $candidate `
+            -Requirements $candidateRequirements -RuntimeState (New-MinimalRuntimeState)
+
+        Assert-Equal $evaluation.passed $false
+        Assert-SequenceEqual @($evaluation.reason_codes) @('required_function_unsupported')
+        Assert-Equal @($evaluation.unsupported_requirements).Count 1
+        Assert-SequenceEqual @($evaluation.unsupported_requirements[0].PSObject.Properties.Name) @(
+            'dimension'
+            'value'
+            'profile_path'
+        )
+        Assert-Equal $evaluation.unsupported_requirements[0].dimension $dimensionCase.dimension
+        Assert-Equal $evaluation.unsupported_requirements[0].value $dimensionCase.value
+        Assert-Equal $evaluation.unsupported_requirements[0].profile_path $dimensionCase.profile_path
+        Assert-Equal @($evaluation.unavailable_capabilities).Count 0
+    }
+}
+
+foreach ($dimensionCase in $unsupportedDimensionCases) {
+    Invoke-Assertion ("unknown {0} remains deferred to Task 5" -f $dimensionCase.name) {
+        $candidate = Copy-TestObject @(Get-MinimalProfiles)[0]
+        $candidate.quality.($dimensionCase.profile_map).($dimensionCase.value) = 'unknown'
+        $evaluation = Test-RouterCandidateRequirements -Candidate $candidate `
+            -Requirements $candidateRequirements -RuntimeState (New-MinimalRuntimeState)
+
+        Assert-Equal $evaluation.passed $true
+        Assert-Equal @($evaluation.reason_codes).Count 0
+        Assert-Equal @($evaluation.unsupported_requirements).Count 0
     }
 }
 
@@ -266,6 +333,7 @@ Invoke-Assertion 'a slow candidate passes because latency is absent from require
         'passed'
         'reason_codes'
         'unavailable_capabilities'
+        'unsupported_requirements'
     )
     Assert-Equal $evaluation.candidate_identity 'agy|shared-model__medium'
     Assert-Equal $evaluation.passed $true
