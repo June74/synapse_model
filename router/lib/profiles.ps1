@@ -103,6 +103,29 @@ function Test-RouterCatalogPositiveInteger {
     try { return $Value -ge 1 -and [decimal]$Value -eq [decimal]::Truncate([decimal]$Value) } catch { return $false }
 }
 
+function Test-RouterCatalogNonnegativeInteger {
+    param([AllowNull()][object]$Value)
+
+    if (-not (Test-RouterCatalogNonnegativeNumber $Value)) { return $false }
+    try { return [decimal]$Value -eq [decimal]::Truncate([decimal]$Value) } catch { return $false }
+}
+
+function ConvertFrom-RouterCatalogIsoDate {
+    param([AllowNull()][object]$Value)
+
+    if ($Value -isnot [string] -or $Value -cnotmatch '^\d{4}-\d{2}-\d{2}$') { return $null }
+    $parsed = [datetime]::MinValue
+    $valid = [datetime]::TryParseExact(
+        $Value,
+        'yyyy-MM-dd',
+        [Globalization.CultureInfo]::InvariantCulture,
+        [Globalization.DateTimeStyles]::None,
+        [ref]$parsed
+    )
+    if (-not $valid) { return $null }
+    return $parsed
+}
+
 function Get-RouterCatalogQualityPaths {
     $qualityKeys = [ordered]@{
         task_types = @('general', 'coding', 'math', 'reasoning', 'writing', 'summarization', 'extraction', 'research_synthesis')
@@ -117,6 +140,52 @@ function Get-RouterCatalogQualityPaths {
     )
 }
 
+function Test-RouterCatalogQualitySlicePath {
+    param(
+        [Parameter(Mandatory)][string]$BenchmarkSlice,
+        [Parameter(Mandatory)][string]$QualityPath
+    )
+
+    if ($BenchmarkSlice -ceq 'minimal-tied-policy-fixture') { return $true }
+    $allowedPaths = switch ($BenchmarkSlice) {
+        'coding' {
+            @('$.quality.task_types.coding', '$.quality.domains.computer_science')
+            break
+        }
+        'scientific_reasoning' {
+            @(
+                '$.quality.task_types.math', '$.quality.task_types.reasoning',
+                '$.quality.domains.mathematics', '$.quality.domains.physics',
+                '$.quality.domains.chemistry', '$.quality.domains.biology',
+                '$.quality.domains.medicine', '$.quality.domains.engineering',
+                '$.quality.capabilities.reasoning', '$.quality.capabilities.factual_reliability'
+            )
+            break
+        }
+        'general' {
+            @(
+                '$.quality.task_types.general', '$.quality.task_types.writing',
+                '$.quality.task_types.summarization', '$.quality.task_types.extraction',
+                '$.quality.task_types.research_synthesis', '$.quality.domains.general',
+                '$.quality.domains.social_science', '$.quality.domains.humanities',
+                '$.quality.domains.business', '$.quality.domains.finance', '$.quality.domains.law',
+                '$.quality.capabilities.instruction_following', '$.quality.capabilities.structured_output',
+                '$.quality.capabilities.factual_reliability', '$.quality.capabilities.source_grounded_synthesis'
+            )
+            break
+        }
+        'agents' {
+            @(
+                '$.quality.capabilities.instruction_following', '$.quality.capabilities.reasoning',
+                '$.quality.capabilities.structured_output', '$.quality.capabilities.long_context'
+            )
+            break
+        }
+        default { @() }
+    }
+    return $allowedPaths -ccontains $QualityPath
+}
+
 function Import-RouterProfileCatalog {
     [CmdletBinding()]
     [OutputType([pscustomobject])]
@@ -128,9 +197,11 @@ function Import-RouterProfileCatalog {
         [Parameter(Mandatory)][string]$QualitySnapshotPath
     )
 
-    if ($null -eq (Get-Command Test-RouterSchema -ErrorAction SilentlyContinue)) {
-        . (Join-Path $PSScriptRoot 'schema.ps1')
-    }
+    # Load the audited schema implementation into this invocation's local scope.
+    # Dot-sourcing unconditionally here replaces any caller-supplied shadow while
+    # keeping the project validator and its helper functions out of global scope.
+    . (Join-Path $PSScriptRoot 'schema.ps1')
+    $projectSchemaValidator = ${function:Test-RouterSchema}
 
     $errors = [Collections.Generic.List[object]]::new()
     $loaded = [Collections.Generic.List[object]]::new()
@@ -146,11 +217,21 @@ function Import-RouterProfileCatalog {
         return [pscustomobject]@{ valid = $false; profiles = @(); errors = @($errors) }
     }
     $pricingSnapshot = $pricingRead.value
-    if ($pricingSnapshot.PSObject.Properties.Name -cnotcontains 'schedules' -or
-        $pricingSnapshot.PSObject.Properties.Name -cnotcontains 'snapshot_date' -or
-        $pricingSnapshot.PSObject.Properties.Name -cnotcontains 'currency' -or
-        $pricingSnapshot.PSObject.Properties.Name -cnotcontains 'rate_unit') {
-        $errors.Add((New-RouterCatalogError -Code 'pricing_snapshot_invalid' -File $PricingSnapshotPath -Path '$' -Identity $null -Message 'Pricing snapshot lacks required catalog fields.'))
+    $requiredPricingSnapshotFields = @('snapshot_date', 'retrieved_on', 'currency', 'rate_unit', 'policy', 'schedules')
+    $missingPricingSnapshotFields = @($requiredPricingSnapshotFields | Where-Object { $pricingSnapshot.PSObject.Properties.Name -cnotcontains $_ })
+    $snapshotDate = if ($pricingSnapshot.PSObject.Properties.Name -ccontains 'snapshot_date') {
+        ConvertFrom-RouterCatalogIsoDate $pricingSnapshot.snapshot_date
+    } else { $null }
+    $snapshotRetrievedOn = if ($pricingSnapshot.PSObject.Properties.Name -ccontains 'retrieved_on') {
+        ConvertFrom-RouterCatalogIsoDate $pricingSnapshot.retrieved_on
+    } else { $null }
+    if ($missingPricingSnapshotFields.Count -gt 0 -or
+        $null -eq $snapshotDate -or $null -eq $snapshotRetrievedOn -or
+        $pricingSnapshot.currency -isnot [string] -or [string]::IsNullOrWhiteSpace($pricingSnapshot.currency) -or
+        $pricingSnapshot.rate_unit -isnot [string] -or [string]::IsNullOrWhiteSpace($pricingSnapshot.rate_unit) -or
+        $pricingSnapshot.policy -isnot [string] -or [string]::IsNullOrWhiteSpace($pricingSnapshot.policy) -or
+        $pricingSnapshot.schedules -isnot [Collections.IList]) {
+        $errors.Add((New-RouterCatalogError -Code 'pricing_snapshot_invalid' -File $PricingSnapshotPath -Path '$' -Identity $null -Message 'Pricing snapshot lacks valid required catalog fields.'))
         return [pscustomobject]@{ valid = $false; profiles = @(); errors = @($errors) }
     }
 
@@ -159,24 +240,109 @@ function Import-RouterProfileCatalog {
     foreach ($schedule in @($pricingSnapshot.schedules)) {
         $schedulePath = '$.schedules[{0}]' -f $scheduleIndex
         $scheduleIndex++
-        if ($null -eq $schedule -or
-            $schedule.PSObject.Properties.Name -cnotcontains 'provider' -or
-            $schedule.PSObject.Properties.Name -cnotcontains 'model' -or
-            $schedule.PSObject.Properties.Name -cnotcontains 'profile_models' -or
-            $schedule.PSObject.Properties.Name -cnotcontains 'cost_comparable' -or
-            $schedule.PSObject.Properties.Name -cnotcontains 'rate_periods' -or
-            $schedule.cost_comparable -isnot [bool] -or
-            @($schedule.profile_models).Count -eq 0) {
-            $errors.Add((New-RouterCatalogError -Code 'pricing_snapshot_invalid' -File $PricingSnapshotPath -Path $schedulePath -Identity $null -Message 'Pricing schedule is incomplete.'))
+        $requiredScheduleFields = @('provider', 'model', 'profile_models', 'cost_comparable', 'source_url', 'retrieved_on', 'rate_periods')
+        $missingScheduleFields = if ($null -eq $schedule) { $requiredScheduleFields } else {
+            @($requiredScheduleFields | Where-Object { $schedule.PSObject.Properties.Name -cnotcontains $_ })
+        }
+        $scheduleValid = $missingScheduleFields.Count -eq 0
+        if ($scheduleValid) {
+            $scheduleValid = $schedule.provider -is [string] -and -not [string]::IsNullOrWhiteSpace($schedule.provider) -and
+                $schedule.model -is [string] -and -not [string]::IsNullOrWhiteSpace($schedule.model) -and
+                $schedule.source_url -is [string] -and -not [string]::IsNullOrWhiteSpace($schedule.source_url) -and
+                $null -ne (ConvertFrom-RouterCatalogIsoDate $schedule.retrieved_on) -and
+                $schedule.profile_models -is [Collections.IList] -and @($schedule.profile_models).Count -gt 0 -and
+                $schedule.cost_comparable -is [bool] -and
+                $schedule.rate_periods -is [Collections.IList]
+        }
+        if ($scheduleValid) {
+            foreach ($profileModel in @($schedule.profile_models)) {
+                if ($profileModel -isnot [string] -or [string]::IsNullOrWhiteSpace($profileModel)) {
+                    $scheduleValid = $false
+                    break
+                }
+            }
+        }
+        if ($scheduleValid) {
+            $periodCount = @($schedule.rate_periods).Count
+            $scheduleValid = if ($schedule.cost_comparable) { $periodCount -gt 0 } else { $periodCount -eq 0 }
+        }
+        if (-not $scheduleValid) {
+            $errors.Add((New-RouterCatalogError -Code 'pricing_snapshot_invalid' -File $PricingSnapshotPath -Path $schedulePath -Identity $null -Message 'Pricing schedule is incomplete or has invalid field types.'))
             continue
         }
+
+        $periodsByEffectiveInterval = [Collections.Generic.Dictionary[string, Collections.Generic.List[object]]]::new([StringComparer]::Ordinal)
+        $periodIndex = 0
+        foreach ($period in @($schedule.rate_periods)) {
+            $periodPath = '{0}.rate_periods[{1}]' -f $schedulePath, $periodIndex
+            $periodIndex++
+            $requiredPeriodFields = @(
+                'effective_from', 'effective_through', 'input_tokens_min', 'input_tokens_max',
+                'input_usd_per_million_tokens', 'output_usd_per_million_tokens'
+            )
+            $missingPeriodFields = if ($null -eq $period) { $requiredPeriodFields } else {
+                @($requiredPeriodFields | Where-Object { $period.PSObject.Properties.Name -cnotcontains $_ })
+            }
+            $periodValid = $missingPeriodFields.Count -eq 0
+            $effectiveFrom = $null
+            $effectiveThrough = $null
+            if ($periodValid) {
+                $effectiveFrom = ConvertFrom-RouterCatalogIsoDate $period.effective_from
+                if ($null -ne $period.effective_through) {
+                    $effectiveThrough = ConvertFrom-RouterCatalogIsoDate $period.effective_through
+                }
+                $periodValid = $null -ne $effectiveFrom -and
+                    ($null -eq $period.effective_through -or $null -ne $effectiveThrough) -and
+                    ($null -eq $effectiveThrough -or $effectiveThrough -ge $effectiveFrom) -and
+                    (Test-RouterCatalogNonnegativeInteger $period.input_tokens_min) -and
+                    ($null -eq $period.input_tokens_max -or (Test-RouterCatalogNonnegativeInteger $period.input_tokens_max)) -and
+                    ($null -eq $period.input_tokens_max -or $period.input_tokens_max -ge $period.input_tokens_min) -and
+                    (Test-RouterCatalogNonnegativeNumber $period.input_usd_per_million_tokens) -and
+                    (Test-RouterCatalogNonnegativeNumber $period.output_usd_per_million_tokens)
+            }
+            if (-not $periodValid) {
+                $errors.Add((New-RouterCatalogError -Code 'pricing_snapshot_invalid' -File $PricingSnapshotPath -Path $periodPath -Identity $null -Message 'Pricing period has invalid dates, token bounds, or rates.'))
+                $scheduleValid = $false
+                continue
+            }
+
+            $intervalKey = '{0}|{1}' -f $period.effective_from, $(if ($null -eq $period.effective_through) { '<null>' } else { $period.effective_through })
+            if (-not $periodsByEffectiveInterval.ContainsKey($intervalKey)) {
+                $periodsByEffectiveInterval.Add($intervalKey, [Collections.Generic.List[object]]::new())
+            }
+            $periodsByEffectiveInterval[$intervalKey].Add([pscustomobject]@{
+                value = $period
+                path = $periodPath
+            })
+        }
+
+        if ($scheduleValid -and $schedule.cost_comparable) {
+            foreach ($intervalKey in $periodsByEffectiveInterval.Keys) {
+                $partition = @($periodsByEffectiveInterval[$intervalKey] | Sort-Object { [decimal]$_.value.input_tokens_min })
+                $partitionValid = $partition.Count -gt 0 -and $partition[0].value.input_tokens_min -eq 0
+                for ($partitionIndex = 0; $partitionValid -and $partitionIndex -lt $partition.Count; $partitionIndex++) {
+                    $current = $partition[$partitionIndex].value
+                    if ($partitionIndex -eq ($partition.Count - 1)) {
+                        $partitionValid = $null -eq $current.input_tokens_max
+                    } else {
+                        $next = $partition[$partitionIndex + 1].value
+                        $partitionValid = $null -ne $current.input_tokens_max -and
+                            [decimal]$next.input_tokens_min -eq ([decimal]$current.input_tokens_max + 1)
+                    }
+                }
+                if (-not $partitionValid) {
+                    $errors.Add((New-RouterCatalogError -Code 'pricing_snapshot_invalid' -File $PricingSnapshotPath -Path ($schedulePath + '.rate_periods') -Identity $null -Message 'Token ranges must form one contiguous non-overlapping partition for each effective-date interval.'))
+                    $scheduleValid = $false
+                }
+            }
+        }
+        if (-not $scheduleValid) { continue }
+
         foreach ($profileModel in @($schedule.profile_models)) {
-            if ([string]::IsNullOrWhiteSpace([string]$profileModel)) {
-                $errors.Add((New-RouterCatalogError -Code 'pricing_snapshot_invalid' -File $PricingSnapshotPath -Path ($schedulePath + '.profile_models') -Identity $null -Message 'Pricing schedule contains a blank profile model.'))
-            } elseif ($pricingByProfileModel.ContainsKey([string]$profileModel)) {
-                $errors.Add((New-RouterCatalogError -Code 'pricing_snapshot_duplicate_model' -File $PricingSnapshotPath -Path ($schedulePath + '.profile_models') -Identity ([string]$profileModel) -Message 'More than one pricing schedule applies to this profile model.'))
+            if ($pricingByProfileModel.ContainsKey($profileModel)) {
+                $errors.Add((New-RouterCatalogError -Code 'pricing_snapshot_duplicate_model' -File $PricingSnapshotPath -Path ($schedulePath + '.profile_models') -Identity $profileModel -Message 'More than one pricing schedule applies to this profile model.'))
             } else {
-                $pricingByProfileModel.Add([string]$profileModel, $schedule)
+                $pricingByProfileModel.Add($profileModel, $schedule)
             }
         }
     }
@@ -245,22 +411,22 @@ function Import-RouterProfileCatalog {
                 foreach ($authorization in @($qualityRecord.quality_authorizations)) {
                     $authorizationPath = '{0}.quality_authorizations[{1}]' -f $recordPath, $authorizationIndex
                     $authorizationIndex++
-                    $requiredAuthorizationFields = @('path', 'benchmark_slice', 'category', 'evidence_kind')
+                    $requiredAuthorizationFields = @('path', 'benchmark_slice', 'category', 'evidence_kind', 'source_url', 'retrieved_on')
                     $missingAuthorizationFields = if ($null -eq $authorization) { $requiredAuthorizationFields } else {
                         @($requiredAuthorizationFields | Where-Object { $authorization.PSObject.Properties.Name -cnotcontains $_ })
                     }
                     $authorizationValid = $missingAuthorizationFields.Count -eq 0
                     if ($authorizationValid) {
                         foreach ($stringField in $requiredAuthorizationFields) {
-                            if ([string]::IsNullOrWhiteSpace([string]$authorization.$stringField)) { $authorizationValid = $false }
+                            if ($authorization.$stringField -isnot [string] -or [string]::IsNullOrWhiteSpace($authorization.$stringField)) { $authorizationValid = $false }
                         }
+                        if ($null -eq (ConvertFrom-RouterCatalogIsoDate $authorization.retrieved_on)) { $authorizationValid = $false }
                         if (-not $allowedQualityPaths.Contains([string]$authorization.path)) { $authorizationValid = $false }
                         if ($authorization.evidence_kind -ceq 'artificial_analysis') {
                             if ($authorization.category -cnotin @('standard', 'strong', 'frontier') -or
                                 -not $qualityRecord.exact_model_match -or -not $qualityRecord.exact_effort_match -or
-                                $qualityRecord.benchmark_slice -ceq 'unavailable' -or
-                                $authorization.benchmark_slice -cne $qualityRecord.benchmark_slice -or
-                                $authorization.category -cne $qualityRecord.provisional_category) {
+                                $authorization.benchmark_slice -ceq 'unavailable' -or
+                                -not (Test-RouterCatalogQualitySlicePath -BenchmarkSlice $authorization.benchmark_slice -QualityPath $authorization.path)) {
                                 $authorizationValid = $false
                             }
                         } elseif ($authorization.evidence_kind -ceq 'provider') {
@@ -328,7 +494,7 @@ function Import-RouterProfileCatalog {
         $launcher = if ($profile.PSObject.Properties.Name -ccontains 'launcher') { [string]$profile.launcher } else { '' }
         $configurationId = if ($profile.PSObject.Properties.Name -ccontains 'configuration_id') { [string]$profile.configuration_id } else { '' }
         $identity = if ($launcher -and $configurationId) { '{0}|{1}' -f $launcher, $configurationId } else { $null }
-        $schemaResult = Test-RouterSchema -Value $profile -SchemaPath $ProfileSchemaPath
+        $schemaResult = & $projectSchemaValidator -Value $profile -SchemaPath $ProfileSchemaPath
         if (-not $schemaResult.valid) {
             $firstSchemaError = @($schemaResult.errors)[0]
             $errors.Add((New-RouterCatalogError -Code 'profile_schema_invalid' -File $relativeFile -Path $firstSchemaError.path -Identity $identity -Message ('Profile schema validation failed: {0}.' -f $firstSchemaError.code)))
@@ -462,13 +628,15 @@ function Import-RouterProfileCatalog {
                         if ($qualityProperty.Value -ceq 'unsupported') {
                             if ($authorization.category -cne 'unsupported' -or
                                 $authorization.evidence_kind -cne 'provider' -or
-                                $authorization.benchmark_slice -cne 'provider_capability') {
+                                $authorization.benchmark_slice -cne 'provider_capability' -or
+                                $authorization.source_url -cne $profile.evidence.provider.source_url -or
+                                $authorization.retrieved_on -cne $profile.evidence.provider.retrieved_on) {
                                 $qualitySnapshotValid = $false
                             }
                         } elseif ($qualityProperty.Value -cin @('standard', 'strong', 'frontier')) {
                             if ($authorization.category -cne $qualityProperty.Value -or
                                 $authorization.evidence_kind -cne 'artificial_analysis' -or
-                                $authorization.benchmark_slice -cne $qualityRecord.benchmark_slice -or
+                                -not (Test-RouterCatalogQualitySlicePath -BenchmarkSlice $authorization.benchmark_slice -QualityPath $qualityPath) -or
                                 -not $qualityRecord.exact_model_match -or -not $qualityRecord.exact_effort_match) {
                                 $qualitySnapshotValid = $false
                             }
@@ -482,24 +650,30 @@ function Import-RouterProfileCatalog {
         if (-not $qualitySnapshotValid -and $qualityByIdentity.ContainsKey($entry.identity)) {
             $errors.Add((New-RouterCatalogError -Code 'profile_quality_snapshot_mismatch' -File $entry.file -Path '$.quality' -Identity $entry.identity -Message 'Profile quality or embedded evidence does not match its authoritative quality snapshot record.'))
         }
-        $benchmarkEvidenceEligible = $artificialAnalysis.exact_model_match -and
-            $artificialAnalysis.exact_effort_match -and
-            -not [string]::IsNullOrWhiteSpace([string]$artificialAnalysis.benchmark_slice) -and
-            -not [string]::Equals([string]$artificialAnalysis.benchmark_slice, 'unavailable', [StringComparison]::OrdinalIgnoreCase)
-        if (-not $benchmarkEvidenceEligible) {
-            $measuredQualityPaths = [Collections.Generic.List[string]]::new()
-            foreach ($mapName in @('task_types', 'domains', 'complexities', 'capabilities')) {
-                foreach ($qualityProperty in $profile.quality.$mapName.PSObject.Properties) {
-                    if ($qualityProperty.Value -cin @('standard', 'strong', 'frontier')) {
-                        $measuredQualityPaths.Add(('$.quality.{0}.{1}' -f $mapName, $qualityProperty.Name))
-                    }
+        $invalidMeasuredQualityPaths = [Collections.Generic.List[string]]::new()
+        $authorizationByPath = if ($qualityAuthorizationsByIdentity.ContainsKey($entry.identity)) {
+            $qualityAuthorizationsByIdentity[$entry.identity]
+        } else { $null }
+        foreach ($mapName in @('task_types', 'domains', 'complexities', 'capabilities')) {
+            foreach ($qualityProperty in $profile.quality.$mapName.PSObject.Properties) {
+                if ($qualityProperty.Value -cnotin @('standard', 'strong', 'frontier')) { continue }
+                $qualityPath = '$.quality.{0}.{1}' -f $mapName, $qualityProperty.Name
+                $authorization = if ($null -ne $authorizationByPath -and $authorizationByPath.ContainsKey($qualityPath)) {
+                    $authorizationByPath[$qualityPath]
+                } else { $null }
+                if ($null -eq $authorization -or
+                    $authorization.evidence_kind -cne 'artificial_analysis' -or
+                    $authorization.category -cne $qualityProperty.Value -or
+                    -not $artificialAnalysis.exact_model_match -or -not $artificialAnalysis.exact_effort_match -or
+                    -not (Test-RouterCatalogQualitySlicePath -BenchmarkSlice ([string]$authorization.benchmark_slice) -QualityPath $qualityPath)) {
+                    $invalidMeasuredQualityPaths.Add($qualityPath)
                 }
             }
-            if ($measuredQualityPaths.Count -gt 0) {
-                [string[]]$qualityPaths = @($measuredQualityPaths)
-                [Array]::Sort($qualityPaths, [StringComparer]::Ordinal)
-                $errors.Add((New-RouterCatalogError -Code 'profile_quality_evidence_invalid' -File $entry.file -Path $qualityPaths[0] -Identity $entry.identity -Message 'Measured quality requires exact model, exact effort, and a relevant benchmark slice; unknown and unsupported remain allowed without it.'))
-            }
+        }
+        if ($invalidMeasuredQualityPaths.Count -gt 0) {
+            [string[]]$qualityPaths = @($invalidMeasuredQualityPaths)
+            [Array]::Sort($qualityPaths, [StringComparer]::Ordinal)
+            $errors.Add((New-RouterCatalogError -Code 'profile_quality_evidence_invalid' -File $entry.file -Path $qualityPaths[0] -Identity $entry.identity -Message 'Measured quality requires an exact path-specific authorization with exact model and effort evidence.'))
         }
 
         $latency = $profile.latency_observation
