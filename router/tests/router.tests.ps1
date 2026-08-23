@@ -20,6 +20,7 @@ Set-Location $projectRoot
 
 $schemaModulePath = Join-Path $projectRoot 'router/lib/schema.ps1'
 $profilesModulePath = Join-Path $projectRoot 'router/lib/profiles.ps1'
+$requirementsModulePath = Join-Path $projectRoot 'router/lib/requirements.ps1'
 $policyModulePath = Join-Path $projectRoot 'router/lib/policy.ps1'
 $requestSchemaPath = Join-Path $projectRoot 'router/schemas/request-profile.schema.json'
 $profileSchemaPath = Join-Path $projectRoot 'router/schemas/model-profile.schema.json'
@@ -55,7 +56,223 @@ $profilesAvailable = Test-Path -LiteralPath $profilesModulePath -PathType Leaf
 if ($profilesAvailable) {
     . $profilesModulePath
 }
+$requirementsAvailable = Test-Path -LiteralPath $requirementsModulePath -PathType Leaf
+if ($requirementsAvailable) {
+    . $requirementsModulePath
+}
 $policyAvailable = Test-Path -LiteralPath $policyModulePath -PathType Leaf
+$task4Assertions = {
+Invoke-Assertion 'Task 4 requirements module is available' {
+    Assert-Equal $requirementsAvailable $true
+}
+
+Invoke-Assertion 'requirements accept the English text single-turn V1 boundary with stable output shapes' {
+    $result = Get-RouterRequirements -Request (New-MinimalRequest) -RequestSchemaPath $requestSchemaPath `
+        -ProjectInstructions 'Follow the project conventions.' -OutputReserveTokens 512 `
+        -LongContextThresholdTokens 100000
+
+    Assert-Equal $result.valid $true
+    Assert-Equal @($result.errors).Count 0
+    Assert-SequenceEqual @($result.PSObject.Properties.Name) @('valid', 'errors', 'requirements')
+    Assert-SequenceEqual @($result.requirements.PSObject.Properties.Name) @(
+        'input_modalities'
+        'output_modalities'
+        'language'
+        'single_turn'
+        'privacy_level'
+        'risk_level'
+        'estimated_prompt_tokens'
+        'estimated_project_instruction_tokens'
+        'estimated_input_tokens'
+        'output_reserve_tokens'
+        'required_context_tokens'
+        'long_context_threshold_tokens'
+        'required_capabilities'
+    )
+    Assert-SequenceEqual @($result.requirements.input_modalities) @('text')
+    Assert-SequenceEqual @($result.requirements.output_modalities) @('text')
+    Assert-Equal $result.requirements.language 'english'
+    Assert-Equal $result.requirements.single_turn $true
+    Assert-Equal $result.requirements.privacy_level 'standard'
+    Assert-Equal $result.requirements.risk_level 'standard'
+}
+
+$requestBoundaryCases = @(
+    [pscustomobject]@{
+        name = 'sensitive requests'
+        property = 'privacy_level'
+        value = 'sensitive'
+        code = 'sensitive_request_unsupported'
+        path = '$.privacy_level'
+    }
+    [pscustomobject]@{
+        name = 'high-stakes requests'
+        property = 'risk_level'
+        value = 'high_stakes'
+        code = 'high_stakes_unsupported'
+        path = '$.risk_level'
+    }
+)
+foreach ($boundaryCase in $requestBoundaryCases) {
+    Invoke-Assertion ("requirements preserve exact schema diagnostics for {0}" -f $boundaryCase.name) {
+        $request = New-MinimalRequest
+        $request.($boundaryCase.property) = $boundaryCase.value
+        $result = Get-RouterRequirements -Request $request -RequestSchemaPath $requestSchemaPath `
+            -ProjectInstructions '' -OutputReserveTokens 128 -LongContextThresholdTokens 100000
+
+        Assert-ValidationErrorsExactly -Validation $result -ExpectedErrors @(
+            [pscustomobject]@{ code = $boundaryCase.code; path = $boundaryCase.path }
+        )
+        Assert-Equal $result.requirements $null
+    }
+}
+
+Invoke-Assertion 'context estimation uses the complete prompt project instructions and output reserve' {
+    $estimate = Get-RouterContextEstimate -PromptText 'abcd' -ProjectInstructions 'ef' -OutputReserveTokens 3
+
+    Assert-SequenceEqual @($estimate.PSObject.Properties.Name) @(
+        'estimated_prompt_tokens'
+        'estimated_project_instruction_tokens'
+        'estimated_input_tokens'
+        'output_reserve_tokens'
+        'required_context_tokens'
+    )
+    Assert-Equal $estimate.estimated_prompt_tokens 4
+    Assert-Equal $estimate.estimated_project_instruction_tokens 2
+    Assert-Equal $estimate.estimated_input_tokens 6
+    Assert-Equal $estimate.output_reserve_tokens 3
+    Assert-Equal $estimate.required_context_tokens 9
+}
+
+$capabilityCases = @(
+    [pscustomobject]@{ name = 'general'; task = 'general'; domain = 'general'; complexity = 'low'; threshold = 100000; expected = @('instruction_following') }
+    [pscustomobject]@{ name = 'low-complexity coding'; task = 'coding'; domain = 'general'; complexity = 'low'; threshold = 100000; expected = @('instruction_following') }
+    [pscustomobject]@{ name = 'medium-complexity coding'; task = 'coding'; domain = 'general'; complexity = 'medium'; threshold = 100000; expected = @('instruction_following', 'reasoning') }
+    [pscustomobject]@{ name = 'high-complexity coding'; task = 'coding'; domain = 'general'; complexity = 'high'; threshold = 100000; expected = @('instruction_following', 'reasoning') }
+    [pscustomobject]@{ name = 'math'; task = 'math'; domain = 'general'; complexity = 'low'; threshold = 100000; expected = @('instruction_following', 'reasoning') }
+    [pscustomobject]@{ name = 'reasoning'; task = 'reasoning'; domain = 'general'; complexity = 'low'; threshold = 100000; expected = @('instruction_following', 'reasoning') }
+    [pscustomobject]@{ name = 'writing'; task = 'writing'; domain = 'general'; complexity = 'low'; threshold = 100000; expected = @('instruction_following') }
+    [pscustomobject]@{ name = 'extraction'; task = 'extraction'; domain = 'general'; complexity = 'low'; threshold = 100000; expected = @('instruction_following', 'structured_output') }
+    [pscustomobject]@{ name = 'summarization'; task = 'summarization'; domain = 'general'; complexity = 'low'; threshold = 100000; expected = @('instruction_following', 'factual_reliability') }
+    [pscustomobject]@{ name = 'research synthesis'; task = 'research_synthesis'; domain = 'general'; complexity = 'low'; threshold = 100000; expected = @('instruction_following', 'factual_reliability', 'source_grounded_synthesis') }
+    [pscustomobject]@{ name = 'non-general domain'; task = 'general'; domain = 'finance'; complexity = 'low'; threshold = 100000; expected = @('instruction_following', 'factual_reliability') }
+    [pscustomobject]@{ name = 'long context'; task = 'general'; domain = 'general'; complexity = 'low'; threshold = 1; expected = @('instruction_following', 'long_context') }
+)
+foreach ($capabilityCase in $capabilityCases) {
+    Invoke-Assertion ("capability derivation covers {0}" -f $capabilityCase.name) {
+        $request = New-MinimalRequest
+        $request.request_text = 'Explain this.'
+        $request.task_type = $capabilityCase.task
+        $request.domain = $capabilityCase.domain
+        $request.complexity = $capabilityCase.complexity
+        $request.additional_capabilities = @()
+        $result = Get-RouterRequirements -Request $request -RequestSchemaPath $requestSchemaPath `
+            -ProjectInstructions '' -OutputReserveTokens 0 `
+            -LongContextThresholdTokens $capabilityCase.threshold
+
+        Assert-Equal $result.valid $true
+        Assert-SequenceEqual @($result.requirements.required_capabilities) @($capabilityCase.expected)
+    }
+}
+
+Invoke-Assertion 'explicit additional capabilities form a canonical de-duplicated union' {
+    $request = New-MinimalRequest
+    $request.task_type = 'extraction'
+    $request.domain = 'general'
+    $request.complexity = 'low'
+    $request.additional_capabilities = @('factual_reliability', 'reasoning', 'instruction_following')
+    $result = Get-RouterRequirements -Request $request -RequestSchemaPath $requestSchemaPath `
+        -ProjectInstructions '' -OutputReserveTokens 0 -LongContextThresholdTokens 100000
+
+    Assert-Equal $result.valid $true
+    Assert-SequenceEqual @($result.requirements.required_capabilities) @(
+        'instruction_following'
+        'reasoning'
+        'structured_output'
+        'factual_reliability'
+    )
+}
+
+$candidateFailureCases = @(
+    [pscustomobject]@{ name = 'disabled profile'; code = 'candidate_disabled'; mutate = { param($candidate, $runtime, $requirements) $candidate.enabled = $false } }
+    [pscustomobject]@{ name = 'unavailable profile'; code = 'candidate_unavailable'; mutate = { param($candidate, $runtime, $requirements) $candidate.availability = 'unavailable' } }
+    [pscustomobject]@{ name = 'launcher identity mismatch'; code = 'runtime_identity_mismatch'; mutate = { param($candidate, $runtime, $requirements) $runtime.launcher = 'codex' } }
+    [pscustomobject]@{ name = 'model identity mismatch'; code = 'runtime_identity_mismatch'; mutate = { param($candidate, $runtime, $requirements) $runtime.model = 'different-model' } }
+    [pscustomobject]@{ name = 'effort identity mismatch'; code = 'runtime_identity_mismatch'; mutate = { param($candidate, $runtime, $requirements) $runtime.effort = 'high' } }
+    [pscustomobject]@{ name = 'unavailable launcher'; code = 'launcher_unavailable'; mutate = { param($candidate, $runtime, $requirements) $runtime.available = $false } }
+    [pscustomobject]@{ name = 'unauthenticated launcher'; code = 'launcher_unauthenticated'; mutate = { param($candidate, $runtime, $requirements) $runtime.authenticated = $false } }
+    [pscustomobject]@{ name = 'unhealthy launcher'; code = 'launcher_unhealthy'; mutate = { param($candidate, $runtime, $requirements) $runtime.working = $false } }
+    [pscustomobject]@{ name = 'quota-exhausted launcher'; code = 'quota_exhausted'; mutate = { param($candidate, $runtime, $requirements) $runtime.quota_exhausted = $true } }
+    [pscustomobject]@{ name = 'unsupported text input'; code = 'text_input_unsupported'; mutate = { param($candidate, $runtime, $requirements) $candidate.supports.input_modalities = @('image') } }
+    [pscustomobject]@{ name = 'unsupported text output'; code = 'text_output_unsupported'; mutate = { param($candidate, $runtime, $requirements) $candidate.supports.output_modalities = @('image') } }
+    [pscustomobject]@{ name = 'unsupported English'; code = 'english_unsupported'; mutate = { param($candidate, $runtime, $requirements) $candidate.supports.languages = @('french') } }
+    [pscustomobject]@{ name = 'unsupported single turn'; code = 'single_turn_unsupported'; mutate = { param($candidate, $runtime, $requirements) $candidate.supports.single_turn = $false } }
+    [pscustomobject]@{ name = 'context window overflow'; code = 'context_window_exceeded'; mutate = { param($candidate, $runtime, $requirements) $candidate.supports.context_window_tokens = $requirements.required_context_tokens - 1 } }
+    [pscustomobject]@{ name = 'output window overflow'; code = 'output_window_exceeded'; mutate = { param($candidate, $runtime, $requirements) $candidate.supports.maximum_output_tokens = $requirements.output_reserve_tokens - 1 } }
+    [pscustomobject]@{ name = 'unsupported required capability'; code = 'required_capability_unavailable'; mutate = { param($candidate, $runtime, $requirements) $candidate.quality.capabilities.reasoning = 'unsupported' } }
+)
+
+$candidateRequirements = [pscustomobject]@{
+    input_modalities = @('text')
+    output_modalities = @('text')
+    language = 'english'
+    single_turn = $true
+    privacy_level = 'standard'
+    risk_level = 'standard'
+    estimated_prompt_tokens = 768
+    estimated_project_instruction_tokens = 128
+    estimated_input_tokens = 896
+    output_reserve_tokens = 128
+    required_context_tokens = 1024
+    long_context_threshold_tokens = 100000
+    required_capabilities = @('instruction_following', 'reasoning', 'factual_reliability')
+}
+foreach ($candidateCase in $candidateFailureCases) {
+    Invoke-Assertion ("candidate requirements reject {0}" -f $candidateCase.name) {
+        $candidate = Copy-TestObject @(Get-MinimalProfiles)[0]
+        $runtime = New-MinimalRuntimeState
+        & $candidateCase.mutate $candidate $runtime $candidateRequirements
+        $evaluation = Test-RouterCandidateRequirements -Candidate $candidate `
+            -Requirements $candidateRequirements -RuntimeState $runtime
+
+        Assert-Equal $evaluation.passed $false
+        Assert-SequenceEqual @($evaluation.reason_codes) @($candidateCase.code)
+        if ($candidateCase.code -ceq 'required_capability_unavailable') {
+            Assert-SequenceEqual @($evaluation.unavailable_capabilities) @('reasoning')
+        }
+    }
+}
+
+Invoke-Assertion 'unknown capability quality is deferred and is not a hard-requirement failure' {
+    $candidate = Copy-TestObject @(Get-MinimalProfiles)[0]
+    $candidate.quality.capabilities.reasoning = 'unknown'
+    $evaluation = Test-RouterCandidateRequirements -Candidate $candidate `
+        -Requirements $candidateRequirements -RuntimeState (New-MinimalRuntimeState)
+
+    Assert-Equal $evaluation.passed $true
+    Assert-Equal @($evaluation.reason_codes).Count 0
+    Assert-Equal @($evaluation.unavailable_capabilities).Count 0
+}
+
+Invoke-Assertion 'a slow candidate passes because latency is absent from requirement evaluation' {
+    $candidate = Copy-TestObject @(Get-MinimalProfiles)[0]
+    $candidate.latency_observation.available = $true
+    $candidate.latency_observation.milliseconds = 86400000
+    $evaluation = Test-RouterCandidateRequirements -Candidate $candidate `
+        -Requirements $candidateRequirements -RuntimeState (New-MinimalRuntimeState)
+
+    Assert-SequenceEqual @($evaluation.PSObject.Properties.Name) @(
+        'candidate_identity'
+        'passed'
+        'reason_codes'
+        'unavailable_capabilities'
+    )
+    Assert-Equal $evaluation.candidate_identity 'agy|shared-model__medium'
+    Assert-Equal $evaluation.passed $true
+    Assert-Equal @($evaluation.reason_codes).Count 0
+}
+}
+
 if ($policyAvailable) {
     . $policyModulePath
 }
@@ -383,6 +600,18 @@ function Get-CompositeIdentity {
     param([Parameter(Mandatory)][object]$Candidate)
 
     return '{0}|{1}' -f $Candidate.launcher, $Candidate.configuration_id
+}
+
+function New-MinimalRuntimeState {
+    [pscustomobject]@{
+        launcher = 'agy'
+        model = 'shared-model'
+        effort = 'medium'
+        available = $true
+        authenticated = $true
+        working = $true
+        quota_exhausted = $false
+    }
 }
 
 function Write-TestJson {
@@ -2594,6 +2823,8 @@ Invoke-Assertion 'Equals-throwing CLR candidate is rejected without invoking Equ
     )
     Assert-Equal ([RouterSchemaThrowingEqualsProbe].GetProperty('EqualsCalls').GetValue($null)) 0
 }
+
+& $task4Assertions
 
 if ($policyAvailable) {
     Invoke-Assertion 'stable identity is ascending ordinal launcher|configuration_id' {
