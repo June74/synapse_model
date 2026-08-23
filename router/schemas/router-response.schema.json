@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "router-response/v1",
+  "title": "Deterministic router response V1",
+  "oneOf": [
+    {
+      "title": "Completed response",
+      "type": "object",
+      "required": [
+        "status",
+        "configuration_id",
+        "provider",
+        "launcher",
+        "model",
+        "effort",
+        "output",
+        "quality_floor",
+        "effective_quality",
+        "quality_bottleneck",
+        "price",
+        "price_final",
+        "latency",
+        "decision_trace_id"
+      ],
+      "properties": {
+        "status": { "const": "completed" },
+        "configuration_id": { "type": "string", "minLength": 1 },
+        "provider": { "type": "string", "minLength": 1 },
+        "launcher": { "type": "string", "minLength": 1 },
+        "model": { "type": "string", "minLength": 1 },
+        "effort": { "type": "string", "minLength": 1 },
+        "output": { "type": "string", "minLength": 1 },
+        "quality_floor": {
+          "type": "string",
+          "enum": ["standard", "strong", "frontier"]
+        },
+        "effective_quality": {
+          "type": "string",
+          "enum": ["standard", "strong", "frontier"]
+        },
+        "quality_bottleneck": { "type": "string", "minLength": 1 },
+        "price": { "type": "number", "minimum": 0 },
+        "price_final": { "type": "boolean" },
+        "latency": { "type": "number", "minimum": 0 },
+        "decision_trace_id": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    },
+    {
+      "title": "Failure response",
+      "type": "object",
+      "required": ["status", "reason_code", "decision_trace_id"],
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "invalid_request",
+            "unsupported_request",
+            "no_eligible_configuration",
+            "execution_failed"
+          ]
+        },
+        "reason_code": {
+          "type": "string",
+          "enum": [
+            "unsupported_language",
+            "unsupported_modality",
+            "sensitive_request_unsupported",
+            "high_stakes_unsupported",
+            "context_too_large",
+            "required_capability_unavailable",
+            "quality_floor_not_met",
+            "quality_evidence_unknown",
+            "all_routes_unavailable",
+            "launcher_execution_failed"
+          ]
+        },
+        "decision_trace_id": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    }
+  ]
+}

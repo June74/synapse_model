@@ -1,0 +1,111 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "router-request-profile/v1",
+  "title": "Deterministic router request profile V1",
+  "type": "object",
+  "required": [
+    "request_text",
+    "task_type",
+    "domain",
+    "complexity",
+    "quality_floor",
+    "privacy_level",
+    "risk_level",
+    "language"
+  ],
+  "properties": {
+    "request_text": {
+      "type": "string",
+      "minLength": 1
+    },
+    "task_type": {
+      "type": "string",
+      "enum": [
+        "general",
+        "coding",
+        "math",
+        "reasoning",
+        "writing",
+        "summarization",
+        "extraction",
+        "research_synthesis"
+      ]
+    },
+    "domain": {
+      "type": "string",
+      "enum": [
+        "general",
+        "computer_science",
+        "mathematics",
+        "physics",
+        "chemistry",
+        "biology",
+        "medicine",
+        "engineering",
+        "social_science",
+        "humanities",
+        "business",
+        "finance",
+        "law"
+      ]
+    },
+    "complexity": {
+      "type": "string",
+      "enum": ["low", "medium", "high"]
+    },
+    "quality_floor": {
+      "type": "string",
+      "enum": ["standard", "strong", "frontier"]
+    },
+    "latency": {
+      "type": "string",
+      "enum": ["fast", "normal", "relaxed"],
+      "default": "normal"
+    },
+    "privacy_level": {
+      "type": "string",
+      "enum": ["standard"],
+      "x-error-code": "sensitive_request_unsupported"
+    },
+    "risk_level": {
+      "type": "string",
+      "enum": ["standard"],
+      "x-error-code": "high_stakes_unsupported"
+    },
+    "output_length": {
+      "type": "string",
+      "enum": ["short", "normal", "detailed"],
+      "default": "normal"
+    },
+    "language": {
+      "type": "string",
+      "enum": ["english"],
+      "x-error-code": "unsupported_language"
+    },
+    "additional_capabilities": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "instruction_following",
+          "reasoning",
+          "structured_output",
+          "factual_reliability",
+          "source_grounded_synthesis",
+          "long_context"
+        ]
+      },
+      "uniqueItems": true,
+      "default": []
+    },
+    "modality": {
+      "not": {},
+      "x-error-code": "unsupported_modality"
+    },
+    "input_modalities": {
+      "not": {},
+      "x-error-code": "unsupported_modality"
+    }
+  },
+  "additionalProperties": false
+}
