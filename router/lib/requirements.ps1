@@ -13,10 +13,20 @@ function Get-RouterContextEstimate {
         throw 'OutputReserveTokens must be nonnegative.'
     }
 
-    # UTF-8 bytes are a deterministic conservative upper bound for tokenizer tokens.
+    $composedPrompt = @(
+        '=== Project instructions ==='
+        $ProjectInstructions
+        '=== Request ==='
+        $PromptText
+    ) -join "`n`n"
+
+    # V1 uses UTF-8 bytes as a deterministic conservative byte-as-token estimate for
+    # the fully composed prompt envelope. This is not an exact provider tokenizer result.
     [long]$estimatedPromptTokens = [Text.Encoding]::UTF8.GetByteCount($PromptText)
     [long]$estimatedProjectInstructionTokens = [Text.Encoding]::UTF8.GetByteCount($ProjectInstructions)
-    [decimal]$estimatedInputTokens = [decimal]$estimatedPromptTokens + $estimatedProjectInstructionTokens
+    [long]$estimatedInputTokens = [Text.Encoding]::UTF8.GetByteCount($composedPrompt)
+    [long]$estimatedFramingTokens = $estimatedInputTokens - $estimatedPromptTokens -
+        $estimatedProjectInstructionTokens
     [decimal]$requiredContextTokens = $estimatedInputTokens + $OutputReserveTokens
     if ($requiredContextTokens -gt [long]::MaxValue) {
         throw 'The calculated context requirement exceeds the supported integer range.'
@@ -25,7 +35,8 @@ function Get-RouterContextEstimate {
     return [pscustomobject][ordered]@{
         estimated_prompt_tokens = $estimatedPromptTokens
         estimated_project_instruction_tokens = $estimatedProjectInstructionTokens
-        estimated_input_tokens = [long]$estimatedInputTokens
+        estimated_framing_tokens = $estimatedFramingTokens
+        estimated_input_tokens = $estimatedInputTokens
         output_reserve_tokens = $OutputReserveTokens
         required_context_tokens = [long]$requiredContextTokens
     }
@@ -134,6 +145,7 @@ function Get-RouterRequirements {
             complexity = $Request.complexity
             estimated_prompt_tokens = $context.estimated_prompt_tokens
             estimated_project_instruction_tokens = $context.estimated_project_instruction_tokens
+            estimated_framing_tokens = $context.estimated_framing_tokens
             estimated_input_tokens = $context.estimated_input_tokens
             output_reserve_tokens = $context.output_reserve_tokens
             required_context_tokens = $context.required_context_tokens
@@ -143,13 +155,44 @@ function Get-RouterRequirements {
     }
 }
 
+function Test-RouterRequirementNonnegativeNumber {
+    param([AllowNull()][object]$Value)
+
+    if (-not (Test-RouterJsonNumber -Value $Value)) { return $false }
+    return $Value -ge 0
+}
+
+function Test-RouterCandidatePriceAvailability {
+    param([Parameter(Mandatory)][object]$Candidate)
+
+    $pricingProperty = Get-RouterExactProperty -Object $Candidate -Name 'pricing'
+    if ($null -eq $pricingProperty) { return $false }
+
+    $costComparableProperty = Get-RouterExactProperty -Object $pricingProperty.Value -Name 'cost_comparable'
+    $inputRateProperty = Get-RouterExactProperty -Object $pricingProperty.Value -Name 'input_usd_per_million_tokens'
+    $outputRateProperty = Get-RouterExactProperty -Object $pricingProperty.Value -Name 'output_usd_per_million_tokens'
+    if (
+        $null -eq $costComparableProperty -or
+        $costComparableProperty.Value -isnot [bool] -or
+        -not $costComparableProperty.Value -or
+        $null -eq $inputRateProperty -or
+        -not (Test-RouterRequirementNonnegativeNumber -Value $inputRateProperty.Value) -or
+        $null -eq $outputRateProperty -or
+        -not (Test-RouterRequirementNonnegativeNumber -Value $outputRateProperty.Value)
+    ) {
+        return $false
+    }
+
+    return $true
+}
+
 function Test-RouterCandidateRequirements {
     [CmdletBinding()]
     [OutputType([pscustomobject])]
     param(
         [Parameter(Mandatory)][object]$Candidate,
         [Parameter(Mandatory)][object]$Requirements,
-        [Parameter(Mandatory)][object]$RuntimeState
+        [Parameter(Mandatory)][AllowNull()][object]$RuntimeState
     )
 
     $reasonCodes = [Collections.Generic.List[string]]::new()
@@ -168,24 +211,54 @@ function Test-RouterCandidateRequirements {
     if ($Candidate.availability -cne 'available') {
         & $addReason 'candidate_unavailable'
     }
-    if (
-        $RuntimeState.launcher -cne $Candidate.launcher -or
-        $RuntimeState.model -cne $Candidate.model -or
-        $RuntimeState.effort -cne $Candidate.effort
-    ) {
-        & $addReason 'runtime_identity_mismatch'
+    $runtimeValues = @{}
+    $runtimeStateValid = $RuntimeState -is [pscustomobject]
+    if ($runtimeStateValid) {
+        foreach ($runtimePropertyRequirement in @(
+            [pscustomobject]@{ name = 'launcher'; type = 'string' }
+            [pscustomobject]@{ name = 'model'; type = 'string' }
+            [pscustomobject]@{ name = 'effort'; type = 'string' }
+            [pscustomobject]@{ name = 'available'; type = 'boolean' }
+            [pscustomobject]@{ name = 'authenticated'; type = 'boolean' }
+            [pscustomobject]@{ name = 'working'; type = 'boolean' }
+            [pscustomobject]@{ name = 'quota_exhausted'; type = 'boolean' }
+        )) {
+            $runtimeProperty = Get-RouterExactProperty -Object $RuntimeState `
+                -Name $runtimePropertyRequirement.name
+            if (
+                $null -eq $runtimeProperty -or
+                ($runtimePropertyRequirement.type -ceq 'string' -and $runtimeProperty.Value -isnot [string]) -or
+                ($runtimePropertyRequirement.type -ceq 'boolean' -and $runtimeProperty.Value -isnot [bool])
+            ) {
+                $runtimeStateValid = $false
+                break
+            }
+            $runtimeValues[$runtimePropertyRequirement.name] = $runtimeProperty.Value
+        }
     }
-    if ($RuntimeState.available -isnot [bool] -or -not $RuntimeState.available) {
-        & $addReason 'launcher_unavailable'
-    }
-    if ($RuntimeState.authenticated -isnot [bool] -or -not $RuntimeState.authenticated) {
-        & $addReason 'launcher_unauthenticated'
-    }
-    if ($RuntimeState.working -isnot [bool] -or -not $RuntimeState.working) {
-        & $addReason 'launcher_unhealthy'
-    }
-    if ($RuntimeState.quota_exhausted -isnot [bool] -or $RuntimeState.quota_exhausted) {
-        & $addReason 'quota_exhausted'
+
+    if (-not $runtimeStateValid) {
+        & $addReason 'runtime_state_invalid'
+    } else {
+        if (
+            -not [string]::Equals($runtimeValues['launcher'], $Candidate.launcher, [StringComparison]::Ordinal) -or
+            -not [string]::Equals($runtimeValues['model'], $Candidate.model, [StringComparison]::Ordinal) -or
+            -not [string]::Equals($runtimeValues['effort'], $Candidate.effort, [StringComparison]::Ordinal)
+        ) {
+            & $addReason 'runtime_identity_mismatch'
+        }
+        if (-not $runtimeValues['available']) {
+            & $addReason 'launcher_unavailable'
+        }
+        if (-not $runtimeValues['authenticated']) {
+            & $addReason 'launcher_unauthenticated'
+        }
+        if (-not $runtimeValues['working']) {
+            & $addReason 'launcher_unhealthy'
+        }
+        if ($runtimeValues['quota_exhausted']) {
+            & $addReason 'quota_exhausted'
+        }
     }
     if (@($Candidate.supports.input_modalities) -cnotcontains 'text') {
         & $addReason 'text_input_unsupported'
@@ -204,6 +277,9 @@ function Test-RouterCandidateRequirements {
     }
     if ($Requirements.output_reserve_tokens -gt $Candidate.supports.maximum_output_tokens) {
         & $addReason 'output_window_exceeded'
+    }
+    if (-not (Test-RouterCandidatePriceAvailability -Candidate $Candidate)) {
+        & $addReason 'price_unavailable'
     }
 
     foreach ($dimension in @(

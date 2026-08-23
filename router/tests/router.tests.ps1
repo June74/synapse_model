@@ -86,6 +86,7 @@ Invoke-Assertion 'requirements accept the English text single-turn V1 boundary w
         'complexity'
         'estimated_prompt_tokens'
         'estimated_project_instruction_tokens'
+        'estimated_framing_tokens'
         'estimated_input_tokens'
         'output_reserve_tokens'
         'required_context_tokens'
@@ -135,19 +136,80 @@ foreach ($boundaryCase in $requestBoundaryCases) {
 
 Invoke-Assertion 'context estimation uses the complete prompt project instructions and output reserve' {
     $estimate = Get-RouterContextEstimate -PromptText 'abcd' -ProjectInstructions 'ef' -OutputReserveTokens 3
+    $composedPrompt = @(
+        '=== Project instructions ==='
+        'ef'
+        '=== Request ==='
+        'abcd'
+    ) -join "`n`n"
+    $expectedInputBytes = [Text.Encoding]::UTF8.GetByteCount($composedPrompt)
+    $expectedFramingBytes = $expectedInputBytes - 6
 
     Assert-SequenceEqual @($estimate.PSObject.Properties.Name) @(
         'estimated_prompt_tokens'
         'estimated_project_instruction_tokens'
+        'estimated_framing_tokens'
         'estimated_input_tokens'
         'output_reserve_tokens'
         'required_context_tokens'
     )
     Assert-Equal $estimate.estimated_prompt_tokens 4
     Assert-Equal $estimate.estimated_project_instruction_tokens 2
-    Assert-Equal $estimate.estimated_input_tokens 6
+    Assert-Equal $estimate.estimated_framing_tokens $expectedFramingBytes
+    Assert-Equal $estimate.estimated_input_tokens $expectedInputBytes
     Assert-Equal $estimate.output_reserve_tokens 3
-    Assert-Equal $estimate.required_context_tokens 9
+    Assert-Equal $estimate.required_context_tokens ($expectedInputBytes + 3)
+}
+
+Invoke-Assertion 'context estimation counts the complete UTF-8 envelope for non-ASCII input' {
+    $promptText = 'café'
+    $projectInstructions = '指示'
+    $estimate = Get-RouterContextEstimate -PromptText $promptText `
+        -ProjectInstructions $projectInstructions -OutputReserveTokens 0
+    $composedPrompt = @(
+        '=== Project instructions ==='
+        $projectInstructions
+        '=== Request ==='
+        $promptText
+    ) -join "`n`n"
+    $promptBytes = [Text.Encoding]::UTF8.GetByteCount($promptText)
+    $instructionBytes = [Text.Encoding]::UTF8.GetByteCount($projectInstructions)
+    $inputBytes = [Text.Encoding]::UTF8.GetByteCount($composedPrompt)
+
+    Assert-Equal $estimate.estimated_prompt_tokens $promptBytes
+    Assert-Equal $estimate.estimated_project_instruction_tokens $instructionBytes
+    Assert-Equal $estimate.estimated_framing_tokens ($inputBytes - $promptBytes - $instructionBytes)
+    Assert-Equal $estimate.estimated_input_tokens $inputBytes
+    Assert-Equal $estimate.required_context_tokens $inputBytes
+}
+
+Invoke-Assertion 'context estimation accepts the Int64 boundary and rejects overflow deterministically' {
+    $promptText = 'x'
+    $projectInstructions = ''
+    $composedPrompt = @(
+        '=== Project instructions ==='
+        $projectInstructions
+        '=== Request ==='
+        $promptText
+    ) -join "`n`n"
+    [long]$inputBytes = [Text.Encoding]::UTF8.GetByteCount($composedPrompt)
+    [long]$exactReserve = [long]::MaxValue - $inputBytes
+
+    $exact = Get-RouterContextEstimate -PromptText $promptText `
+        -ProjectInstructions $projectInstructions -OutputReserveTokens $exactReserve
+    Assert-Equal $exact.required_context_tokens ([long]::MaxValue)
+
+    $overflowed = $false
+    $overflowMessage = $null
+    try {
+        $null = Get-RouterContextEstimate -PromptText $promptText `
+            -ProjectInstructions $projectInstructions -OutputReserveTokens ($exactReserve + 1)
+    } catch {
+        $overflowed = $true
+        $overflowMessage = $_.Exception.Message
+    }
+    Assert-Equal $overflowed $true
+    Assert-Equal $overflowMessage 'The calculated context requirement exceeds the supported integer range.'
 }
 
 $capabilityCases = @(
@@ -230,11 +292,177 @@ $candidateRequirements = [pscustomobject]@{
     complexity = 'medium'
     estimated_prompt_tokens = 768
     estimated_project_instruction_tokens = 128
+    estimated_framing_tokens = 0
     estimated_input_tokens = 896
     output_reserve_tokens = 128
     required_context_tokens = 1024
     long_context_threshold_tokens = 100000
     required_capabilities = @('instruction_following', 'reasoning', 'factual_reliability')
+}
+
+Invoke-Assertion 'candidate context gating includes framing and honors exact and one-byte boundaries' {
+    $requirementsResult = Get-RouterRequirements -Request (New-MinimalRequest) `
+        -RequestSchemaPath $requestSchemaPath -ProjectInstructions 'Use project rules.' `
+        -OutputReserveTokens 128 -LongContextThresholdTokens 100000
+    $candidate = Copy-TestObject @(Get-MinimalProfiles)[0]
+    $runtime = New-MinimalRuntimeState
+    $rawFieldsOnlyWindow = $requirementsResult.requirements.estimated_prompt_tokens +
+        $requirementsResult.requirements.estimated_project_instruction_tokens +
+        $requirementsResult.requirements.output_reserve_tokens
+
+    $candidate.supports.context_window_tokens = $rawFieldsOnlyWindow
+    $rawOnlyEvaluation = Test-RouterCandidateRequirements -Candidate $candidate `
+        -Requirements $requirementsResult.requirements -RuntimeState $runtime
+    Assert-Equal $rawOnlyEvaluation.passed $false
+    Assert-SequenceEqual @($rawOnlyEvaluation.reason_codes) @('context_window_exceeded')
+
+    $candidate.supports.context_window_tokens = $requirementsResult.requirements.required_context_tokens
+    $exactEvaluation = Test-RouterCandidateRequirements -Candidate $candidate `
+        -Requirements $requirementsResult.requirements -RuntimeState $runtime
+    Assert-Equal $exactEvaluation.passed $true
+
+    $candidate.supports.context_window_tokens = $requirementsResult.requirements.required_context_tokens - 1
+    $oneByteOverEvaluation = Test-RouterCandidateRequirements -Candidate $candidate `
+        -Requirements $requirementsResult.requirements -RuntimeState $runtime
+    Assert-Equal $oneByteOverEvaluation.passed $false
+    Assert-SequenceEqual @($oneByteOverEvaluation.reason_codes) @('context_window_exceeded')
+}
+
+$unusablePriceCases = @(
+    [pscustomobject]@{ name = 'false cost comparability'; mutate = { param($candidate) $candidate.pricing.cost_comparable = $false } }
+    [pscustomobject]@{ name = 'string cost comparability'; mutate = { param($candidate) $candidate.pricing.cost_comparable = 'true' } }
+    [pscustomobject]@{ name = 'missing cost comparability'; mutate = { param($candidate) $candidate.pricing.PSObject.Properties.Remove('cost_comparable') } }
+    [pscustomobject]@{ name = 'null input rate'; mutate = { param($candidate) $candidate.pricing.input_usd_per_million_tokens = $null } }
+    [pscustomobject]@{ name = 'missing input rate'; mutate = { param($candidate) $candidate.pricing.PSObject.Properties.Remove('input_usd_per_million_tokens') } }
+    [pscustomobject]@{ name = 'string input rate'; mutate = { param($candidate) $candidate.pricing.input_usd_per_million_tokens = '1.0' } }
+    [pscustomobject]@{ name = 'negative input rate'; mutate = { param($candidate) $candidate.pricing.input_usd_per_million_tokens = -0.01 } }
+    [pscustomobject]@{ name = 'non-finite input rate'; mutate = { param($candidate) $candidate.pricing.input_usd_per_million_tokens = [double]::NaN } }
+    [pscustomobject]@{ name = 'null output rate'; mutate = { param($candidate) $candidate.pricing.output_usd_per_million_tokens = $null } }
+    [pscustomobject]@{ name = 'missing output rate'; mutate = { param($candidate) $candidate.pricing.PSObject.Properties.Remove('output_usd_per_million_tokens') } }
+    [pscustomobject]@{ name = 'boolean output rate'; mutate = { param($candidate) $candidate.pricing.output_usd_per_million_tokens = $true } }
+    [pscustomobject]@{ name = 'non-finite output rate'; mutate = { param($candidate) $candidate.pricing.output_usd_per_million_tokens = [double]::PositiveInfinity } }
+)
+foreach ($priceCase in $unusablePriceCases) {
+    Invoke-Assertion ("candidate requirements reject {0}" -f $priceCase.name) {
+        Set-StrictMode -Version Latest
+        $candidate = Copy-TestObject @(Get-MinimalProfiles)[0]
+        & $priceCase.mutate $candidate
+        $evaluation = Test-RouterCandidateRequirements -Candidate $candidate `
+            -Requirements $candidateRequirements -RuntimeState (New-MinimalRuntimeState)
+
+        Assert-Equal $evaluation.passed $false
+        Assert-SequenceEqual @($evaluation.reason_codes) @('price_unavailable')
+    }
+}
+
+Invoke-Assertion 'candidate requirements accept finite nonnegative comparable rates' {
+    $candidate = Copy-TestObject @(Get-MinimalProfiles)[0]
+    $candidate.pricing.cost_comparable = $true
+    $candidate.pricing.input_usd_per_million_tokens = [decimal]0
+    $candidate.pricing.output_usd_per_million_tokens = [double]0
+    $evaluation = Test-RouterCandidateRequirements -Candidate $candidate `
+        -Requirements $candidateRequirements -RuntimeState (New-MinimalRuntimeState)
+
+    Assert-Equal $evaluation.passed $true
+    Assert-Equal @($evaluation.reason_codes).Count 0
+}
+
+Invoke-Assertion 'candidate requirements reject the checked-in non-comparable Spark profile' {
+    $candidatePath = Join-Path $profilesRoot 'codex/gpt-5.3-codex-spark__medium.json'
+    $candidate = Get-Content -Raw -LiteralPath $candidatePath | ConvertFrom-Json -Depth 30
+    $runtime = [pscustomobject]@{
+        launcher = $candidate.launcher
+        model = $candidate.model
+        effort = $candidate.effort
+        available = $true
+        authenticated = $true
+        working = $true
+        quota_exhausted = $false
+    }
+    $evaluation = Test-RouterCandidateRequirements -Candidate $candidate `
+        -Requirements $candidateRequirements -RuntimeState $runtime
+
+    Assert-Equal $evaluation.candidate_identity 'codex|gpt-5.3-codex-spark__medium'
+    Assert-Equal $evaluation.passed $false
+    Assert-SequenceEqual @($evaluation.reason_codes) @('price_unavailable')
+}
+
+$requiredRuntimeProperties = @(
+    'launcher'
+    'model'
+    'effort'
+    'available'
+    'authenticated'
+    'working'
+    'quota_exhausted'
+)
+foreach ($propertyName in $requiredRuntimeProperties) {
+    Invoke-Assertion ("candidate requirements fail closed when runtime state omits {0}" -f $propertyName) {
+        Set-StrictMode -Version Latest
+        $runtime = New-MinimalRuntimeState
+        $runtime.PSObject.Properties.Remove($propertyName)
+        $evaluation = Test-RouterCandidateRequirements -Candidate (Copy-TestObject @(Get-MinimalProfiles)[0]) `
+            -Requirements $candidateRequirements -RuntimeState $runtime
+
+        Assert-SequenceEqual @($evaluation.PSObject.Properties.Name) @(
+            'candidate_identity'
+            'passed'
+            'reason_codes'
+            'unavailable_capabilities'
+            'unsupported_requirements'
+        )
+        Assert-Equal $evaluation.passed $false
+        Assert-SequenceEqual @($evaluation.reason_codes) @('runtime_state_invalid')
+        Assert-Equal @($evaluation.unavailable_capabilities).Count 0
+        Assert-Equal @($evaluation.unsupported_requirements).Count 0
+    }
+}
+
+$wrongRuntimeTypeCases = @(
+    [pscustomobject]@{ property = 'launcher'; value = 123 }
+    [pscustomobject]@{ property = 'model'; value = 123 }
+    [pscustomobject]@{ property = 'effort'; value = 123 }
+    [pscustomobject]@{ property = 'available'; value = 'true' }
+    [pscustomobject]@{ property = 'authenticated'; value = 1 }
+    [pscustomobject]@{ property = 'working'; value = 'false' }
+    [pscustomobject]@{ property = 'quota_exhausted'; value = 0 }
+)
+foreach ($runtimeTypeCase in $wrongRuntimeTypeCases) {
+    Invoke-Assertion ("candidate requirements fail closed when runtime {0} has the wrong type" -f $runtimeTypeCase.property) {
+        Set-StrictMode -Version Latest
+        $runtime = New-MinimalRuntimeState
+        $runtime.($runtimeTypeCase.property) = $runtimeTypeCase.value
+        $evaluation = Test-RouterCandidateRequirements -Candidate (Copy-TestObject @(Get-MinimalProfiles)[0]) `
+            -Requirements $candidateRequirements -RuntimeState $runtime
+
+        Assert-Equal $evaluation.passed $false
+        Assert-SequenceEqual @($evaluation.reason_codes) @('runtime_state_invalid')
+    }
+}
+
+Invoke-Assertion 'candidate requirements do not coerce numeric-looking runtime identity values' {
+    Set-StrictMode -Version Latest
+    $candidate = Copy-TestObject @(Get-MinimalProfiles)[0]
+    $candidate.model = '123'
+    $runtime = New-MinimalRuntimeState
+    $runtime.model = 123
+    $evaluation = Test-RouterCandidateRequirements -Candidate $candidate `
+        -Requirements $candidateRequirements -RuntimeState $runtime
+
+    Assert-Equal $evaluation.passed $false
+    Assert-SequenceEqual @($evaluation.reason_codes) @('runtime_state_invalid')
+}
+
+foreach ($malformedRuntime in @($null, 'not-a-runtime-object')) {
+    $malformedRuntimeName = if ($null -eq $malformedRuntime) { 'null' } else { 'scalar' }
+    Invoke-Assertion ("candidate requirements return a stable failure for {0} runtime state" -f $malformedRuntimeName) {
+        Set-StrictMode -Version Latest
+        $evaluation = Test-RouterCandidateRequirements -Candidate (Copy-TestObject @(Get-MinimalProfiles)[0]) `
+            -Requirements $candidateRequirements -RuntimeState $malformedRuntime
+
+        Assert-Equal $evaluation.passed $false
+        Assert-SequenceEqual @($evaluation.reason_codes) @('runtime_state_invalid')
+    }
 }
 foreach ($candidateCase in $candidateFailureCases) {
     Invoke-Assertion ("candidate requirements reject {0}" -f $candidateCase.name) {
@@ -250,6 +478,48 @@ foreach ($candidateCase in $candidateFailureCases) {
             Assert-SequenceEqual @($evaluation.unavailable_capabilities) @('reasoning')
         }
     }
+}
+
+Invoke-Assertion 'candidate requirement reasons retain canonical ordering when failures accumulate' {
+    $candidate = Copy-TestObject @(Get-MinimalProfiles)[0]
+    $candidate.enabled = $false
+    $candidate.availability = 'unavailable'
+    $candidate.supports.input_modalities = @('image')
+    $candidate.supports.output_modalities = @('image')
+    $candidate.supports.languages = @('french')
+    $candidate.supports.single_turn = $false
+    $candidate.supports.context_window_tokens = $candidateRequirements.required_context_tokens - 1
+    $candidate.supports.maximum_output_tokens = $candidateRequirements.output_reserve_tokens - 1
+    $candidate.pricing.cost_comparable = $false
+    $candidate.quality.task_types.coding = 'unsupported'
+    $candidate.quality.capabilities.reasoning = 'unsupported'
+    $runtime = New-MinimalRuntimeState
+    $runtime.available = $false
+    $runtime.authenticated = $false
+    $runtime.working = $false
+    $runtime.quota_exhausted = $true
+
+    $evaluation = Test-RouterCandidateRequirements -Candidate $candidate `
+        -Requirements $candidateRequirements -RuntimeState $runtime
+
+    Assert-SequenceEqual @($evaluation.reason_codes) @(
+        'candidate_disabled'
+        'candidate_unavailable'
+        'launcher_unavailable'
+        'launcher_unauthenticated'
+        'launcher_unhealthy'
+        'quota_exhausted'
+        'text_input_unsupported'
+        'text_output_unsupported'
+        'english_unsupported'
+        'single_turn_unsupported'
+        'context_window_exceeded'
+        'output_window_exceeded'
+        'price_unavailable'
+        'required_function_unsupported'
+        'required_capability_unavailable'
+    )
+    Assert-SequenceEqual @($evaluation.unavailable_capabilities) @('reasoning')
 }
 
 $unsupportedDimensionCases = @(
