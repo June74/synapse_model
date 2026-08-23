@@ -16,3 +16,4 @@
 | SB-20260822-190757-merged-main-legacy-result-deletion | Merged main lost required legacy pilot result fixture | closed | 2026-08-22 | 2026-08-22 |
 | SB-20260823-015506-test-json-numeric-precision | Test-Json loses numeric precision at contract boundaries | closed | 2026-08-23 | 2026-08-23 |
 | SB-20260823-141012-convertfrom-json-object-type | ConvertFrom-Json scalar passed PSCustomObject accelerator test | closed | 2026-08-23 | 2026-08-23 |
+| SB-20260823-quality-authorization-fixture | Quality authorization fixture produced repeated expected errors | closed | 2026-08-23 | 2026-08-23 |

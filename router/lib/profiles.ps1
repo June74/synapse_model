@@ -209,6 +209,7 @@ function Import-RouterProfileCatalog {
     $allowedQualityPaths = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
     foreach ($qualityPath in @(Get-RouterCatalogQualityPaths)) { $null = $allowedQualityPaths.Add($qualityPath) }
     $qualityByIdentity = [Collections.Generic.Dictionary[string, object]]::new([StringComparer]::Ordinal)
+    $qualityAuthorizationsByIdentity = [Collections.Generic.Dictionary[string, object]]::new([StringComparer]::Ordinal)
     $duplicateQualityIdentities = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
     $qualityRecordIndex = 0
     foreach ($qualityRecord in @($qualitySnapshot.records)) {
@@ -217,7 +218,7 @@ function Import-RouterProfileCatalog {
         $requiredRecordFields = @(
             'launcher', 'configuration_id', 'model', 'effort', 'source_url', 'retrieved_on',
             'exact_model_match', 'exact_effort_match', 'benchmark_slice', 'provisional_category',
-            'unsupported_quality_paths', 'note'
+            'quality_authorizations', 'note'
         )
         $recordMissingFields = if ($null -eq $qualityRecord) { $requiredRecordFields } else {
             @($requiredRecordFields | Where-Object { $qualityRecord.PSObject.Properties.Name -cnotcontains $_ })
@@ -228,19 +229,57 @@ function Import-RouterProfileCatalog {
             '{0}|{1}' -f $qualityRecord.launcher, $qualityRecord.configuration_id
         } else { $null }
         $recordValid = $recordMissingFields.Count -eq 0
+        $authorizationByPath = [Collections.Generic.Dictionary[string, object]]::new([StringComparer]::Ordinal)
         if ($recordValid) {
             foreach ($stringField in @('launcher', 'configuration_id', 'model', 'effort', 'source_url', 'retrieved_on', 'benchmark_slice', 'note')) {
                 if ([string]::IsNullOrWhiteSpace([string]$qualityRecord.$stringField)) { $recordValid = $false }
             }
             if ($qualityRecord.exact_model_match -isnot [bool] -or $qualityRecord.exact_effort_match -isnot [bool] -or
-                $qualityRecord.unsupported_quality_paths -isnot [Collections.IList] -or
                 $qualityRecord.provisional_category -cnotin @('unknown', 'standard', 'strong', 'frontier')) {
                 $recordValid = $false
             }
-            $seenUnsupportedPaths = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
-            foreach ($unsupportedPath in @($qualityRecord.unsupported_quality_paths)) {
-                if (-not $allowedQualityPaths.Contains([string]$unsupportedPath) -or -not $seenUnsupportedPaths.Add([string]$unsupportedPath)) {
-                    $recordValid = $false
+            if ($qualityRecord.quality_authorizations -isnot [Collections.IList]) {
+                $errors.Add((New-RouterCatalogError -Code 'quality_snapshot_authorization_invalid' -File $QualitySnapshotPath -Path ($recordPath + '.quality_authorizations') -Identity $identity -Message 'Quality authorizations must be an array of exact path, slice, category, and evidence-kind bindings.'))
+            } else {
+                $authorizationIndex = 0
+                foreach ($authorization in @($qualityRecord.quality_authorizations)) {
+                    $authorizationPath = '{0}.quality_authorizations[{1}]' -f $recordPath, $authorizationIndex
+                    $authorizationIndex++
+                    $requiredAuthorizationFields = @('path', 'benchmark_slice', 'category', 'evidence_kind')
+                    $missingAuthorizationFields = if ($null -eq $authorization) { $requiredAuthorizationFields } else {
+                        @($requiredAuthorizationFields | Where-Object { $authorization.PSObject.Properties.Name -cnotcontains $_ })
+                    }
+                    $authorizationValid = $missingAuthorizationFields.Count -eq 0
+                    if ($authorizationValid) {
+                        foreach ($stringField in $requiredAuthorizationFields) {
+                            if ([string]::IsNullOrWhiteSpace([string]$authorization.$stringField)) { $authorizationValid = $false }
+                        }
+                        if (-not $allowedQualityPaths.Contains([string]$authorization.path)) { $authorizationValid = $false }
+                        if ($authorization.evidence_kind -ceq 'artificial_analysis') {
+                            if ($authorization.category -cnotin @('standard', 'strong', 'frontier') -or
+                                -not $qualityRecord.exact_model_match -or -not $qualityRecord.exact_effort_match -or
+                                $qualityRecord.benchmark_slice -ceq 'unavailable' -or
+                                $authorization.benchmark_slice -cne $qualityRecord.benchmark_slice -or
+                                $authorization.category -cne $qualityRecord.provisional_category) {
+                                $authorizationValid = $false
+                            }
+                        } elseif ($authorization.evidence_kind -ceq 'provider') {
+                            if ($authorization.category -cne 'unsupported' -or $authorization.benchmark_slice -cne 'provider_capability') {
+                                $authorizationValid = $false
+                            }
+                        } else {
+                            $authorizationValid = $false
+                        }
+                    }
+                    if (-not $authorizationValid) {
+                        $errors.Add((New-RouterCatalogError -Code 'quality_snapshot_authorization_invalid' -File $QualitySnapshotPath -Path $authorizationPath -Identity $identity -Message 'Quality authorization is malformed or contradicts its record-level evidence.'))
+                        continue
+                    }
+                    if ($authorizationByPath.ContainsKey([string]$authorization.path)) {
+                        $errors.Add((New-RouterCatalogError -Code 'duplicate_quality_authorization_path' -File $QualitySnapshotPath -Path $authorizationPath -Identity $identity -Message 'More than one quality authorization targets the same exact path.'))
+                        continue
+                    }
+                    $authorizationByPath.Add([string]$authorization.path, $authorization)
                 }
             }
             if ($qualityRecord.provisional_category -cin @('standard', 'strong', 'frontier') -and
@@ -259,6 +298,7 @@ function Import-RouterProfileCatalog {
             }
         } else {
             $qualityByIdentity.Add($identity, $qualityRecord)
+            $qualityAuthorizationsByIdentity.Add($identity, $authorizationByPath)
         }
     }
     if ($errors.Count -gt 0) {
@@ -409,17 +449,30 @@ function Import-RouterProfileCatalog {
                 $artificialAnalysis.exact_effort_match -eq $qualityRecord.exact_effort_match -and
                 $artificialAnalysis.benchmark_slice -ceq $qualityRecord.benchmark_slice
             if ($qualitySnapshotValid) {
-                $unsupportedPaths = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
-                foreach ($unsupportedPath in @($qualityRecord.unsupported_quality_paths)) { $null = $unsupportedPaths.Add([string]$unsupportedPath) }
+                $authorizationByPath = $qualityAuthorizationsByIdentity[$entry.identity]
                 foreach ($mapName in @('task_types', 'domains', 'complexities', 'capabilities')) {
                     foreach ($qualityProperty in $profile.quality.$mapName.PSObject.Properties) {
                         $qualityPath = '$.quality.{0}.{1}' -f $mapName, $qualityProperty.Name
-                        if ($qualityProperty.Value -ceq 'unsupported') {
-                            if (-not $unsupportedPaths.Contains($qualityPath)) { $qualitySnapshotValid = $false }
-                        } elseif ($qualityProperty.Value -cne 'unknown' -and $qualityProperty.Value -cne $qualityRecord.provisional_category) {
+                        if ($qualityProperty.Value -ceq 'unknown') { continue }
+                        if (-not $authorizationByPath.ContainsKey($qualityPath)) {
                             $qualitySnapshotValid = $false
-                        } elseif ($qualityProperty.Value -cin @('standard', 'strong', 'frontier') -and
-                            $qualityRecord.provisional_category -cnotin @('standard', 'strong', 'frontier')) {
+                            continue
+                        }
+                        $authorization = $authorizationByPath[$qualityPath]
+                        if ($qualityProperty.Value -ceq 'unsupported') {
+                            if ($authorization.category -cne 'unsupported' -or
+                                $authorization.evidence_kind -cne 'provider' -or
+                                $authorization.benchmark_slice -cne 'provider_capability') {
+                                $qualitySnapshotValid = $false
+                            }
+                        } elseif ($qualityProperty.Value -cin @('standard', 'strong', 'frontier')) {
+                            if ($authorization.category -cne $qualityProperty.Value -or
+                                $authorization.evidence_kind -cne 'artificial_analysis' -or
+                                $authorization.benchmark_slice -cne $qualityRecord.benchmark_slice -or
+                                -not $qualityRecord.exact_model_match -or -not $qualityRecord.exact_effort_match) {
+                                $qualitySnapshotValid = $false
+                            }
+                        } else {
                             $qualitySnapshotValid = $false
                         }
                     }

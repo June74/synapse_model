@@ -467,7 +467,18 @@ function New-TestQualitySnapshot {
                 exact_effort_match = $true
                 benchmark_slice = 'minimal-tied-policy-fixture'
                 provisional_category = 'strong'
-                unsupported_quality_paths = @()
+                quality_authorizations = @(
+                    foreach ($mapName in $requiredQualityKeys.Keys) {
+                        foreach ($qualityKey in $requiredQualityKeys[$mapName]) {
+                            [pscustomobject]@{
+                                path = '$.quality.{0}.{1}' -f $mapName, $qualityKey
+                                benchmark_slice = 'minimal-tied-policy-fixture'
+                                category = 'strong'
+                                evidence_kind = 'artificial_analysis'
+                            }
+                        }
+                    }
+                )
                 note = 'Test-only exact evidence.'
             }
         )
@@ -698,9 +709,10 @@ Invoke-Assertion 'quality snapshot records one conservative evidence row per exa
     Assert-Equal $snapshot.snapshot_date '2026-08-22'
     Assert-Equal @($snapshot.records).Count $enabledCandidates.Count
     foreach ($record in $snapshot.records) {
-        foreach ($property in @('launcher', 'configuration_id', 'model', 'effort', 'source_url', 'retrieved_on', 'exact_model_match', 'exact_effort_match', 'benchmark_slice', 'provisional_category', 'unsupported_quality_paths')) {
+        foreach ($property in @('launcher', 'configuration_id', 'model', 'effort', 'source_url', 'retrieved_on', 'exact_model_match', 'exact_effort_match', 'benchmark_slice', 'provisional_category', 'quality_authorizations')) {
             Assert-Equal ($record.PSObject.Properties.Name -ccontains $property) $true
         }
+        Assert-Equal @($record.quality_authorizations).Count 0
         Assert-Equal ($qualityCategories -ccontains $record.provisional_category) $true
         if (-not $record.exact_model_match -or -not $record.exact_effort_match -or $record.benchmark_slice -ceq 'unavailable') {
             Assert-Equal $record.provisional_category 'unknown'
@@ -721,6 +733,8 @@ Invoke-Assertion 'production catalog covers each enabled normal matrix candidate
     Assert-SequenceEqual $identities $sortedIdentities
     Assert-Equal @($identities | Select-Object -Unique).Count 63
 
+    $qualityValueCount = 0
+    $nonUnknownQualityValueCount = 0
     foreach ($profile in $catalog.profiles) {
         Assert-Equal $profile.configuration_id ('{0}__{1}' -f $profile.model, $profile.effort)
         Assert-ValidationSuccess (Test-RouterSchema -Value $profile -SchemaPath $profileSchemaPath)
@@ -730,8 +744,14 @@ Invoke-Assertion 'production catalog covers each enabled normal matrix candidate
             [Array]::Sort($actualKeys, [System.StringComparer]::Ordinal)
             [Array]::Sort($expectedKeys, [System.StringComparer]::Ordinal)
             Assert-SequenceEqual $actualKeys $expectedKeys
+            foreach ($qualityProperty in $profile.quality.$mapName.PSObject.Properties) {
+                $qualityValueCount++
+                if ($qualityProperty.Value -cne 'unknown') { $nonUnknownQualityValueCount++ }
+            }
         }
     }
+    Assert-Equal $qualityValueCount 1890
+    Assert-Equal $nonUnknownQualityValueCount 0
 }
 
 Invoke-Assertion 'Spark profiles are unknown-cost and cannot be ranked as free' {
@@ -783,6 +803,7 @@ Invoke-Assertion 'non-exact unavailable benchmark evidence cannot claim measured
         $snapshot.records[0].exact_effort_match = $false
         $snapshot.records[0].benchmark_slice = 'unavailable'
         $snapshot.records[0].provisional_category = 'unknown'
+        $snapshot.records[0].quality_authorizations = @()
         Write-TestJson -Path $testQualityPath -Value $snapshot
 
         $catalog = Import-RouterProfileCatalog -ProfilesRoot (Join-Path $root 'profiles') -MatrixPath $testMatrixPath -ProfileSchemaPath $profileSchemaPath -PricingSnapshotPath $testPricingPath -QualitySnapshotPath $testQualityPath
@@ -811,7 +832,14 @@ Invoke-Assertion 'unsupported quality remains valid without exact benchmark evid
         $snapshot.records[0].exact_effort_match = $false
         $snapshot.records[0].benchmark_slice = 'unavailable'
         $snapshot.records[0].provisional_category = 'unknown'
-        $snapshot.records[0].unsupported_quality_paths = @('$.quality.capabilities.long_context')
+        $snapshot.records[0].quality_authorizations = @(
+            [pscustomobject]@{
+                path = '$.quality.capabilities.long_context'
+                benchmark_slice = 'provider_capability'
+                category = 'unsupported'
+                evidence_kind = 'provider'
+            }
+        )
         Write-TestJson -Path $testQualityPath -Value $snapshot
 
         $catalog = Import-RouterProfileCatalog -ProfilesRoot (Join-Path $root 'profiles') -MatrixPath $testMatrixPath -ProfileSchemaPath $profileSchemaPath -PricingSnapshotPath $testPricingPath -QualitySnapshotPath $testQualityPath
@@ -827,17 +855,162 @@ Invoke-Assertion 'exact relevant benchmark evidence permits measured quality cat
         $testMatrixPath = Join-Path $root 'matrix.json'
         Write-TestJson -Path $testMatrixPath -Value (New-TestMatrix)
         $profile = Copy-TestObject @(Get-MinimalProfiles)[0]
+        foreach ($mapName in $requiredQualityKeys.Keys) {
+            foreach ($qualityKey in $requiredQualityKeys[$mapName]) { $profile.quality.$mapName.$qualityKey = 'unknown' }
+        }
+        $profile.quality.task_types.coding = 'strong'
         $profile.evidence.artificial_analysis.exact_model_match = $true
         $profile.evidence.artificial_analysis.exact_effort_match = $true
         $profile.evidence.artificial_analysis.benchmark_slice = 'coding'
         Write-TestJson -Path (Join-Path $root 'profiles/agy/shared-model__medium.json') -Value $profile
         $snapshot = New-TestQualitySnapshot
         $snapshot.records[0].benchmark_slice = 'coding'
+        $snapshot.records[0].quality_authorizations = @(
+            [pscustomobject]@{
+                path = '$.quality.task_types.coding'
+                benchmark_slice = 'coding'
+                category = 'strong'
+                evidence_kind = 'artificial_analysis'
+            }
+        )
         Write-TestJson -Path $testQualityPath -Value $snapshot
 
         $catalog = Import-RouterProfileCatalog -ProfilesRoot (Join-Path $root 'profiles') -MatrixPath $testMatrixPath -ProfileSchemaPath $profileSchemaPath -PricingSnapshotPath $testPricingPath -QualitySnapshotPath $testQualityPath
         Assert-Equal $catalog.valid $true
         Assert-Equal @($catalog.errors).Count 0
+    }
+}
+
+Invoke-Assertion 'coding authorization cannot authorize mathematics domain quality' {
+    if (-not $profilesAvailable) { throw 'Import-RouterProfileCatalog is unavailable.' }
+    Invoke-WithTemporaryCatalog {
+        param($root, $testPricingPath, $testQualityPath)
+        $testMatrixPath = Join-Path $root 'matrix.json'
+        Write-TestJson -Path $testMatrixPath -Value (New-TestMatrix)
+        $profile = Copy-TestObject @(Get-MinimalProfiles)[0]
+        foreach ($mapName in $requiredQualityKeys.Keys) {
+            foreach ($qualityKey in $requiredQualityKeys[$mapName]) { $profile.quality.$mapName.$qualityKey = 'unknown' }
+        }
+        $profile.quality.domains.mathematics = 'frontier'
+        $profile.evidence.artificial_analysis.exact_model_match = $true
+        $profile.evidence.artificial_analysis.exact_effort_match = $true
+        $profile.evidence.artificial_analysis.benchmark_slice = 'coding'
+        Write-TestJson -Path (Join-Path $root 'profiles/agy/shared-model__medium.json') -Value $profile
+
+        $snapshot = New-TestQualitySnapshot
+        $snapshot.records[0].benchmark_slice = 'coding'
+        $snapshot.records[0].provisional_category = 'frontier'
+        $snapshot.records[0].quality_authorizations = @(
+            [pscustomobject]@{
+                path = '$.quality.task_types.coding'
+                benchmark_slice = 'coding'
+                category = 'frontier'
+                evidence_kind = 'artificial_analysis'
+            }
+        )
+        Write-TestJson -Path $testQualityPath -Value $snapshot
+
+        $catalog = Import-TestRouterProfileCatalog -ProfilesRoot (Join-Path $root 'profiles') -MatrixPath $testMatrixPath -ProfileSchemaPath $profileSchemaPath -PricingSnapshotPath $testPricingPath -QualitySnapshotPath $testQualityPath
+        Assert-Equal $catalog.valid $false
+        Assert-CatalogError -Catalog $catalog -Code 'profile_quality_snapshot_mismatch'
+    }
+}
+
+Invoke-Assertion 'legacy unsupported path cannot replace provider authorization' {
+    if (-not $profilesAvailable) { throw 'Import-RouterProfileCatalog is unavailable.' }
+    Invoke-WithTemporaryCatalog {
+        param($root, $testPricingPath, $testQualityPath)
+        $testMatrixPath = Join-Path $root 'matrix.json'
+        Write-TestJson -Path $testMatrixPath -Value (New-TestMatrix)
+        $profile = Copy-TestObject @(Get-MinimalProfiles)[0]
+        foreach ($mapName in $requiredQualityKeys.Keys) {
+            foreach ($qualityKey in $requiredQualityKeys[$mapName]) { $profile.quality.$mapName.$qualityKey = 'unknown' }
+        }
+        $profile.quality.capabilities.long_context = 'unsupported'
+        $profile.evidence.artificial_analysis.exact_model_match = $false
+        $profile.evidence.artificial_analysis.exact_effort_match = $false
+        $profile.evidence.artificial_analysis.benchmark_slice = 'unavailable'
+        Write-TestJson -Path (Join-Path $root 'profiles/agy/shared-model__medium.json') -Value $profile
+
+        $snapshot = New-TestQualitySnapshot
+        $snapshot.records[0].exact_model_match = $false
+        $snapshot.records[0].exact_effort_match = $false
+        $snapshot.records[0].benchmark_slice = 'unavailable'
+        $snapshot.records[0].provisional_category = 'unknown'
+        $snapshot.records[0].quality_authorizations = @()
+        $snapshot.records[0] | Add-Member -NotePropertyName unsupported_quality_paths -NotePropertyValue @('$.quality.capabilities.long_context')
+        Write-TestJson -Path $testQualityPath -Value $snapshot
+
+        $catalog = Import-TestRouterProfileCatalog -ProfilesRoot (Join-Path $root 'profiles') -MatrixPath $testMatrixPath -ProfileSchemaPath $profileSchemaPath -PricingSnapshotPath $testPricingPath -QualitySnapshotPath $testQualityPath
+        Assert-Equal $catalog.valid $false
+        Assert-CatalogError -Catalog $catalog -Code 'profile_quality_snapshot_mismatch'
+    }
+}
+
+Invoke-Assertion 'quality snapshot rejects invalid path-specific authorizations' {
+    if (-not $profilesAvailable) { throw 'Import-RouterProfileCatalog is unavailable.' }
+    Invoke-WithTemporaryCatalog {
+        param($root, $testPricingPath, $testQualityPath)
+        $testMatrixPath = Join-Path $root 'matrix.json'
+        Write-TestJson -Path $testMatrixPath -Value (New-TestMatrix)
+        Write-TestJson -Path (Join-Path $root 'profiles/agy/shared-model__medium.json') -Value (Copy-TestObject @(Get-MinimalProfiles)[0])
+
+        $duplicate = New-TestQualitySnapshot
+        $duplicate.records[0].quality_authorizations = @(
+            $duplicate.records[0].quality_authorizations[0],
+            (Copy-TestObject $duplicate.records[0].quality_authorizations[0])
+        )
+        Write-TestJson -Path $testQualityPath -Value $duplicate
+        $duplicateCatalog = Import-TestRouterProfileCatalog -ProfilesRoot (Join-Path $root 'profiles') -MatrixPath $testMatrixPath -ProfileSchemaPath $profileSchemaPath -PricingSnapshotPath $testPricingPath -QualitySnapshotPath $testQualityPath
+        Assert-CatalogError -Catalog $duplicateCatalog -Code 'duplicate_quality_authorization_path'
+
+        $malformed = New-TestQualitySnapshot
+        $malformed.records[0].quality_authorizations = @($malformed.records[0].quality_authorizations[0])
+        $malformed.records[0].quality_authorizations[0].PSObject.Properties.Remove('evidence_kind')
+        Write-TestJson -Path $testQualityPath -Value $malformed
+        $malformedCatalog = Import-TestRouterProfileCatalog -ProfilesRoot (Join-Path $root 'profiles') -MatrixPath $testMatrixPath -ProfileSchemaPath $profileSchemaPath -PricingSnapshotPath $testPricingPath -QualitySnapshotPath $testQualityPath
+        Assert-CatalogError -Catalog $malformedCatalog -Code 'quality_snapshot_authorization_invalid'
+
+        $unknownPath = New-TestQualitySnapshot
+        $unknownPath.records[0].quality_authorizations[0].path = '$.quality.domains.astronomy'
+        Write-TestJson -Path $testQualityPath -Value $unknownPath
+        $unknownPathCatalog = Import-TestRouterProfileCatalog -ProfilesRoot (Join-Path $root 'profiles') -MatrixPath $testMatrixPath -ProfileSchemaPath $profileSchemaPath -PricingSnapshotPath $testPricingPath -QualitySnapshotPath $testQualityPath
+        Assert-CatalogError -Catalog $unknownPathCatalog -Code 'quality_snapshot_authorization_invalid'
+
+        $categoryMismatch = New-TestQualitySnapshot
+        $categoryMismatch.records[0].quality_authorizations[0].category = 'frontier'
+        Write-TestJson -Path $testQualityPath -Value $categoryMismatch
+        $categoryCatalog = Import-TestRouterProfileCatalog -ProfilesRoot (Join-Path $root 'profiles') -MatrixPath $testMatrixPath -ProfileSchemaPath $profileSchemaPath -PricingSnapshotPath $testPricingPath -QualitySnapshotPath $testQualityPath
+        Assert-CatalogError -Catalog $categoryCatalog -Code 'quality_snapshot_authorization_invalid'
+
+        $sliceMismatch = New-TestQualitySnapshot
+        $sliceMismatch.records[0].quality_authorizations[0].benchmark_slice = 'coding'
+        Write-TestJson -Path $testQualityPath -Value $sliceMismatch
+        $sliceCatalog = Import-TestRouterProfileCatalog -ProfilesRoot (Join-Path $root 'profiles') -MatrixPath $testMatrixPath -ProfileSchemaPath $profileSchemaPath -PricingSnapshotPath $testPricingPath -QualitySnapshotPath $testQualityPath
+        Assert-CatalogError -Catalog $sliceCatalog -Code 'quality_snapshot_authorization_invalid'
+
+        $contradictoryEvidence = New-TestQualitySnapshot
+        $contradictoryEvidence.records[0].quality_authorizations = @($contradictoryEvidence.records[0].quality_authorizations[0])
+        $contradictoryEvidence.records[0].exact_model_match = $false
+        $contradictoryEvidence.records[0].exact_effort_match = $false
+        $contradictoryEvidence.records[0].benchmark_slice = 'unavailable'
+        $contradictoryEvidence.records[0].provisional_category = 'unknown'
+        Write-TestJson -Path $testQualityPath -Value $contradictoryEvidence
+        $evidenceCatalog = Import-TestRouterProfileCatalog -ProfilesRoot (Join-Path $root 'profiles') -MatrixPath $testMatrixPath -ProfileSchemaPath $profileSchemaPath -PricingSnapshotPath $testPricingPath -QualitySnapshotPath $testQualityPath
+        Assert-CatalogError -Catalog $evidenceCatalog -Code 'quality_snapshot_authorization_invalid'
+
+        $providerSliceMismatch = New-TestQualitySnapshot
+        $providerSliceMismatch.records[0].quality_authorizations = @(
+            [pscustomobject]@{
+                path = '$.quality.capabilities.long_context'
+                benchmark_slice = 'coding'
+                category = 'unsupported'
+                evidence_kind = 'provider'
+            }
+        )
+        Write-TestJson -Path $testQualityPath -Value $providerSliceMismatch
+        $providerCatalog = Import-TestRouterProfileCatalog -ProfilesRoot (Join-Path $root 'profiles') -MatrixPath $testMatrixPath -ProfileSchemaPath $profileSchemaPath -PricingSnapshotPath $testPricingPath -QualitySnapshotPath $testQualityPath
+        Assert-CatalogError -Catalog $providerCatalog -Code 'quality_snapshot_authorization_invalid'
     }
 }
 
@@ -862,6 +1035,7 @@ Invoke-Assertion 'profile cannot self-certify frontier quality while the quality
         $snapshot.records[0].exact_effort_match = $false
         $snapshot.records[0].benchmark_slice = 'unavailable'
         $snapshot.records[0].provisional_category = 'unknown'
+        $snapshot.records[0].quality_authorizations = @()
         Write-TestJson -Path $testQualityPath -Value $snapshot
 
         $catalog = Import-TestRouterProfileCatalog -ProfilesRoot (Join-Path $root 'profiles') -MatrixPath $testMatrixPath -ProfileSchemaPath $profileSchemaPath -PricingSnapshotPath $testPricingPath -QualitySnapshotPath $testQualityPath
@@ -924,7 +1098,7 @@ Invoke-Assertion 'quality snapshot rejects missing top-level fields and incomple
     }
 }
 
-Invoke-Assertion 'quality snapshot rejects scalar record and unsupported-path collections' {
+Invoke-Assertion 'quality snapshot rejects scalar record and authorization collections' {
     if (-not $profilesAvailable) { throw 'Import-RouterProfileCatalog is unavailable.' }
     Invoke-WithTemporaryCatalog {
         param($root, $testPricingPath, $testQualityPath)
@@ -938,11 +1112,11 @@ Invoke-Assertion 'quality snapshot rejects scalar record and unsupported-path co
         $recordsCatalog = Import-TestRouterProfileCatalog -ProfilesRoot (Join-Path $root 'profiles') -MatrixPath $testMatrixPath -ProfileSchemaPath $profileSchemaPath -PricingSnapshotPath $testPricingPath -QualitySnapshotPath $testQualityPath
         Assert-CatalogError -Catalog $recordsCatalog -Code 'quality_snapshot_invalid'
 
-        $scalarUnsupportedPaths = New-TestQualitySnapshot
-        $scalarUnsupportedPaths.records[0].unsupported_quality_paths = '$.quality.capabilities.long_context'
-        Write-TestJson -Path $testQualityPath -Value $scalarUnsupportedPaths
+        $scalarAuthorizations = New-TestQualitySnapshot
+        $scalarAuthorizations.records[0].quality_authorizations = '$.quality.capabilities.long_context'
+        Write-TestJson -Path $testQualityPath -Value $scalarAuthorizations
         $pathsCatalog = Import-TestRouterProfileCatalog -ProfilesRoot (Join-Path $root 'profiles') -MatrixPath $testMatrixPath -ProfileSchemaPath $profileSchemaPath -PricingSnapshotPath $testPricingPath -QualitySnapshotPath $testQualityPath
-        Assert-CatalogError -Catalog $pathsCatalog -Code 'quality_snapshot_record_invalid'
+        Assert-CatalogError -Catalog $pathsCatalog -Code 'quality_snapshot_authorization_invalid'
     }
 }
 
