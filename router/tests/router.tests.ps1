@@ -419,13 +419,45 @@ function New-TestMatrix {
     return [pscustomobject]@{ schema_version = 1; special_routes = @(); candidates = @([pscustomobject]$candidate) }
 }
 
+function New-TestPricingSnapshot {
+    [pscustomobject]@{
+        snapshot_date = '2026-08-22'
+        retrieved_on = '2026-08-23'
+        currency = 'USD'
+        rate_unit = 'per_million_tokens'
+        policy = 'test fixture'
+        schedules = @(
+            [pscustomobject]@{
+                provider = 'google'
+                model = 'shared-model'
+                profile_models = @('shared-model')
+                cost_comparable = $true
+                source_url = 'https://fixtures.invalid/pricing/shared-model'
+                retrieved_on = '2026-08-23'
+                rate_periods = @(
+                    [pscustomobject]@{
+                        effective_from = '2026-08-22'
+                        effective_through = $null
+                        input_tokens_min = 0
+                        input_tokens_max = $null
+                        input_usd_per_million_tokens = 1.0
+                        output_usd_per_million_tokens = 5.0
+                    }
+                )
+            }
+        )
+    }
+}
+
 function Invoke-WithTemporaryCatalog {
     param([Parameter(Mandatory)][scriptblock]$Script)
 
     $temporaryRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('router-catalog-test-{0}' -f [guid]::NewGuid().ToString('N'))
     try {
         $null = New-Item -ItemType Directory -Path (Join-Path $temporaryRoot 'profiles') -Force
-        & $Script $temporaryRoot
+        $testPricingPath = Join-Path $temporaryRoot 'pricing.json'
+        Write-TestJson -Path $testPricingPath -Value (New-TestPricingSnapshot)
+        & $Script $temporaryRoot $testPricingPath
     } finally {
         if (Test-Path -LiteralPath $temporaryRoot) {
             Remove-Item -LiteralPath $temporaryRoot -Recurse -Force
@@ -583,6 +615,7 @@ Invoke-Assertion 'pricing snapshot preserves dated schedules and Gemini 3.1 cont
     foreach ($schedule in $snapshot.schedules) {
         Assert-Equal ([string]::IsNullOrWhiteSpace([string]$schedule.source_url)) $false
         Assert-Equal ([string]::IsNullOrWhiteSpace([string]$schedule.retrieved_on)) $false
+        Assert-Equal (@($schedule.profile_models).Count -gt 0) $true
         foreach ($period in $schedule.rate_periods) {
             Assert-Equal ([string]::IsNullOrWhiteSpace([string]$period.effective_from)) $false
         }
@@ -595,6 +628,18 @@ Invoke-Assertion 'pricing snapshot preserves dated schedules and Gemini 3.1 cont
     Assert-Equal $gemini31[0].rate_periods[0].input_usd_per_million_tokens 2
     Assert-Equal $gemini31[0].rate_periods[1].input_tokens_min 200001
     Assert-Equal $gemini31[0].rate_periods[1].input_usd_per_million_tokens 4
+
+    [string[]]$pricedModels = @($snapshot.schedules | ForEach-Object { $_.profile_models })
+    [string[]]$uniquePricedModels = @($pricedModels | Select-Object -Unique)
+    Assert-Equal $pricedModels.Count $uniquePricedModels.Count
+    $profileModels = @(
+        Get-ChildItem -LiteralPath $profilesRoot -Recurse -File -Filter '*.json' |
+            ForEach-Object { (Get-Content -LiteralPath $_.FullName -Raw | ConvertFrom-Json -Depth 100).model } |
+            Select-Object -Unique
+    )
+    foreach ($profileModel in $profileModels) {
+        Assert-Equal ($pricedModels -ccontains $profileModel) $true
+    }
 }
 
 Invoke-Assertion 'quality snapshot records one conservative evidence row per exact candidate' {
@@ -616,7 +661,7 @@ Invoke-Assertion 'quality snapshot records one conservative evidence row per exa
 
 Invoke-Assertion 'production catalog covers each enabled normal matrix candidate exactly once' {
     if (-not $profilesAvailable) { throw 'Import-RouterProfileCatalog is unavailable.' }
-    $catalog = Import-RouterProfileCatalog -ProfilesRoot $profilesRoot -MatrixPath $matrixPath -ProfileSchemaPath $profileSchemaPath
+    $catalog = Import-RouterProfileCatalog -ProfilesRoot $profilesRoot -MatrixPath $matrixPath -ProfileSchemaPath $profileSchemaPath -PricingSnapshotPath $pricingSnapshotPath
     Assert-Equal $catalog.valid $true
     Assert-Equal @($catalog.errors).Count 0
     Assert-Equal @($catalog.profiles).Count 63
@@ -642,7 +687,7 @@ Invoke-Assertion 'production catalog covers each enabled normal matrix candidate
 
 Invoke-Assertion 'Spark profiles are unknown-cost and cannot be ranked as free' {
     if (-not $profilesAvailable) { throw 'Import-RouterProfileCatalog is unavailable.' }
-    $catalog = Import-RouterProfileCatalog -ProfilesRoot $profilesRoot -MatrixPath $matrixPath -ProfileSchemaPath $profileSchemaPath
+    $catalog = Import-RouterProfileCatalog -ProfilesRoot $profilesRoot -MatrixPath $matrixPath -ProfileSchemaPath $profileSchemaPath -PricingSnapshotPath $pricingSnapshotPath
     $sparkProfiles = @($catalog.profiles | Where-Object { $_.model -ceq 'gpt-5.3-codex-spark' })
     Assert-Equal $sparkProfiles.Count 4
     foreach ($profile in $sparkProfiles) {
@@ -654,13 +699,90 @@ Invoke-Assertion 'Spark profiles are unknown-cost and cannot be ranked as free' 
     }
 }
 
+Invoke-Assertion 'pricing snapshot keeps Spark non-comparable even when a profile claims zero rates' {
+    if (-not $profilesAvailable) { throw 'Import-RouterProfileCatalog is unavailable.' }
+    Invoke-WithTemporaryCatalog {
+        param($root, $unusedTestPricingPath)
+        $testMatrixPath = Join-Path $root 'matrix.json'
+        Write-TestJson -Path $testMatrixPath -Value (New-TestMatrix -Tool 'codex' -Provider 'openai' -Model 'gpt-5.3-codex-spark' -Effort 'medium')
+        $sparkProfile = Get-Content -LiteralPath (Join-Path $profilesRoot 'codex/gpt-5.3-codex-spark__medium.json') -Raw | ConvertFrom-Json -Depth 100
+        $sparkProfile.pricing.cost_comparable = $true
+        $sparkProfile.pricing.input_usd_per_million_tokens = 0
+        $sparkProfile.pricing.output_usd_per_million_tokens = 0
+        Write-TestJson -Path (Join-Path $root 'profiles/codex/gpt-5.3-codex-spark__medium.json') -Value $sparkProfile
+
+        $catalog = Import-RouterProfileCatalog -ProfilesRoot (Join-Path $root 'profiles') -MatrixPath $testMatrixPath -ProfileSchemaPath $profileSchemaPath -PricingSnapshotPath $pricingSnapshotPath
+        Assert-Equal $catalog.valid $false
+        Assert-CatalogError -Catalog $catalog -Code 'profile_pricing_snapshot_mismatch'
+    }
+}
+
+Invoke-Assertion 'non-exact unavailable benchmark evidence cannot claim measured quality' {
+    if (-not $profilesAvailable) { throw 'Import-RouterProfileCatalog is unavailable.' }
+    Invoke-WithTemporaryCatalog {
+        param($root, $testPricingPath)
+        $testMatrixPath = Join-Path $root 'matrix.json'
+        Write-TestJson -Path $testMatrixPath -Value (New-TestMatrix)
+        $profile = Copy-TestObject @(Get-MinimalProfiles)[0]
+        $profile.quality.task_types.coding = 'frontier'
+        $profile.evidence.artificial_analysis.exact_model_match = $false
+        $profile.evidence.artificial_analysis.exact_effort_match = $false
+        $profile.evidence.artificial_analysis.benchmark_slice = 'unavailable'
+        Write-TestJson -Path (Join-Path $root 'profiles/agy/shared-model__medium.json') -Value $profile
+
+        $catalog = Import-RouterProfileCatalog -ProfilesRoot (Join-Path $root 'profiles') -MatrixPath $testMatrixPath -ProfileSchemaPath $profileSchemaPath -PricingSnapshotPath $testPricingPath
+        Assert-Equal $catalog.valid $false
+        Assert-CatalogError -Catalog $catalog -Code 'profile_quality_evidence_invalid'
+    }
+}
+
+Invoke-Assertion 'unsupported quality remains valid without exact benchmark evidence' {
+    if (-not $profilesAvailable) { throw 'Import-RouterProfileCatalog is unavailable.' }
+    Invoke-WithTemporaryCatalog {
+        param($root, $testPricingPath)
+        $testMatrixPath = Join-Path $root 'matrix.json'
+        Write-TestJson -Path $testMatrixPath -Value (New-TestMatrix)
+        $profile = Copy-TestObject @(Get-MinimalProfiles)[0]
+        foreach ($mapName in $requiredQualityKeys.Keys) {
+            foreach ($qualityKey in $requiredQualityKeys[$mapName]) { $profile.quality.$mapName.$qualityKey = 'unknown' }
+        }
+        $profile.quality.capabilities.long_context = 'unsupported'
+        $profile.evidence.artificial_analysis.exact_model_match = $false
+        $profile.evidence.artificial_analysis.exact_effort_match = $false
+        $profile.evidence.artificial_analysis.benchmark_slice = 'unavailable'
+        Write-TestJson -Path (Join-Path $root 'profiles/agy/shared-model__medium.json') -Value $profile
+
+        $catalog = Import-RouterProfileCatalog -ProfilesRoot (Join-Path $root 'profiles') -MatrixPath $testMatrixPath -ProfileSchemaPath $profileSchemaPath -PricingSnapshotPath $testPricingPath
+        Assert-Equal $catalog.valid $true
+        Assert-Equal @($catalog.errors).Count 0
+    }
+}
+
+Invoke-Assertion 'exact relevant benchmark evidence permits measured quality categories' {
+    if (-not $profilesAvailable) { throw 'Import-RouterProfileCatalog is unavailable.' }
+    Invoke-WithTemporaryCatalog {
+        param($root, $testPricingPath)
+        $testMatrixPath = Join-Path $root 'matrix.json'
+        Write-TestJson -Path $testMatrixPath -Value (New-TestMatrix)
+        $profile = Copy-TestObject @(Get-MinimalProfiles)[0]
+        $profile.evidence.artificial_analysis.exact_model_match = $true
+        $profile.evidence.artificial_analysis.exact_effort_match = $true
+        $profile.evidence.artificial_analysis.benchmark_slice = 'coding'
+        Write-TestJson -Path (Join-Path $root 'profiles/agy/shared-model__medium.json') -Value $profile
+
+        $catalog = Import-RouterProfileCatalog -ProfilesRoot (Join-Path $root 'profiles') -MatrixPath $testMatrixPath -ProfileSchemaPath $profileSchemaPath -PricingSnapshotPath $testPricingPath
+        Assert-Equal $catalog.valid $true
+        Assert-Equal @($catalog.errors).Count 0
+    }
+}
+
 Invoke-Assertion 'catalog reports missing profile coverage before routing' {
     if (-not $profilesAvailable) { throw 'Import-RouterProfileCatalog is unavailable.' }
     Invoke-WithTemporaryCatalog {
-        param($root)
+        param($root, $testPricingPath)
         $testMatrixPath = Join-Path $root 'matrix.json'
         Write-TestJson -Path $testMatrixPath -Value (New-TestMatrix)
-        $catalog = Import-RouterProfileCatalog -ProfilesRoot (Join-Path $root 'profiles') -MatrixPath $testMatrixPath -ProfileSchemaPath $profileSchemaPath
+        $catalog = Import-RouterProfileCatalog -ProfilesRoot (Join-Path $root 'profiles') -MatrixPath $testMatrixPath -ProfileSchemaPath $profileSchemaPath -PricingSnapshotPath $testPricingPath
         Assert-Equal $catalog.valid $false
         Assert-CatalogError -Catalog $catalog -Code 'profile_coverage_missing'
     }
@@ -669,13 +791,13 @@ Invoke-Assertion 'catalog reports missing profile coverage before routing' {
 Invoke-Assertion 'catalog reports duplicate launcher and configuration identity' {
     if (-not $profilesAvailable) { throw 'Import-RouterProfileCatalog is unavailable.' }
     Invoke-WithTemporaryCatalog {
-        param($root)
+        param($root, $testPricingPath)
         $testMatrixPath = Join-Path $root 'matrix.json'
         Write-TestJson -Path $testMatrixPath -Value (New-TestMatrix)
         $profile = Copy-TestObject @(Get-MinimalProfiles)[0]
         Write-TestJson -Path (Join-Path $root 'profiles/agy/a.json') -Value $profile
         Write-TestJson -Path (Join-Path $root 'profiles/agy/b.json') -Value $profile
-        $catalog = Import-RouterProfileCatalog -ProfilesRoot (Join-Path $root 'profiles') -MatrixPath $testMatrixPath -ProfileSchemaPath $profileSchemaPath
+        $catalog = Import-RouterProfileCatalog -ProfilesRoot (Join-Path $root 'profiles') -MatrixPath $testMatrixPath -ProfileSchemaPath $profileSchemaPath -PricingSnapshotPath $testPricingPath
         Assert-Equal $catalog.valid $false
         Assert-CatalogError -Catalog $catalog -Code 'duplicate_profile_identity'
     }
@@ -684,7 +806,7 @@ Invoke-Assertion 'catalog reports duplicate launcher and configuration identity'
 Invoke-Assertion 'catalog reports malformed JSON and schema-invalid profiles structurally' {
     if (-not $profilesAvailable) { throw 'Import-RouterProfileCatalog is unavailable.' }
     Invoke-WithTemporaryCatalog {
-        param($root)
+        param($root, $testPricingPath)
         $testMatrixPath = Join-Path $root 'matrix.json'
         Write-TestJson -Path $testMatrixPath -Value (New-TestMatrix)
         $profileDir = Join-Path $root 'profiles/agy'
@@ -693,7 +815,7 @@ Invoke-Assertion 'catalog reports malformed JSON and schema-invalid profiles str
         $invalidProfile = Copy-TestObject @(Get-MinimalProfiles)[0]
         $invalidProfile.quality.task_types.PSObject.Properties.Remove('coding')
         Write-TestJson -Path (Join-Path $profileDir 'b-schema-invalid.json') -Value $invalidProfile
-        $catalog = Import-RouterProfileCatalog -ProfilesRoot (Join-Path $root 'profiles') -MatrixPath $testMatrixPath -ProfileSchemaPath $profileSchemaPath
+        $catalog = Import-RouterProfileCatalog -ProfilesRoot (Join-Path $root 'profiles') -MatrixPath $testMatrixPath -ProfileSchemaPath $profileSchemaPath -PricingSnapshotPath $testPricingPath
         Assert-Equal $catalog.valid $false
         Assert-CatalogError -Catalog $catalog -Code 'profile_json_invalid'
         Assert-CatalogError -Catalog $catalog -Code 'profile_schema_invalid'
@@ -703,7 +825,7 @@ Invoke-Assertion 'catalog reports malformed JSON and schema-invalid profiles str
 Invoke-Assertion 'catalog rejects duplicate JSON property names instead of silently taking the last value' {
     if (-not $profilesAvailable) { throw 'Import-RouterProfileCatalog is unavailable.' }
     Invoke-WithTemporaryCatalog {
-        param($root)
+        param($root, $testPricingPath)
         $testMatrixPath = Join-Path $root 'matrix.json'
         Write-TestJson -Path $testMatrixPath -Value (New-TestMatrix)
         $profile = Copy-TestObject @(Get-MinimalProfiles)[0]
@@ -713,7 +835,7 @@ Invoke-Assertion 'catalog rejects duplicate JSON property names instead of silen
         $profileText = $profileText.Replace('"launcher": "agy",', '"launcher": "agy",' + [Environment]::NewLine + '  "launcher": "codex",')
         [IO.File]::WriteAllText($profilePath, $profileText, [Text.UTF8Encoding]::new($false))
 
-        $catalog = Import-RouterProfileCatalog -ProfilesRoot (Join-Path $root 'profiles') -MatrixPath $testMatrixPath -ProfileSchemaPath $profileSchemaPath
+        $catalog = Import-RouterProfileCatalog -ProfilesRoot (Join-Path $root 'profiles') -MatrixPath $testMatrixPath -ProfileSchemaPath $profileSchemaPath -PricingSnapshotPath $testPricingPath
         Assert-Equal $catalog.valid $false
         Assert-CatalogError -Catalog $catalog -Code 'profile_json_invalid'
     }
@@ -722,13 +844,13 @@ Invoke-Assertion 'catalog rejects duplicate JSON property names instead of silen
 Invoke-Assertion 'catalog reports candidate identity mismatch and pricing-state misuse' {
     if (-not $profilesAvailable) { throw 'Import-RouterProfileCatalog is unavailable.' }
     Invoke-WithTemporaryCatalog {
-        param($root)
+        param($root, $testPricingPath)
         $testMatrixPath = Join-Path $root 'matrix.json'
         Write-TestJson -Path $testMatrixPath -Value (New-TestMatrix -Provider 'anthropic')
         $profile = Copy-TestObject @(Get-MinimalProfiles)[0]
         $profile.pricing.cost_comparable = $false
         Write-TestJson -Path (Join-Path $root 'profiles/agy/shared-model__medium.json') -Value $profile
-        $catalog = Import-RouterProfileCatalog -ProfilesRoot (Join-Path $root 'profiles') -MatrixPath $testMatrixPath -ProfileSchemaPath $profileSchemaPath
+        $catalog = Import-RouterProfileCatalog -ProfilesRoot (Join-Path $root 'profiles') -MatrixPath $testMatrixPath -ProfileSchemaPath $profileSchemaPath -PricingSnapshotPath $testPricingPath
         Assert-Equal $catalog.valid $false
         Assert-CatalogError -Catalog $catalog -Code 'candidate_profile_mismatch'
         Assert-CatalogError -Catalog $catalog -Code 'profile_pricing_invalid'
@@ -738,13 +860,13 @@ Invoke-Assertion 'catalog reports candidate identity mismatch and pricing-state 
 Invoke-Assertion 'catalog reports unavailable-latency state misuse' {
     if (-not $profilesAvailable) { throw 'Import-RouterProfileCatalog is unavailable.' }
     Invoke-WithTemporaryCatalog {
-        param($root)
+        param($root, $testPricingPath)
         $testMatrixPath = Join-Path $root 'matrix.json'
         Write-TestJson -Path $testMatrixPath -Value (New-TestMatrix)
         $profile = Copy-TestObject @(Get-MinimalProfiles)[0]
         $profile.latency_observation.available = $false
         Write-TestJson -Path (Join-Path $root 'profiles/agy/shared-model__medium.json') -Value $profile
-        $catalog = Import-RouterProfileCatalog -ProfilesRoot (Join-Path $root 'profiles') -MatrixPath $testMatrixPath -ProfileSchemaPath $profileSchemaPath
+        $catalog = Import-RouterProfileCatalog -ProfilesRoot (Join-Path $root 'profiles') -MatrixPath $testMatrixPath -ProfileSchemaPath $profileSchemaPath -PricingSnapshotPath $testPricingPath
         Assert-Equal $catalog.valid $false
         Assert-CatalogError -Catalog $catalog -Code 'profile_latency_invalid'
     }
@@ -753,15 +875,15 @@ Invoke-Assertion 'catalog reports unavailable-latency state misuse' {
 Invoke-Assertion 'catalog error ordering is deterministic by code file and identity' {
     if (-not $profilesAvailable) { throw 'Import-RouterProfileCatalog is unavailable.' }
     Invoke-WithTemporaryCatalog {
-        param($root)
+        param($root, $testPricingPath)
         $testMatrixPath = Join-Path $root 'matrix.json'
         Write-TestJson -Path $testMatrixPath -Value (New-TestMatrix)
         $profileDir = Join-Path $root 'profiles/agy'
         $null = New-Item -ItemType Directory -Path $profileDir -Force
         Set-Content -LiteralPath (Join-Path $profileDir 'z.json') -Value '{bad z' -Encoding utf8NoBOM
         Set-Content -LiteralPath (Join-Path $profileDir 'a.json') -Value '{bad a' -Encoding utf8NoBOM
-        $first = Import-RouterProfileCatalog -ProfilesRoot (Join-Path $root 'profiles') -MatrixPath $testMatrixPath -ProfileSchemaPath $profileSchemaPath
-        $second = Import-RouterProfileCatalog -ProfilesRoot (Join-Path $root 'profiles') -MatrixPath $testMatrixPath -ProfileSchemaPath $profileSchemaPath
+        $first = Import-RouterProfileCatalog -ProfilesRoot (Join-Path $root 'profiles') -MatrixPath $testMatrixPath -ProfileSchemaPath $profileSchemaPath -PricingSnapshotPath $testPricingPath
+        $second = Import-RouterProfileCatalog -ProfilesRoot (Join-Path $root 'profiles') -MatrixPath $testMatrixPath -ProfileSchemaPath $profileSchemaPath -PricingSnapshotPath $testPricingPath
         [string[]]$firstErrors = @($first.errors | ForEach-Object { '{0}|{1}|{2}' -f $_.code, $_.file, $_.identity })
         [string[]]$secondErrors = @($second.errors | ForEach-Object { '{0}|{1}|{2}' -f $_.code, $_.file, $_.identity })
         Assert-SequenceEqual $firstErrors $secondErrors

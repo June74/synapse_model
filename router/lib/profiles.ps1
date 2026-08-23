@@ -109,7 +109,8 @@ function Import-RouterProfileCatalog {
     param(
         [Parameter(Mandatory)][string]$ProfilesRoot,
         [Parameter(Mandatory)][string]$MatrixPath,
-        [Parameter(Mandatory)][string]$ProfileSchemaPath
+        [Parameter(Mandatory)][string]$ProfileSchemaPath,
+        [Parameter(Mandatory)][string]$PricingSnapshotPath
     )
 
     if ($null -eq (Get-Command Test-RouterSchema -ErrorAction SilentlyContinue)) {
@@ -122,6 +123,54 @@ function Import-RouterProfileCatalog {
     if (-not $matrixRead.valid) {
         $errors.Add((New-RouterCatalogError -Code 'matrix_json_invalid' -File $MatrixPath -Path $matrixRead.path -Identity $null -Message $matrixRead.message))
         return [pscustomobject]@{ valid = $false; profiles = @(); errors = @($errors) }
+    }
+
+    $pricingRead = Read-RouterCatalogJson -FilePath $PricingSnapshotPath
+    if (-not $pricingRead.valid) {
+        $errors.Add((New-RouterCatalogError -Code 'pricing_snapshot_json_invalid' -File $PricingSnapshotPath -Path $pricingRead.path -Identity $null -Message $pricingRead.message))
+        return [pscustomobject]@{ valid = $false; profiles = @(); errors = @($errors) }
+    }
+    $pricingSnapshot = $pricingRead.value
+    if ($pricingSnapshot.PSObject.Properties.Name -cnotcontains 'schedules' -or
+        $pricingSnapshot.PSObject.Properties.Name -cnotcontains 'snapshot_date' -or
+        $pricingSnapshot.PSObject.Properties.Name -cnotcontains 'currency' -or
+        $pricingSnapshot.PSObject.Properties.Name -cnotcontains 'rate_unit') {
+        $errors.Add((New-RouterCatalogError -Code 'pricing_snapshot_invalid' -File $PricingSnapshotPath -Path '$' -Identity $null -Message 'Pricing snapshot lacks required catalog fields.'))
+        return [pscustomobject]@{ valid = $false; profiles = @(); errors = @($errors) }
+    }
+
+    $pricingByProfileModel = [Collections.Generic.Dictionary[string, object]]::new([StringComparer]::Ordinal)
+    $scheduleIndex = 0
+    foreach ($schedule in @($pricingSnapshot.schedules)) {
+        $schedulePath = '$.schedules[{0}]' -f $scheduleIndex
+        $scheduleIndex++
+        if ($null -eq $schedule -or
+            $schedule.PSObject.Properties.Name -cnotcontains 'provider' -or
+            $schedule.PSObject.Properties.Name -cnotcontains 'model' -or
+            $schedule.PSObject.Properties.Name -cnotcontains 'profile_models' -or
+            $schedule.PSObject.Properties.Name -cnotcontains 'cost_comparable' -or
+            $schedule.PSObject.Properties.Name -cnotcontains 'rate_periods' -or
+            $schedule.cost_comparable -isnot [bool] -or
+            @($schedule.profile_models).Count -eq 0) {
+            $errors.Add((New-RouterCatalogError -Code 'pricing_snapshot_invalid' -File $PricingSnapshotPath -Path $schedulePath -Identity $null -Message 'Pricing schedule is incomplete.'))
+            continue
+        }
+        foreach ($profileModel in @($schedule.profile_models)) {
+            if ([string]::IsNullOrWhiteSpace([string]$profileModel)) {
+                $errors.Add((New-RouterCatalogError -Code 'pricing_snapshot_invalid' -File $PricingSnapshotPath -Path ($schedulePath + '.profile_models') -Identity $null -Message 'Pricing schedule contains a blank profile model.'))
+            } elseif ($pricingByProfileModel.ContainsKey([string]$profileModel)) {
+                $errors.Add((New-RouterCatalogError -Code 'pricing_snapshot_duplicate_model' -File $PricingSnapshotPath -Path ($schedulePath + '.profile_models') -Identity ([string]$profileModel) -Message 'More than one pricing schedule applies to this profile model.'))
+            } else {
+                $pricingByProfileModel.Add([string]$profileModel, $schedule)
+            }
+        }
+    }
+    if ($errors.Count -gt 0) {
+        $sortedSnapshotErrors = @(Sort-RouterCatalogObjectsOrdinal -Values @($errors) -KeySelector {
+            param($error)
+            '{0}|{1}|{2}|{3}' -f $error.code, $error.file, $error.identity, $error.path
+        })
+        return [pscustomobject]@{ valid = $false; profiles = @(); errors = $sortedSnapshotErrors }
     }
 
     $candidates = @($matrixRead.value.candidates | Where-Object { $_.enabled -and $_.candidate_kind -ceq 'model' })
@@ -205,6 +254,61 @@ function Import-RouterProfileCatalog {
             $errors.Add((New-RouterCatalogError -Code 'profile_pricing_invalid' -File $entry.file -Path '$.pricing' -Identity $entry.identity -Message 'Comparable pricing requires finite nonnegative rates; non-comparable pricing requires two null rates.'))
         }
 
+        $pricingSnapshotValid = $false
+        if ($pricingByProfileModel.ContainsKey([string]$profile.model)) {
+            $schedule = $pricingByProfileModel[[string]$profile.model]
+            if ($schedule.provider -ceq $profile.provider -and
+                $profile.pricing_snapshot_date -ceq $pricingSnapshot.snapshot_date -and
+                $profile.pricing.currency -ceq $pricingSnapshot.currency -and
+                $profile.pricing.rate_unit -ceq $pricingSnapshot.rate_unit -and
+                $profile.pricing.cost_comparable -eq $schedule.cost_comparable) {
+                if (-not $schedule.cost_comparable) {
+                    $pricingSnapshotValid = @($schedule.rate_periods).Count -eq 0 -and
+                        $null -eq $profile.pricing.input_usd_per_million_tokens -and
+                        $null -eq $profile.pricing.output_usd_per_million_tokens -and
+                        $profile.pricing.effective_from -ceq $pricingSnapshot.snapshot_date -and
+                        $null -eq $profile.pricing.effective_through
+                } else {
+                    $matchingPeriods = @(
+                        $schedule.rate_periods | Where-Object {
+                            $_.input_tokens_min -eq 0 -and
+                            $_.effective_from -ceq $profile.pricing.effective_from -and
+                            (($null -eq $_.effective_through -and $null -eq $profile.pricing.effective_through) -or
+                                ($null -ne $_.effective_through -and $_.effective_through -ceq $profile.pricing.effective_through))
+                        }
+                    )
+                    if ($matchingPeriods.Count -eq 1) {
+                        $pricingSnapshotValid = $profile.pricing.input_usd_per_million_tokens -eq $matchingPeriods[0].input_usd_per_million_tokens -and
+                            $profile.pricing.output_usd_per_million_tokens -eq $matchingPeriods[0].output_usd_per_million_tokens
+                    }
+                }
+            }
+        }
+        if (-not $pricingSnapshotValid) {
+            $errors.Add((New-RouterCatalogError -Code 'profile_pricing_snapshot_mismatch' -File $entry.file -Path '$.pricing' -Identity $entry.identity -Message 'Profile pricing does not exactly match its applicable dated pricing schedule.'))
+        }
+
+        $artificialAnalysis = $profile.evidence.artificial_analysis
+        $benchmarkEvidenceEligible = $artificialAnalysis.exact_model_match -and
+            $artificialAnalysis.exact_effort_match -and
+            -not [string]::IsNullOrWhiteSpace([string]$artificialAnalysis.benchmark_slice) -and
+            -not [string]::Equals([string]$artificialAnalysis.benchmark_slice, 'unavailable', [StringComparison]::OrdinalIgnoreCase)
+        if (-not $benchmarkEvidenceEligible) {
+            $measuredQualityPaths = [Collections.Generic.List[string]]::new()
+            foreach ($mapName in @('task_types', 'domains', 'complexities', 'capabilities')) {
+                foreach ($qualityProperty in $profile.quality.$mapName.PSObject.Properties) {
+                    if ($qualityProperty.Value -cin @('standard', 'strong', 'frontier')) {
+                        $measuredQualityPaths.Add(('$.quality.{0}.{1}' -f $mapName, $qualityProperty.Name))
+                    }
+                }
+            }
+            if ($measuredQualityPaths.Count -gt 0) {
+                [string[]]$qualityPaths = @($measuredQualityPaths)
+                [Array]::Sort($qualityPaths, [StringComparer]::Ordinal)
+                $errors.Add((New-RouterCatalogError -Code 'profile_quality_evidence_invalid' -File $entry.file -Path $qualityPaths[0] -Identity $entry.identity -Message 'Measured quality requires exact model, exact effort, and a relevant benchmark slice; unknown and unsupported remain allowed without it.'))
+            }
+        }
+
         $latency = $profile.latency_observation
         $latencyValid = if ($latency.available) {
             -not [string]::IsNullOrWhiteSpace([string]$latency.metric) -and
@@ -222,7 +326,7 @@ function Import-RouterProfileCatalog {
     $validEntries = @(
         $loaded | Where-Object {
             $entryIdentity = $_.identity
-            @($errors | Where-Object { $_.identity -ceq $entryIdentity -and $_.code -in @('duplicate_profile_identity', 'candidate_profile_mismatch', 'profile_coverage_unexpected', 'profile_pricing_invalid', 'profile_latency_invalid') }).Count -eq 0
+            @($errors | Where-Object { $_.identity -ceq $entryIdentity -and $_.code -in @('duplicate_profile_identity', 'candidate_profile_mismatch', 'profile_coverage_unexpected', 'profile_pricing_invalid', 'profile_pricing_snapshot_mismatch', 'profile_quality_evidence_invalid', 'profile_latency_invalid') }).Count -eq 0
         }
     )
     $sortedEntries = @(Sort-RouterCatalogObjectsOrdinal -Values $validEntries -KeySelector { param($entry) $entry.identity })

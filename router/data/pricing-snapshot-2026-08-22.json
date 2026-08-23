@@ -8,6 +8,7 @@
     {
       "provider": "openai",
       "model": "gpt-5.6-sol",
+      "profile_models": ["gpt-5.6-sol"],
       "cost_comparable": true,
       "source_url": "https://help.openai.com/en/articles/20001415-chatgpt-rate-card-enterprise-token-based-pricing",
       "retrieved_on": "2026-08-23",
@@ -18,6 +19,7 @@
     {
       "provider": "openai",
       "model": "gpt-5.6-terra",
+      "profile_models": ["gpt-5.6-terra"],
       "cost_comparable": true,
       "source_url": "https://help.openai.com/en/articles/20001415-chatgpt-rate-card-enterprise-token-based-pricing",
       "retrieved_on": "2026-08-23",
@@ -28,6 +30,7 @@
     {
       "provider": "openai",
       "model": "gpt-5.6-luna",
+      "profile_models": ["gpt-5.6-luna"],
       "cost_comparable": true,
       "source_url": "https://help.openai.com/en/articles/20001415-chatgpt-rate-card-enterprise-token-based-pricing",
       "retrieved_on": "2026-08-23",
@@ -38,6 +41,7 @@
     {
       "provider": "openai",
       "model": "gpt-5.5",
+      "profile_models": ["gpt-5.5"],
       "cost_comparable": true,
       "source_url": "https://help.openai.com/en/articles/20001415-chatgpt-rate-card-enterprise-token-based-pricing",
       "retrieved_on": "2026-08-23",
@@ -48,6 +52,7 @@
     {
       "provider": "openai",
       "model": "gpt-5.4",
+      "profile_models": ["gpt-5.4"],
       "cost_comparable": true,
       "source_url": "https://help.openai.com/en/articles/20001415-chatgpt-rate-card-enterprise-token-based-pricing",
       "retrieved_on": "2026-08-23",
@@ -58,6 +63,7 @@
     {
       "provider": "openai",
       "model": "gpt-5.4-mini",
+      "profile_models": ["gpt-5.4-mini"],
       "cost_comparable": true,
       "source_url": "https://help.openai.com/en/articles/20001415-chatgpt-rate-card-enterprise-token-based-pricing",
       "retrieved_on": "2026-08-23",
@@ -68,6 +74,7 @@
     {
       "provider": "openai",
       "model": "gpt-5.3-codex-spark",
+      "profile_models": ["gpt-5.3-codex-spark"],
       "cost_comparable": false,
       "source_url": "https://help.openai.com/en/articles/20001415-chatgpt-rate-card-enterprise-token-based-pricing",
       "retrieved_on": "2026-08-23",
@@ -77,6 +84,7 @@
     {
       "provider": "anthropic",
       "model": "claude-fable-5",
+      "profile_models": ["claude-fable-5"],
       "cost_comparable": true,
       "source_url": "https://platform.claude.com/docs/en/about-claude/pricing",
       "retrieved_on": "2026-08-23",
@@ -87,6 +95,7 @@
     {
       "provider": "anthropic",
       "model": "claude-opus-5",
+      "profile_models": ["claude-opus-5"],
       "cost_comparable": true,
       "source_url": "https://platform.claude.com/docs/en/about-claude/pricing",
       "retrieved_on": "2026-08-23",
@@ -97,6 +106,7 @@
     {
       "provider": "anthropic",
       "model": "claude-sonnet-5",
+      "profile_models": ["claude-sonnet-5"],
       "cost_comparable": true,
       "source_url": "https://platform.claude.com/docs/en/about-claude/pricing",
       "retrieved_on": "2026-08-23",
@@ -108,6 +118,7 @@
     {
       "provider": "anthropic",
       "model": "claude-haiku-4-5",
+      "profile_models": ["claude-haiku-4-5"],
       "cost_comparable": true,
       "source_url": "https://platform.claude.com/docs/en/about-claude/pricing",
       "retrieved_on": "2026-08-23",
@@ -118,6 +129,7 @@
     {
       "provider": "anthropic",
       "model": "claude-sonnet-4-6",
+      "profile_models": ["claude-sonnet-4-6"],
       "cost_comparable": true,
       "source_url": "https://platform.claude.com/docs/en/about-claude/pricing",
       "retrieved_on": "2026-08-23",
@@ -128,6 +140,7 @@
     {
       "provider": "anthropic",
       "model": "claude-opus-4-6-thinking",
+      "profile_models": ["claude-opus-4-6-thinking"],
       "cost_comparable": true,
       "source_url": "https://platform.claude.com/docs/en/about-claude/pricing",
       "retrieved_on": "2026-08-23",
@@ -138,6 +151,7 @@
     {
       "provider": "google",
       "model": "gemini-3.7-flash",
+      "profile_models": ["gemini-3.7-flash-high", "gemini-3.7-flash-medium", "gemini-3.7-flash-low"],
       "cost_comparable": true,
       "source_url": "https://ai.google.dev/gemini-api/docs/pricing",
       "retrieved_on": "2026-08-23",
@@ -149,6 +163,7 @@
     {
       "provider": "google",
       "model": "gemini-3.6-flash",
+      "profile_models": ["gemini-3.6-flash-high", "gemini-3.6-flash-medium", "gemini-3.6-flash-low"],
       "cost_comparable": true,
       "source_url": "https://ai.google.dev/gemini-api/docs/pricing",
       "retrieved_on": "2026-08-23",
@@ -160,6 +175,7 @@
     {
       "provider": "google",
       "model": "gemini-3.5-flash",
+      "profile_models": ["gemini-3.5-flash-high", "gemini-3.5-flash-medium", "gemini-3.5-flash-low"],
       "cost_comparable": true,
       "source_url": "https://ai.google.dev/gemini-api/docs/pricing",
       "retrieved_on": "2026-08-23",
@@ -170,6 +186,7 @@
     {
       "provider": "google",
       "model": "gemini-3.1-pro",
+      "profile_models": ["gemini-3.1-pro-high", "gemini-3.1-pro-low"],
       "cost_comparable": true,
       "source_url": "https://ai.google.dev/gemini-api/docs/pricing",
       "retrieved_on": "2026-08-23",
@@ -181,6 +198,7 @@
     {
       "provider": "openai",
       "model": "gpt-oss-120b-medium",
+      "profile_models": ["gpt-oss-120b-medium"],
       "cost_comparable": true,
       "source_url": "https://console.groq.com/docs/model/openai/gpt-oss-120b",
       "corroborating_source_urls": [
