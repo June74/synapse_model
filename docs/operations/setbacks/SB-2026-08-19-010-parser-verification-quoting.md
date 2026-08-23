@@ -33,3 +33,23 @@
 - **Correction:** Collect the `foreach` results in an explicit list, then pass the completed list to formatting.
 - **Prevention:** Build bounded verification results explicitly before piping them to display commands.
 - **Related verification:** The corrected probe showed that `Test-Json` accepts both `-1e-100` and negative `Double.Epsilon` against `minimum: 0`; the router wrapper rejects the same value with `number_below_minimum` at the exact candidate path.
+
+## Recurrence: 2026-08-23, Task 3 quality-snapshot follow-up
+
+- **Phase/task:** Second specification-review follow-up parser verification
+- **Symptom:** The combined parser probe emitted `InvalidOperation` before parsing because `[ref]` was applied to error variables that had not been initialized.
+- **Impact:** The parser result was not trustworthy; no project files were changed by the failed probe and implementation work was briefly delayed.
+- **Confirmed cause:** PowerShell requires a variable to exist before it can be passed by reference.
+- **Correction:** Initialize token and error variables to `$null` before calling `Parser.ParseFile`, and judge success only after the call completes without command errors.
+- **Prevention:** Parser verification snippets must initialize every `[ref]` target explicitly.
+- **Related verification:** Corrected parser probe completed for both the loader and router test file with zero parse errors.
+
+## Recurrence: 2026-08-23, Task 3 counted verification
+
+- **Phase/task:** Post-commit router-suite evidence count
+- **Symptom:** The counting wrapper exited 1 even though the router suite exited 0 and emitted 112 PASS lines.
+- **Impact:** No product code or test outcome changed; the wrapper briefly misreported four failures.
+- **Confirmed cause:** The wrapper searched for `FAIL` anywhere in a line, so passing test names containing the word `failure` were false positives.
+- **Correction:** Count only lines beginning with `FAIL ` or `Write-Error:` and preserve the suite's own exit code separately.
+- **Prevention:** Verification summaries must anchor status-token matches at the beginning of each output line.
+- **Related verification:** Corrected counted run reported exit 0, 112 passes, zero failures, and one planned Task 6 pending marker.

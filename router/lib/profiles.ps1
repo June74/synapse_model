@@ -103,6 +103,20 @@ function Test-RouterCatalogPositiveInteger {
     try { return $Value -ge 1 -and [decimal]$Value -eq [decimal]::Truncate([decimal]$Value) } catch { return $false }
 }
 
+function Get-RouterCatalogQualityPaths {
+    $qualityKeys = [ordered]@{
+        task_types = @('general', 'coding', 'math', 'reasoning', 'writing', 'summarization', 'extraction', 'research_synthesis')
+        domains = @('general', 'computer_science', 'mathematics', 'physics', 'chemistry', 'biology', 'medicine', 'engineering', 'social_science', 'humanities', 'business', 'finance', 'law')
+        complexities = @('low', 'medium', 'high')
+        capabilities = @('instruction_following', 'reasoning', 'structured_output', 'factual_reliability', 'source_grounded_synthesis', 'long_context')
+    }
+    return @(
+        foreach ($mapName in $qualityKeys.Keys) {
+            foreach ($qualityKey in $qualityKeys[$mapName]) { '$.quality.{0}.{1}' -f $mapName, $qualityKey }
+        }
+    )
+}
+
 function Import-RouterProfileCatalog {
     [CmdletBinding()]
     [OutputType([pscustomobject])]
@@ -110,7 +124,8 @@ function Import-RouterProfileCatalog {
         [Parameter(Mandatory)][string]$ProfilesRoot,
         [Parameter(Mandatory)][string]$MatrixPath,
         [Parameter(Mandatory)][string]$ProfileSchemaPath,
-        [Parameter(Mandatory)][string]$PricingSnapshotPath
+        [Parameter(Mandatory)][string]$PricingSnapshotPath,
+        [Parameter(Mandatory)][string]$QualitySnapshotPath
     )
 
     if ($null -eq (Get-Command Test-RouterSchema -ErrorAction SilentlyContinue)) {
@@ -171,6 +186,87 @@ function Import-RouterProfileCatalog {
             '{0}|{1}|{2}|{3}' -f $error.code, $error.file, $error.identity, $error.path
         })
         return [pscustomobject]@{ valid = $false; profiles = @(); errors = $sortedSnapshotErrors }
+    }
+
+    $qualityRead = Read-RouterCatalogJson -FilePath $QualitySnapshotPath
+    if (-not $qualityRead.valid) {
+        $errors.Add((New-RouterCatalogError -Code 'quality_snapshot_json_invalid' -File $QualitySnapshotPath -Path $qualityRead.path -Identity $null -Message $qualityRead.message))
+        return [pscustomobject]@{ valid = $false; profiles = @(); errors = @($errors) }
+    }
+    $qualitySnapshot = $qualityRead.value
+    $requiredQualitySnapshotFields = @('snapshot_date', 'retrieved_on', 'methodology_url', 'policy', 'records')
+    $missingQualitySnapshotFields = @($requiredQualitySnapshotFields | Where-Object { $qualitySnapshot.PSObject.Properties.Name -cnotcontains $_ })
+    if ($missingQualitySnapshotFields.Count -gt 0 -or
+        [string]::IsNullOrWhiteSpace([string]$qualitySnapshot.snapshot_date) -or
+        [string]::IsNullOrWhiteSpace([string]$qualitySnapshot.retrieved_on) -or
+        [string]::IsNullOrWhiteSpace([string]$qualitySnapshot.methodology_url) -or
+        [string]::IsNullOrWhiteSpace([string]$qualitySnapshot.policy) -or
+        $qualitySnapshot.records -isnot [Collections.IList]) {
+        $errors.Add((New-RouterCatalogError -Code 'quality_snapshot_invalid' -File $QualitySnapshotPath -Path '$' -Identity $null -Message 'Quality snapshot lacks required top-level fields.'))
+        return [pscustomobject]@{ valid = $false; profiles = @(); errors = @($errors) }
+    }
+
+    $allowedQualityPaths = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($qualityPath in @(Get-RouterCatalogQualityPaths)) { $null = $allowedQualityPaths.Add($qualityPath) }
+    $qualityByIdentity = [Collections.Generic.Dictionary[string, object]]::new([StringComparer]::Ordinal)
+    $duplicateQualityIdentities = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    $qualityRecordIndex = 0
+    foreach ($qualityRecord in @($qualitySnapshot.records)) {
+        $recordPath = '$.records[{0}]' -f $qualityRecordIndex
+        $qualityRecordIndex++
+        $requiredRecordFields = @(
+            'launcher', 'configuration_id', 'model', 'effort', 'source_url', 'retrieved_on',
+            'exact_model_match', 'exact_effort_match', 'benchmark_slice', 'provisional_category',
+            'unsupported_quality_paths', 'note'
+        )
+        $recordMissingFields = if ($null -eq $qualityRecord) { $requiredRecordFields } else {
+            @($requiredRecordFields | Where-Object { $qualityRecord.PSObject.Properties.Name -cnotcontains $_ })
+        }
+        $identity = if ($null -ne $qualityRecord -and
+            $qualityRecord.PSObject.Properties.Name -ccontains 'launcher' -and
+            $qualityRecord.PSObject.Properties.Name -ccontains 'configuration_id') {
+            '{0}|{1}' -f $qualityRecord.launcher, $qualityRecord.configuration_id
+        } else { $null }
+        $recordValid = $recordMissingFields.Count -eq 0
+        if ($recordValid) {
+            foreach ($stringField in @('launcher', 'configuration_id', 'model', 'effort', 'source_url', 'retrieved_on', 'benchmark_slice', 'note')) {
+                if ([string]::IsNullOrWhiteSpace([string]$qualityRecord.$stringField)) { $recordValid = $false }
+            }
+            if ($qualityRecord.exact_model_match -isnot [bool] -or $qualityRecord.exact_effort_match -isnot [bool] -or
+                $qualityRecord.unsupported_quality_paths -isnot [Collections.IList] -or
+                $qualityRecord.provisional_category -cnotin @('unknown', 'standard', 'strong', 'frontier')) {
+                $recordValid = $false
+            }
+            $seenUnsupportedPaths = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+            foreach ($unsupportedPath in @($qualityRecord.unsupported_quality_paths)) {
+                if (-not $allowedQualityPaths.Contains([string]$unsupportedPath) -or -not $seenUnsupportedPaths.Add([string]$unsupportedPath)) {
+                    $recordValid = $false
+                }
+            }
+            if ($qualityRecord.provisional_category -cin @('standard', 'strong', 'frontier') -and
+                (-not $qualityRecord.exact_model_match -or -not $qualityRecord.exact_effort_match -or
+                    [string]::Equals([string]$qualityRecord.benchmark_slice, 'unavailable', [StringComparison]::OrdinalIgnoreCase))) {
+                $recordValid = $false
+            }
+        }
+        if (-not $recordValid) {
+            $errors.Add((New-RouterCatalogError -Code 'quality_snapshot_record_invalid' -File $QualitySnapshotPath -Path $recordPath -Identity $identity -Message 'Quality snapshot record is incomplete or internally inconsistent.'))
+            continue
+        }
+        if ($qualityByIdentity.ContainsKey($identity)) {
+            if ($duplicateQualityIdentities.Add($identity)) {
+                $errors.Add((New-RouterCatalogError -Code 'duplicate_quality_snapshot_identity' -File $QualitySnapshotPath -Path $recordPath -Identity $identity -Message 'More than one quality snapshot record uses this composite identity.'))
+            }
+        } else {
+            $qualityByIdentity.Add($identity, $qualityRecord)
+        }
+    }
+    if ($errors.Count -gt 0) {
+        $sortedQualityErrors = @(Sort-RouterCatalogObjectsOrdinal -Values @($errors) -KeySelector {
+            param($error)
+            '{0}|{1}|{2}|{3}' -f $error.code, $error.file, $error.identity, $error.path
+        })
+        return [pscustomobject]@{ valid = $false; profiles = @(); errors = $sortedQualityErrors }
     }
 
     $candidates = @($matrixRead.value.candidates | Where-Object { $_.enabled -and $_.candidate_kind -ceq 'model' })
@@ -241,6 +337,16 @@ function Import-RouterProfileCatalog {
             $errors.Add((New-RouterCatalogError -Code 'profile_coverage_unexpected' -File $entry.file -Path '$' -Identity $identity -Message 'Profile does not map to an enabled normal matrix candidate.'))
         }
     }
+    foreach ($identity in $expectedIdentities) {
+        if (-not $qualityByIdentity.ContainsKey($identity)) {
+            $errors.Add((New-RouterCatalogError -Code 'quality_snapshot_record_missing' -File $QualitySnapshotPath -Path '$.records' -Identity $identity -Message 'No quality snapshot record covers this enabled matrix candidate.'))
+        }
+    }
+    foreach ($identity in $qualityByIdentity.Keys) {
+        if (-not $expectedIdentities.Contains($identity)) {
+            $errors.Add((New-RouterCatalogError -Code 'quality_snapshot_record_unexpected' -File $QualitySnapshotPath -Path '$.records' -Identity $identity -Message 'Quality snapshot record does not map to an enabled matrix candidate.'))
+        }
+    }
 
     foreach ($entry in $loaded) {
         $profile = $entry.profile
@@ -289,6 +395,40 @@ function Import-RouterProfileCatalog {
         }
 
         $artificialAnalysis = $profile.evidence.artificial_analysis
+        $qualitySnapshotValid = $false
+        if ($qualityByIdentity.ContainsKey($entry.identity)) {
+            $qualityRecord = $qualityByIdentity[$entry.identity]
+            $qualitySnapshotValid = $profile.quality_snapshot_date -ceq $qualitySnapshot.snapshot_date -and
+                $profile.launcher -ceq $qualityRecord.launcher -and
+                $profile.configuration_id -ceq $qualityRecord.configuration_id -and
+                $profile.model -ceq $qualityRecord.model -and
+                $profile.effort -ceq $qualityRecord.effort -and
+                $artificialAnalysis.source_url -ceq $qualityRecord.source_url -and
+                $artificialAnalysis.retrieved_on -ceq $qualityRecord.retrieved_on -and
+                $artificialAnalysis.exact_model_match -eq $qualityRecord.exact_model_match -and
+                $artificialAnalysis.exact_effort_match -eq $qualityRecord.exact_effort_match -and
+                $artificialAnalysis.benchmark_slice -ceq $qualityRecord.benchmark_slice
+            if ($qualitySnapshotValid) {
+                $unsupportedPaths = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+                foreach ($unsupportedPath in @($qualityRecord.unsupported_quality_paths)) { $null = $unsupportedPaths.Add([string]$unsupportedPath) }
+                foreach ($mapName in @('task_types', 'domains', 'complexities', 'capabilities')) {
+                    foreach ($qualityProperty in $profile.quality.$mapName.PSObject.Properties) {
+                        $qualityPath = '$.quality.{0}.{1}' -f $mapName, $qualityProperty.Name
+                        if ($qualityProperty.Value -ceq 'unsupported') {
+                            if (-not $unsupportedPaths.Contains($qualityPath)) { $qualitySnapshotValid = $false }
+                        } elseif ($qualityProperty.Value -cne 'unknown' -and $qualityProperty.Value -cne $qualityRecord.provisional_category) {
+                            $qualitySnapshotValid = $false
+                        } elseif ($qualityProperty.Value -cin @('standard', 'strong', 'frontier') -and
+                            $qualityRecord.provisional_category -cnotin @('standard', 'strong', 'frontier')) {
+                            $qualitySnapshotValid = $false
+                        }
+                    }
+                }
+            }
+        }
+        if (-not $qualitySnapshotValid -and $qualityByIdentity.ContainsKey($entry.identity)) {
+            $errors.Add((New-RouterCatalogError -Code 'profile_quality_snapshot_mismatch' -File $entry.file -Path '$.quality' -Identity $entry.identity -Message 'Profile quality or embedded evidence does not match its authoritative quality snapshot record.'))
+        }
         $benchmarkEvidenceEligible = $artificialAnalysis.exact_model_match -and
             $artificialAnalysis.exact_effort_match -and
             -not [string]::IsNullOrWhiteSpace([string]$artificialAnalysis.benchmark_slice) -and
@@ -326,7 +466,7 @@ function Import-RouterProfileCatalog {
     $validEntries = @(
         $loaded | Where-Object {
             $entryIdentity = $_.identity
-            @($errors | Where-Object { $_.identity -ceq $entryIdentity -and $_.code -in @('duplicate_profile_identity', 'candidate_profile_mismatch', 'profile_coverage_unexpected', 'profile_pricing_invalid', 'profile_pricing_snapshot_mismatch', 'profile_quality_evidence_invalid', 'profile_latency_invalid') }).Count -eq 0
+            @($errors | Where-Object { $_.identity -ceq $entryIdentity -and $_.code -in @('duplicate_profile_identity', 'candidate_profile_mismatch', 'profile_coverage_unexpected', 'profile_pricing_invalid', 'profile_pricing_snapshot_mismatch', 'profile_quality_snapshot_mismatch', 'profile_quality_evidence_invalid', 'profile_latency_invalid') }).Count -eq 0
         }
     )
     $sortedEntries = @(Sort-RouterCatalogObjectsOrdinal -Values $validEntries -KeySelector { param($entry) $entry.identity })
