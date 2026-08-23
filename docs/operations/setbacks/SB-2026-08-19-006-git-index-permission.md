@@ -35,4 +35,4 @@
 - **Impact:** Task 3 files remain intact and tested; nothing was staged and no commit was created by the failed command.
 - **Correction:** Retry only the bounded staging and commit commands with explicit Git-metadata write approval.
 - **Prevention:** Continue treating index and commit operations in this worktree as requiring approved Git-metadata access.
-- **Verification:** Pending the approved retry; pre-commit router and pilot suites both completed with exit code 0.
+- **Verification:** The approved retry committed Task 3 as `e3c00ea` and the recurrence record as `2b9cf3f`; `git status --short --branch` then showed a clean worktree. Pre-commit router and pilot suites both completed with exit code 0.
