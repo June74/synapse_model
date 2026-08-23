@@ -1,0 +1,107 @@
+{
+  "router_policy_version": "deterministic-policy-router/v1",
+  "profile_schema_version": "router-model-profile/v1",
+  "model_profile_version": "model-profile-catalog-2026-08-22-v1",
+  "pricing_snapshot_date": "2026-08-22",
+  "quality_snapshot_date": "2026-08-22",
+  "calibration_set_version": "calibration-set-v1",
+  "configuration_id": "claude-opus-5__low",
+  "launcher": "claude",
+  "provider": "anthropic",
+  "model": "claude-opus-5",
+  "effort": "low",
+  "enabled": true,
+  "availability": "available",
+  "supports": {
+    "input_modalities": [
+      "text"
+    ],
+    "output_modalities": [
+      "text"
+    ],
+    "languages": [
+      "english"
+    ],
+    "single_turn": true,
+    "context_window_tokens": 1000000,
+    "maximum_output_tokens": 128000
+  },
+  "quality": {
+    "task_types": {
+      "general": "unknown",
+      "coding": "unknown",
+      "math": "unknown",
+      "reasoning": "unknown",
+      "writing": "unknown",
+      "summarization": "unknown",
+      "extraction": "unknown",
+      "research_synthesis": "unknown"
+    },
+    "domains": {
+      "general": "unknown",
+      "computer_science": "unknown",
+      "mathematics": "unknown",
+      "physics": "unknown",
+      "chemistry": "unknown",
+      "biology": "unknown",
+      "medicine": "unknown",
+      "engineering": "unknown",
+      "social_science": "unknown",
+      "humanities": "unknown",
+      "business": "unknown",
+      "finance": "unknown",
+      "law": "unknown"
+    },
+    "complexities": {
+      "low": "unknown",
+      "medium": "unknown",
+      "high": "unknown"
+    },
+    "capabilities": {
+      "instruction_following": "unknown",
+      "reasoning": "unknown",
+      "structured_output": "unknown",
+      "factual_reliability": "unknown",
+      "source_grounded_synthesis": "unknown",
+      "long_context": "unknown"
+    }
+  },
+  "pricing": {
+    "currency": "USD",
+    "rate_unit": "per_million_tokens",
+    "cost_comparable": true,
+    "input_usd_per_million_tokens": 5.0,
+    "output_usd_per_million_tokens": 25.0,
+    "effective_from": "2026-08-22",
+    "effective_through": null
+  },
+  "token_consumption_observations": [],
+  "latency_observation": {
+    "available": false,
+    "metric": null,
+    "milliseconds": null,
+    "sample_count": null,
+    "observed_on": null
+  },
+  "evidence": {
+    "provider": {
+      "source_url": "https://platform.claude.com/docs/en/about-claude/models/overview",
+      "retrieved_on": "2026-08-23",
+      "fixture_only": false,
+      "capacity_exact_model_match": true,
+      "capacity_note": null
+    },
+    "artificial_analysis": {
+      "source_url": "https://artificialanalysis.ai/methodology/intelligence-benchmarking",
+      "retrieved_on": "2026-08-23",
+      "exact_model_match": false,
+      "exact_effort_match": false,
+      "benchmark_slice": "unavailable",
+      "fixture_only": false
+    }
+  },
+  "calibration": {
+    "status": "pending",
+    "version": "calibration-set-v1"
+  }
+}

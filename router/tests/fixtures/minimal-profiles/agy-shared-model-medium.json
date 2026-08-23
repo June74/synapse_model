@@ -63,6 +63,7 @@
   "pricing": {
     "currency": "USD",
     "rate_unit": "per_million_tokens",
+    "cost_comparable": true,
     "input_usd_per_million_tokens": 1.0,
     "output_usd_per_million_tokens": 5.0,
     "effective_from": "2026-08-22",
@@ -80,6 +81,7 @@
     }
   ],
   "latency_observation": {
+    "available": true,
     "metric": "end_to_end",
     "milliseconds": 1000,
     "sample_count": 1,
@@ -89,7 +91,9 @@
     "provider": {
       "source_url": "https://fixtures.invalid/providers/google/shared-model",
       "retrieved_on": "2026-08-22",
-      "fixture_only": true
+      "fixture_only": true,
+      "capacity_exact_model_match": true,
+      "capacity_note": null
     },
     "artificial_analysis": {
       "source_url": "https://fixtures.invalid/artificial-analysis/shared-model-medium",
