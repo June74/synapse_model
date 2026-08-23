@@ -222,11 +222,11 @@ function Import-RouterProfileCatalog {
         [Parameter(Mandatory)][string]$QualitySnapshotPath
     )
 
-    $schemaImplementationPath = Join-Path $PSScriptRoot 'schema.ps1'
-    $schemaModule = New-Module -Name ('RouterSchemaValidation_{0}' -f [guid]::NewGuid().ToString('N')) -ScriptBlock {
+    $schemaImplementationPath = [IO.Path]::GetFullPath([IO.Path]::Combine($PSScriptRoot, 'schema.ps1'))
+    $schemaModule = Microsoft.PowerShell.Core\New-Module -Name ('RouterSchemaValidation_{0}' -f [guid]::NewGuid().ToString('N')) -ScriptBlock {
         param($ImplementationPath)
         . $ImplementationPath
-        Export-ModuleMember -Function @() -Variable @()
+        Microsoft.PowerShell.Core\Export-ModuleMember -Function @() -Variable @()
     } -ArgumentList $schemaImplementationPath
 
     try {
@@ -268,18 +268,34 @@ function Import-RouterProfileCatalog {
         $schedulePath = '$.schedules[{0}]' -f $scheduleIndex
         $scheduleIndex++
         $requiredScheduleFields = @('provider', 'model', 'profile_models', 'cost_comparable', 'source_url', 'retrieved_on', 'rate_periods')
+        $allowedScheduleFields = @($requiredScheduleFields) + @('corroborating_source_urls', 'note')
         $missingScheduleFields = if ($null -eq $schedule) { $requiredScheduleFields } else {
             @($requiredScheduleFields | Where-Object { $schedule.PSObject.Properties.Name -cnotcontains $_ })
         }
-        $scheduleValid = $missingScheduleFields.Count -eq 0
+        $unknownScheduleFields = if ($null -eq $schedule) { @() } else {
+            @($schedule.PSObject.Properties.Name | Where-Object { $allowedScheduleFields -cnotcontains $_ })
+        }
+        $scheduleValid = $missingScheduleFields.Count -eq 0 -and $unknownScheduleFields.Count -eq 0
         if ($scheduleValid) {
             $scheduleValid = $schedule.provider -is [string] -and -not [string]::IsNullOrWhiteSpace($schedule.provider) -and
                 $schedule.model -is [string] -and -not [string]::IsNullOrWhiteSpace($schedule.model) -and
-                $schedule.source_url -is [string] -and -not [string]::IsNullOrWhiteSpace($schedule.source_url) -and
+                (Test-RouterCatalogHttpUrl $schedule.source_url) -and
                 $null -ne (ConvertFrom-RouterCatalogIsoDate $schedule.retrieved_on) -and
                 $schedule.profile_models -is [Collections.IList] -and @($schedule.profile_models).Count -gt 0 -and
                 $schedule.cost_comparable -is [bool] -and
                 $schedule.rate_periods -is [Collections.IList]
+        }
+        if ($scheduleValid -and $schedule.PSObject.Properties.Name -ccontains 'corroborating_source_urls') {
+            $scheduleValid = $schedule.corroborating_source_urls -is [Collections.IList] -and
+                @($schedule.corroborating_source_urls).Count -gt 0
+            if ($scheduleValid) {
+                foreach ($corroboratingSourceUrl in @($schedule.corroborating_source_urls)) {
+                    if (-not (Test-RouterCatalogHttpUrl $corroboratingSourceUrl)) {
+                        $scheduleValid = $false
+                        break
+                    }
+                }
+            }
         }
         if ($scheduleValid) {
             foreach ($profileModel in @($schedule.profile_models)) {
@@ -372,8 +388,13 @@ function Import-RouterProfileCatalog {
             for ($intervalIndex = 0; $timelineValid -and $intervalIndex -lt ($orderedIntervals.Count - 1); $intervalIndex++) {
                 $currentInterval = $orderedIntervals[$intervalIndex]
                 $nextInterval = $orderedIntervals[$intervalIndex + 1]
-                $timelineValid = $null -ne $currentInterval.effective_through -and
-                    $nextInterval.effective_from -eq $currentInterval.effective_through.AddDays(1)
+                if ($null -eq $currentInterval.effective_through -or
+                    $currentInterval.effective_through.Ticks -gt ([datetime]::MaxValue.Date.Ticks - [TimeSpan]::TicksPerDay)) {
+                    $timelineValid = $false
+                } else {
+                    $timelineValid = $nextInterval.effective_from.Ticks -eq
+                        ($currentInterval.effective_through.Ticks + [TimeSpan]::TicksPerDay)
+                }
             }
             if (-not $timelineValid) {
                 $errors.Add((New-RouterCatalogError -Code 'pricing_snapshot_invalid' -File $PricingSnapshotPath -Path ($schedulePath + '.rate_periods') -Identity $null -Message 'Effective date intervals must continuously cover time from the snapshot date without gaps, overlaps, or a non-final open interval.'))
@@ -559,6 +580,28 @@ function Import-RouterProfileCatalog {
             $firstSchemaError = @($schemaResult.errors)[0]
             $errors.Add((New-RouterCatalogError -Code 'profile_schema_invalid' -File $relativeFile -Path $firstSchemaError.path -Identity $identity -Message ('Profile schema validation failed: {0}.' -f $firstSchemaError.code)))
             continue
+        }
+
+        $providerEvidence = $profile.evidence.provider
+        $providerEvidenceValid = (Test-RouterCatalogHttpUrl $providerEvidence.source_url) -and
+            $null -ne (ConvertFrom-RouterCatalogIsoDate $providerEvidence.retrieved_on) -and
+            $providerEvidence.fixture_only -is [bool] -and
+            $providerEvidence.capacity_exact_model_match -is [bool] -and
+            ($null -eq $providerEvidence.capacity_note -or $providerEvidence.capacity_note -is [string])
+        if (-not $providerEvidenceValid) {
+            $errors.Add((New-RouterCatalogError -Code 'profile_provider_evidence_invalid' -File $relativeFile -Path '$.evidence.provider' -Identity $identity -Message 'Provider evidence requires typed dated HTTP provenance and explicit fixture and capacity semantics.'))
+        }
+
+        $artificialAnalysisEvidence = $profile.evidence.artificial_analysis
+        $artificialAnalysisEvidenceValid = (Test-RouterCatalogHttpUrl $artificialAnalysisEvidence.source_url) -and
+            $null -ne (ConvertFrom-RouterCatalogIsoDate $artificialAnalysisEvidence.retrieved_on) -and
+            $artificialAnalysisEvidence.exact_model_match -is [bool] -and
+            $artificialAnalysisEvidence.exact_effort_match -is [bool] -and
+            $artificialAnalysisEvidence.benchmark_slice -is [string] -and
+            -not [string]::IsNullOrWhiteSpace($artificialAnalysisEvidence.benchmark_slice) -and
+            $artificialAnalysisEvidence.fixture_only -is [bool]
+        if (-not $artificialAnalysisEvidenceValid) {
+            $errors.Add((New-RouterCatalogError -Code 'profile_artificial_analysis_evidence_invalid' -File $relativeFile -Path '$.evidence.artificial_analysis' -Identity $identity -Message 'Artificial Analysis evidence requires typed dated HTTP provenance and explicit exactness and fixture semantics.'))
         }
 
         $loaded.Add([pscustomobject]@{ profile = $profile; file = $relativeFile; identity = $identity })
@@ -754,7 +797,7 @@ function Import-RouterProfileCatalog {
     $validEntries = @(
         $loaded | Where-Object {
             $entryIdentity = $_.identity
-            @($errors | Where-Object { $_.identity -ceq $entryIdentity -and $_.code -in @('duplicate_profile_identity', 'candidate_profile_mismatch', 'profile_coverage_unexpected', 'profile_pricing_invalid', 'profile_pricing_snapshot_mismatch', 'profile_quality_snapshot_mismatch', 'profile_quality_evidence_invalid', 'profile_latency_invalid') }).Count -eq 0
+            @($errors | Where-Object { $_.identity -ceq $entryIdentity -and $_.code -in @('duplicate_profile_identity', 'candidate_profile_mismatch', 'profile_coverage_unexpected', 'profile_provider_evidence_invalid', 'profile_artificial_analysis_evidence_invalid', 'profile_pricing_invalid', 'profile_pricing_snapshot_mismatch', 'profile_quality_snapshot_mismatch', 'profile_quality_evidence_invalid', 'profile_latency_invalid') }).Count -eq 0
         }
     )
     $sortedEntries = @(Sort-RouterCatalogObjectsOrdinal -Values $validEntries -KeySelector { param($entry) $entry.identity })
@@ -768,6 +811,6 @@ function Import-RouterProfileCatalog {
         errors = $sortedErrors
     }
     } finally {
-        Remove-Module -ModuleInfo $schemaModule -Force -ErrorAction SilentlyContinue
+        Microsoft.PowerShell.Core\Remove-Module -ModuleInfo $schemaModule -Force -ErrorAction SilentlyContinue
     }
 }

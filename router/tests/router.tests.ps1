@@ -794,6 +794,20 @@ Invoke-Assertion 'pricing snapshot rejects gaps and overlaps between effective d
     }
 }
 
+Invoke-Assertion 'pricing snapshot rejects an impossible successor after the maximum calendar date without throwing' {
+    Assert-PricingSnapshotMutationRejected -Mutation {
+        param($snapshot)
+        $snapshot.snapshot_date = '9999-12-30'
+        $first = $snapshot.schedules[0].rate_periods[0]
+        $first.effective_from = '9999-12-30'
+        $first.effective_through = '9999-12-31'
+        $second = Copy-TestObject $first
+        $second.effective_from = '9999-12-31'
+        $second.effective_through = $null
+        $snapshot.schedules[0].rate_periods = @($first, $second)
+    }
+}
+
 Invoke-Assertion 'pricing snapshot rejects negative and nonintegral token bounds' {
     Assert-PricingSnapshotMutationRejected -Mutation {
         param($snapshot)
@@ -858,6 +872,31 @@ Invoke-Assertion 'pricing snapshot requires schedule source and retrieval metada
     Assert-PricingSnapshotMutationRejected -Mutation {
         param($snapshot)
         $snapshot.schedules[0].retrieved_on = ''
+    }
+}
+
+Invoke-Assertion 'pricing snapshot schedule sources must be absolute HTTP URLs' {
+    Assert-PricingSnapshotMutationRejected -Mutation {
+        param($snapshot)
+        $snapshot.schedules[0].source_url = 'ftp://fixtures.invalid/pricing/shared-model'
+    }
+}
+
+Invoke-Assertion 'pricing snapshot corroborating sources are strict HTTP URL arrays' {
+    Assert-PricingSnapshotMutationRejected -Mutation {
+        param($snapshot)
+        $snapshot.schedules[0] | Add-Member -NotePropertyName corroborating_source_urls -NotePropertyValue 'https://fixtures.invalid/corroboration'
+    }
+    Assert-PricingSnapshotMutationRejected -Mutation {
+        param($snapshot)
+        $snapshot.schedules[0] | Add-Member -NotePropertyName corroborating_source_urls -NotePropertyValue @(
+            'https://fixtures.invalid/corroboration'
+            'ftp://fixtures.invalid/not-http'
+        )
+    }
+    Assert-PricingSnapshotMutationRejected -Mutation {
+        param($snapshot)
+        $snapshot.schedules[0] | Add-Member -NotePropertyName source_urll -NotePropertyValue 'https://fixtures.invalid/typo'
     }
 }
 
@@ -1637,6 +1676,89 @@ Invoke-Assertion 'catalog schema validation cannot be bypassed by an ambient sha
             }
         } finally {
             $script:RouterSchemaContextCache = $originalSchemaCache
+        }
+    }
+}
+
+Invoke-Assertion 'catalog module creation cannot be bypassed by ambient New-Module shadowing' {
+    if (-not $profilesAvailable) { throw 'Import-RouterProfileCatalog is unavailable.' }
+    Invoke-WithTemporaryCatalog {
+        param($root, $testPricingPath, $testQualityPath)
+        $testMatrixPath = Join-Path $root 'matrix.json'
+        Write-TestJson -Path $testMatrixPath -Value (New-TestMatrix)
+        $invalidProfile = Copy-TestObject @(Get-MinimalProfiles)[0]
+        $invalidProfile.quality.task_types.PSObject.Properties.Remove('coding')
+        Write-TestJson -Path (Join-Path $root 'profiles/agy/shared-model__medium.json') -Value $invalidProfile
+
+        $shadowModuleName = 'RouterSchemaShadowProbe_{0}' -f [guid]::NewGuid().ToString('N')
+        $shadowModule = Microsoft.PowerShell.Core\New-Module -Name $shadowModuleName -ScriptBlock {
+            function Test-RouterSchema {
+                [pscustomobject]@{ valid = $true; errors = @(); shadow = $true }
+            }
+            Microsoft.PowerShell.Core\Export-ModuleMember -Function @() -Variable @()
+        }
+        $originalSchemaCache = $script:RouterSchemaContextCache
+        $schemaCacheSentinel = [pscustomobject]@{ marker = 'caller-cache-sentinel' }
+        $script:RouterSchemaContextCache = $schemaCacheSentinel
+        try {
+            & {
+                function New-Module { $shadowModule }
+
+                $locationBefore = (Get-Location).Path
+                $privateModuleCountBefore = @(Get-Module -Name 'RouterSchemaValidation_*').Count
+                $catalog = Import-TestRouterProfileCatalog -ProfilesRoot (Join-Path $root 'profiles') -MatrixPath $testMatrixPath -ProfileSchemaPath $profileSchemaPath -PricingSnapshotPath $testPricingPath -QualitySnapshotPath $testQualityPath
+                Assert-Equal $catalog.valid $false
+                Assert-CatalogError -Catalog $catalog -Code 'profile_schema_invalid'
+                Assert-Equal (Get-Location).Path $locationBefore
+                Assert-Equal ([object]::ReferenceEquals((New-Module), $shadowModule)) $true
+                Assert-Equal ([object]::ReferenceEquals($script:RouterSchemaContextCache, $schemaCacheSentinel)) $true
+                Assert-Equal @(Get-Module -Name 'RouterSchemaValidation_*').Count $privateModuleCountBefore
+            }
+        } finally {
+            $script:RouterSchemaContextCache = $originalSchemaCache
+            Microsoft.PowerShell.Core\Remove-Module -ModuleInfo $shadowModule -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+Invoke-Assertion 'catalog semantically validates embedded provider and benchmark provenance' {
+    if (-not $profilesAvailable) { throw 'Import-RouterProfileCatalog is unavailable.' }
+    Invoke-WithTemporaryCatalog {
+        param($root, $testPricingPath, $testQualityPath)
+        $testMatrixPath = Join-Path $root 'matrix.json'
+        Write-TestJson -Path $testMatrixPath -Value (New-TestMatrix)
+
+        $baseProfile = Copy-TestObject @(Get-MinimalProfiles)[0]
+        foreach ($mapName in $requiredQualityKeys.Keys) {
+            foreach ($qualityKey in $requiredQualityKeys[$mapName]) {
+                $baseProfile.quality.$mapName.$qualityKey = 'unknown'
+            }
+        }
+        $baseProfile.evidence.artificial_analysis.exact_model_match = $false
+        $baseProfile.evidence.artificial_analysis.exact_effort_match = $false
+        $baseProfile.evidence.artificial_analysis.benchmark_slice = 'unavailable'
+
+        $qualitySnapshot = New-TestQualitySnapshot
+        $qualitySnapshot.records[0].exact_model_match = $false
+        $qualitySnapshot.records[0].exact_effort_match = $false
+        $qualitySnapshot.records[0].benchmark_slice = 'unavailable'
+        $qualitySnapshot.records[0].provisional_category = 'unknown'
+        $qualitySnapshot.records[0].quality_authorizations = @()
+        Write-TestJson -Path $testQualityPath -Value $qualitySnapshot
+
+        $cases = @(
+            [pscustomobject]@{ code = 'profile_provider_evidence_invalid'; mutation = { param($profile) $profile.evidence.provider.source_url = 'ftp://fixtures.invalid/provider' } }
+            [pscustomobject]@{ code = 'profile_provider_evidence_invalid'; mutation = { param($profile) $profile.evidence.provider.retrieved_on = 'not-a-date' } }
+            [pscustomobject]@{ code = 'profile_artificial_analysis_evidence_invalid'; mutation = { param($profile) $profile.evidence.artificial_analysis.source_url = 'ftp://fixtures.invalid/benchmark' } }
+            [pscustomobject]@{ code = 'profile_artificial_analysis_evidence_invalid'; mutation = { param($profile) $profile.evidence.artificial_analysis.retrieved_on = 'not-a-date' } }
+        )
+        foreach ($case in $cases) {
+            $profile = Copy-TestObject $baseProfile
+            & $case.mutation $profile
+            Write-TestJson -Path (Join-Path $root 'profiles/agy/shared-model__medium.json') -Value $profile
+            $catalog = Import-RouterProfileCatalog -ProfilesRoot (Join-Path $root 'profiles') -MatrixPath $testMatrixPath -ProfileSchemaPath $profileSchemaPath -PricingSnapshotPath $testPricingPath -QualitySnapshotPath $testQualityPath
+            Assert-Equal $catalog.valid $false
+            Assert-CatalogError -Catalog $catalog -Code $case.code
         }
     }
 }
