@@ -1,0 +1,107 @@
+{
+  "router_policy_version": "deterministic-policy-router/v1",
+  "profile_schema_version": "router-model-profile/v1",
+  "model_profile_version": "minimal-fixture-v1",
+  "pricing_snapshot_date": "2026-08-22",
+  "quality_snapshot_date": "2026-08-22",
+  "calibration_set_version": "calibration-set-v1",
+  "configuration_id": "shared-model__medium",
+  "launcher": "codex",
+  "provider": "openai",
+  "model": "shared-model",
+  "effort": "medium",
+  "enabled": true,
+  "availability": "available",
+  "supports": {
+    "input_modalities": ["text"],
+    "output_modalities": ["text"],
+    "languages": ["english"],
+    "single_turn": true,
+    "context_window_tokens": 128000,
+    "maximum_output_tokens": 8192
+  },
+  "quality": {
+    "task_types": {
+      "general": "strong",
+      "coding": "strong",
+      "math": "strong",
+      "reasoning": "strong",
+      "writing": "strong",
+      "summarization": "strong",
+      "extraction": "strong",
+      "research_synthesis": "strong"
+    },
+    "domains": {
+      "general": "strong",
+      "computer_science": "strong",
+      "mathematics": "strong",
+      "physics": "strong",
+      "chemistry": "strong",
+      "biology": "strong",
+      "medicine": "strong",
+      "engineering": "strong",
+      "social_science": "strong",
+      "humanities": "strong",
+      "business": "strong",
+      "finance": "strong",
+      "law": "strong"
+    },
+    "complexities": {
+      "low": "strong",
+      "medium": "strong",
+      "high": "strong"
+    },
+    "capabilities": {
+      "instruction_following": "strong",
+      "reasoning": "strong",
+      "structured_output": "strong",
+      "factual_reliability": "strong",
+      "source_grounded_synthesis": "strong",
+      "long_context": "strong"
+    }
+  },
+  "pricing": {
+    "currency": "USD",
+    "rate_unit": "per_million_tokens",
+    "input_usd_per_million_tokens": 1.0,
+    "output_usd_per_million_tokens": 5.0,
+    "effective_from": "2026-08-22",
+    "effective_through": null
+  },
+  "token_consumption_observations": [
+    {
+      "model": "shared-model",
+      "effort": "medium",
+      "request_profile_group": "coding|computer_science|medium|normal",
+      "estimated_input_tokens": 1000,
+      "estimated_visible_output_tokens": 500,
+      "estimated_reasoning_tokens": 250,
+      "observed_on": "2026-08-22"
+    }
+  ],
+  "latency_observation": {
+    "metric": "end_to_end",
+    "milliseconds": 1000,
+    "sample_count": 1,
+    "observed_on": "2026-08-22"
+  },
+  "evidence": {
+    "provider": {
+      "source_url": "https://fixtures.invalid/providers/openai/shared-model",
+      "retrieved_on": "2026-08-22",
+      "fixture_only": true
+    },
+    "artificial_analysis": {
+      "source_url": "https://fixtures.invalid/artificial-analysis/shared-model-medium",
+      "retrieved_on": "2026-08-22",
+      "exact_model_match": true,
+      "exact_effort_match": true,
+      "benchmark_slice": "minimal-tied-policy-fixture",
+      "fixture_only": true
+    }
+  },
+  "calibration": {
+    "status": "pending",
+    "version": "calibration-set-v1"
+  }
+}
