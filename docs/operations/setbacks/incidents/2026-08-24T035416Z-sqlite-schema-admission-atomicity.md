@@ -1,6 +1,6 @@
 # SB-20260824-035416-sqlite-schema-admission-atomicity: SQLite schema admission was not exact or atomic
 
-- **Status:** open
+- **Status:** closed
 - **First observed:** 2026-08-24T03:54:16.235083Z
 - **Last observed:** 2026-08-24T03:54:16.235083Z
 - **Phase/task:** Task 7 post-implementation review
@@ -36,15 +36,16 @@ A temporary version-0 database containing a legacy table, version-1 databases wi
 
 ## Correction and prevention
 
-- **Correction:** Pending exact schema admission, one schema-plus-write transaction, and ordered trace-state validation.
+- **Correction:** Product commit `44d920a` added exact V1 schema fingerprint admission, rejected nonempty V0 and malformed or unsupported schemas without mutation, made schema setup and the first trace write one transaction, and enforced the ordered candidate state machine plus selected-winner metadata equality.
 - **Prevention:** Keep temporary malformed-schema and adversarial state-machine fixtures in the Task 7 Python suite.
 - **Owner:** Codex and project owner.
-- **Next diagnostic step:** Implement the minimum writer changes and rerun the targeted and full acceptance suites.
+- **Next diagnostic step:** None; retain the regression fixtures.
 
 ## Verification and related work
 
-Pending.
+The bundled-Python suite passed all 29 tests. The full router PowerShell suite exited 0, including the stdin bridge. A fresh acceptance database reported `user_version=1`, an exact schema fingerprint, only the two approved tables and five approved user indexes, and the approved candidate foreign key. `git diff --check` passed and no SQLite runtime file was tracked.
 
 ## Recurrence history
 
 - 2026-08-24T03:54:16.235083Z: First observed.
+- 2026-08-24: Closed after product commit `44d920a` and final acceptance verification.
