@@ -2,7 +2,7 @@
 
 - **Status:** closed
 - **First observed:** 2026-08-24T16:00:12Z
-- **Last observed:** 2026-08-24T16:00:12Z
+- **Last observed:** 2026-08-24T23:39:37Z
 - **Phase/task:** Task 8 completed-path SQLite acceptance
 - **Environment:** Windows PowerShell 7 and bundled Python, deterministic-router-v1 worktree
 - **Version/commit:** `2363d19` plus uncommitted Task 8 work
@@ -29,6 +29,7 @@ The Task 7 storage schema keeps candidate pricing metadata in `price_json`; it d
 2. The first inspection query assumed direct token columns and failed.
 3. Schema inspection confirmed that token metadata belongs in `price_json`.
 4. The corrected query decoded `price_json` and observed integral counts `[100, 20, 5, 25]` for input, visible output, reasoning, and billable output tokens.
+5. During Task 10 offline acceptance, a follow-up inspection query assumed `selected_candidate`, `candidate_evaluation_count`, and derived eligibility column names. `PRAGMA table_info` confirmed the contracted names are `selected_candidate_identity`, `candidate_count`, `eligible`, `requirements_passed`, `quality_passed`, and `rejection_reason_codes_json`.
 
 ## Cause classification
 
@@ -51,3 +52,4 @@ The corrected direct acceptance stored one completed decision and one selected c
 ## Recurrence history
 
 - 2026-08-24T16:00:12Z: First observed, corrected, and closed.
+- 2026-08-24T23:39:37Z: Recurred in the Task 10 disposable acceptance query after the trace write succeeded. Contained to the temporary database; schema inspection identified the exact contracted columns before the query was retried.
