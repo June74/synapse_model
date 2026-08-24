@@ -21,6 +21,7 @@ Set-Location $projectRoot
 $schemaModulePath = Join-Path $projectRoot 'router/lib/schema.ps1'
 $profilesModulePath = Join-Path $projectRoot 'router/lib/profiles.ps1'
 $requirementsModulePath = Join-Path $projectRoot 'router/lib/requirements.ps1'
+$qualityModulePath = Join-Path $projectRoot 'router/lib/quality.ps1'
 $policyModulePath = Join-Path $projectRoot 'router/lib/policy.ps1'
 $requestSchemaPath = Join-Path $projectRoot 'router/schemas/request-profile.schema.json'
 $profileSchemaPath = Join-Path $projectRoot 'router/schemas/model-profile.schema.json'
@@ -60,6 +61,12 @@ $requirementsAvailable = Test-Path -LiteralPath $requirementsModulePath -PathTyp
 if ($requirementsAvailable) {
     . $requirementsModulePath
 }
+$qualityAvailable = Test-Path -LiteralPath $qualityModulePath -PathType Leaf
+if (-not $qualityAvailable) {
+    [Console]::Error.WriteLine('RED: Task 5 quality module missing (router/lib/quality.ps1)')
+    exit 1
+}
+. $qualityModulePath
 $policyAvailable = Test-Path -LiteralPath $policyModulePath -PathType Leaf
 $task4Assertions = {
 Invoke-Assertion 'Task 4 requirements module is available' {
@@ -938,6 +945,34 @@ function Get-CompositeIdentity {
     param([Parameter(Mandatory)][object]$Candidate)
 
     return '{0}|{1}' -f $Candidate.launcher, $Candidate.configuration_id
+}
+
+function Set-TestRelevantQuality {
+    param(
+        [Parameter(Mandatory)][object]$Candidate,
+        [Parameter(Mandatory)][object]$Request,
+        [Parameter(Mandatory)][string[]]$RequiredCapabilities,
+        [Parameter(Mandatory)][string]$Category
+    )
+
+    $Candidate.quality.task_types.($Request.task_type) = $Category
+    $Candidate.quality.domains.($Request.domain) = $Category
+    $Candidate.quality.complexities.($Request.complexity) = $Category
+    foreach ($capability in $RequiredCapabilities) {
+        $Candidate.quality.capabilities.($capability) = $Category
+    }
+}
+
+function Reverse-TestPropertyOrder {
+    param([Parameter(Mandatory)][object]$Value)
+
+    $reversed = [ordered]@{}
+    [string[]]$names = @($Value.PSObject.Properties.Name)
+    [array]::Reverse($names)
+    foreach ($name in $names) {
+        $reversed[$name] = $Value.$name
+    }
+    return [pscustomobject]$reversed
 }
 
 function New-MinimalRuntimeState {
@@ -3163,6 +3198,298 @@ Invoke-Assertion 'Equals-throwing CLR candidate is rejected without invoking Equ
 }
 
 & $task4Assertions
+
+$qualityCapabilities = @('instruction_following', 'reasoning', 'factual_reliability')
+
+Invoke-Assertion 'Task 5 quality evaluator returns a stable auditable output shape' {
+    $request = New-MinimalRequest
+    $candidate = Copy-TestObject @(Get-MinimalProfiles)[0]
+    Set-TestRelevantQuality -Candidate $candidate -Request $request `
+        -RequiredCapabilities $qualityCapabilities -Category 'strong'
+
+    $evaluation = Test-RouterCandidateQuality -Candidate $candidate -Request $request `
+        -RequiredCapabilities $qualityCapabilities
+
+    Assert-SequenceEqual @($evaluation.PSObject.Properties.Name) @(
+        'candidate_identity'
+        'passed'
+        'reason_code'
+        'effective_quality'
+        'quality_bottleneck'
+        'relevant_categories'
+    )
+    Assert-Equal $evaluation.candidate_identity 'agy|shared-model__medium'
+    Assert-Equal $evaluation.passed $true
+    Assert-Equal $evaluation.reason_code $null
+    Assert-Equal $evaluation.effective_quality 'strong'
+    Assert-Equal $evaluation.quality_bottleneck 'task_type.coding'
+    Assert-SequenceEqual @($evaluation.relevant_categories | ForEach-Object { $_.key }) @(
+        'task_type.coding'
+        'domain.computer_science'
+        'complexity.medium'
+        'instruction_following'
+        'reasoning'
+        'factual_reliability'
+    )
+    Assert-SequenceEqual @($evaluation.relevant_categories | ForEach-Object { $_.category }) @(
+        'strong'
+        'strong'
+        'strong'
+        'strong'
+        'strong'
+        'strong'
+    )
+    foreach ($entry in @($evaluation.relevant_categories)) {
+        Assert-SequenceEqual @($entry.PSObject.Properties.Name) @('key', 'category')
+    }
+}
+
+$qualityFloorCases = @(
+    [pscustomobject]@{ floor = 'standard'; category = 'standard'; passed = $true }
+    [pscustomobject]@{ floor = 'standard'; category = 'strong'; passed = $true }
+    [pscustomobject]@{ floor = 'standard'; category = 'frontier'; passed = $true }
+    [pscustomobject]@{ floor = 'strong'; category = 'standard'; passed = $false }
+    [pscustomobject]@{ floor = 'strong'; category = 'strong'; passed = $true }
+    [pscustomobject]@{ floor = 'strong'; category = 'frontier'; passed = $true }
+    [pscustomobject]@{ floor = 'frontier'; category = 'standard'; passed = $false }
+    [pscustomobject]@{ floor = 'frontier'; category = 'strong'; passed = $false }
+    [pscustomobject]@{ floor = 'frontier'; category = 'frontier'; passed = $true }
+)
+foreach ($qualityFloorCase in $qualityFloorCases) {
+    Invoke-Assertion ("quality floor {0} evaluates category {1} by standard less than strong less than frontier" -f `
+        $qualityFloorCase.floor, $qualityFloorCase.category) {
+        $request = New-MinimalRequest
+        $request.quality_floor = $qualityFloorCase.floor
+        $candidate = Copy-TestObject @(Get-MinimalProfiles)[0]
+        Set-TestRelevantQuality -Candidate $candidate -Request $request `
+            -RequiredCapabilities $qualityCapabilities -Category $qualityFloorCase.category
+
+        $evaluation = Test-RouterCandidateQuality -Candidate $candidate -Request $request `
+            -RequiredCapabilities $qualityCapabilities
+
+        Assert-Equal $evaluation.passed $qualityFloorCase.passed
+        Assert-Equal $evaluation.effective_quality $qualityFloorCase.category
+        Assert-Equal $evaluation.quality_bottleneck 'task_type.coding'
+        $expectedReason = if ($qualityFloorCase.passed) { $null } else { 'quality_floor_not_met' }
+        Assert-Equal $evaluation.reason_code $expectedReason
+    }
+}
+
+$qualityBottleneckCases = @(
+    [pscustomobject]@{
+        name = 'task type'
+        key = 'task_type.coding'
+        mutate = { param($candidate, $request) $candidate.quality.task_types.($request.task_type) = 'standard' }
+    }
+    [pscustomobject]@{
+        name = 'domain'
+        key = 'domain.computer_science'
+        mutate = { param($candidate, $request) $candidate.quality.domains.($request.domain) = 'standard' }
+    }
+    [pscustomobject]@{
+        name = 'complexity'
+        key = 'complexity.medium'
+        mutate = { param($candidate, $request) $candidate.quality.complexities.($request.complexity) = 'standard' }
+    }
+    [pscustomobject]@{
+        name = 'capability'
+        key = 'reasoning'
+        mutate = { param($candidate, $request) $candidate.quality.capabilities.reasoning = 'standard' }
+    }
+)
+foreach ($qualityBottleneckCase in $qualityBottleneckCases) {
+    Invoke-Assertion ("quality reports the exact {0} bottleneck key" -f $qualityBottleneckCase.name) {
+        $request = New-MinimalRequest
+        $request.quality_floor = 'standard'
+        $candidate = Copy-TestObject @(Get-MinimalProfiles)[0]
+        Set-TestRelevantQuality -Candidate $candidate -Request $request `
+            -RequiredCapabilities $qualityCapabilities -Category 'frontier'
+        & $qualityBottleneckCase.mutate $candidate $request
+
+        $evaluation = Test-RouterCandidateQuality -Candidate $candidate -Request $request `
+            -RequiredCapabilities $qualityCapabilities
+
+        Assert-Equal $evaluation.passed $true
+        Assert-Equal $evaluation.effective_quality 'standard'
+        Assert-Equal $evaluation.quality_bottleneck $qualityBottleneckCase.key
+    }
+}
+
+Invoke-Assertion 'quality tie order ignores profile property order and follows task domain complexity' {
+    $request = New-MinimalRequest
+    $request.quality_floor = 'standard'
+    $candidate = Copy-TestObject @(Get-MinimalProfiles)[0]
+    Set-TestRelevantQuality -Candidate $candidate -Request $request `
+        -RequiredCapabilities $qualityCapabilities -Category 'standard'
+    $candidate.quality.task_types = Reverse-TestPropertyOrder $candidate.quality.task_types
+    $candidate.quality.domains = Reverse-TestPropertyOrder $candidate.quality.domains
+    $candidate.quality.complexities = Reverse-TestPropertyOrder $candidate.quality.complexities
+    $candidate.quality.capabilities = Reverse-TestPropertyOrder $candidate.quality.capabilities
+
+    $evaluation = Test-RouterCandidateQuality -Candidate $candidate -Request $request `
+        -RequiredCapabilities $qualityCapabilities
+
+    Assert-Equal $evaluation.quality_bottleneck 'task_type.coding'
+}
+
+Invoke-Assertion 'quality capability ties follow canonical incoming capability order' {
+    $request = New-MinimalRequest
+    $request.quality_floor = 'standard'
+    $incomingCapabilities = @('reasoning', 'instruction_following')
+    $candidate = Copy-TestObject @(Get-MinimalProfiles)[0]
+    Set-TestRelevantQuality -Candidate $candidate -Request $request `
+        -RequiredCapabilities $incomingCapabilities -Category 'standard'
+    $candidate.quality.task_types.coding = 'frontier'
+    $candidate.quality.domains.computer_science = 'frontier'
+    $candidate.quality.complexities.medium = 'frontier'
+    $candidate.quality.capabilities = Reverse-TestPropertyOrder $candidate.quality.capabilities
+
+    $evaluation = Test-RouterCandidateQuality -Candidate $candidate -Request $request `
+        -RequiredCapabilities $incomingCapabilities
+
+    Assert-SequenceEqual @($evaluation.relevant_categories | ForEach-Object { $_.key }) @(
+        'task_type.coding'
+        'domain.computer_science'
+        'complexity.medium'
+        'reasoning'
+        'instruction_following'
+    )
+    Assert-Equal $evaluation.quality_bottleneck 'reasoning'
+}
+
+$qualityEvidenceDimensionCases = @(
+    [pscustomobject]@{
+        name = 'task type'
+        key = 'task_type.coding'
+        mutate = { param($candidate, $category) $candidate.quality.task_types.coding = $category }
+    }
+    [pscustomobject]@{
+        name = 'domain'
+        key = 'domain.computer_science'
+        mutate = { param($candidate, $category) $candidate.quality.domains.computer_science = $category }
+    }
+    [pscustomobject]@{
+        name = 'complexity'
+        key = 'complexity.medium'
+        mutate = { param($candidate, $category) $candidate.quality.complexities.medium = $category }
+    }
+    [pscustomobject]@{
+        name = 'capability'
+        key = 'reasoning'
+        mutate = { param($candidate, $category) $candidate.quality.capabilities.reasoning = $category }
+    }
+)
+$qualityFailureStates = @(
+    [pscustomobject]@{ category = 'unknown'; reason = 'quality_evidence_unknown' }
+    [pscustomobject]@{ category = 'unsupported'; reason = 'required_capability_unavailable' }
+)
+foreach ($qualityFailureState in $qualityFailureStates) {
+    foreach ($qualityEvidenceDimensionCase in $qualityEvidenceDimensionCases) {
+        Invoke-Assertion ("quality rejects {0} relevant evidence in the {1} family" -f `
+            $qualityFailureState.category, $qualityEvidenceDimensionCase.name) {
+            $request = New-MinimalRequest
+            $request.quality_floor = 'standard'
+            $candidate = Copy-TestObject @(Get-MinimalProfiles)[0]
+            Set-TestRelevantQuality -Candidate $candidate -Request $request `
+                -RequiredCapabilities $qualityCapabilities -Category 'strong'
+            & $qualityEvidenceDimensionCase.mutate $candidate $qualityFailureState.category
+
+            $evaluation = Test-RouterCandidateQuality -Candidate $candidate -Request $request `
+                -RequiredCapabilities $qualityCapabilities
+
+            Assert-Equal $evaluation.passed $false
+            Assert-Equal $evaluation.reason_code $qualityFailureState.reason
+            Assert-Equal $evaluation.effective_quality $null
+            Assert-Equal $evaluation.quality_bottleneck $qualityEvidenceDimensionCase.key
+        }
+    }
+}
+
+Invoke-Assertion 'quality failure precedence is unsupported then unknown then below floor' {
+    $request = New-MinimalRequest
+    $request.quality_floor = 'frontier'
+    $candidate = Copy-TestObject @(Get-MinimalProfiles)[0]
+    Set-TestRelevantQuality -Candidate $candidate -Request $request `
+        -RequiredCapabilities $qualityCapabilities -Category 'strong'
+    $candidate.quality.task_types.coding = 'standard'
+    $candidate.quality.domains.computer_science = 'unknown'
+    $candidate.quality.capabilities.reasoning = 'unsupported'
+
+    $unsupported = Test-RouterCandidateQuality -Candidate $candidate -Request $request `
+        -RequiredCapabilities $qualityCapabilities
+    Assert-Equal $unsupported.reason_code 'required_capability_unavailable'
+    Assert-Equal $unsupported.quality_bottleneck 'reasoning'
+    Assert-Equal $unsupported.effective_quality $null
+
+    $candidate.quality.capabilities.reasoning = 'strong'
+    $unknown = Test-RouterCandidateQuality -Candidate $candidate -Request $request `
+        -RequiredCapabilities $qualityCapabilities
+    Assert-Equal $unknown.reason_code 'quality_evidence_unknown'
+    Assert-Equal $unknown.quality_bottleneck 'domain.computer_science'
+    Assert-Equal $unknown.effective_quality $null
+
+    $candidate.quality.domains.computer_science = 'strong'
+    $belowFloor = Test-RouterCandidateQuality -Candidate $candidate -Request $request `
+        -RequiredCapabilities $qualityCapabilities
+    Assert-Equal $belowFloor.reason_code 'quality_floor_not_met'
+    Assert-Equal $belowFloor.effective_quality 'standard'
+    Assert-Equal $belowFloor.quality_bottleneck 'task_type.coding'
+}
+
+Invoke-Assertion 'quality ignores lower unknown and unsupported values in every irrelevant profile map' {
+    $request = New-MinimalRequest
+    $request.quality_floor = 'frontier'
+    $candidate = Copy-TestObject @(Get-MinimalProfiles)[0]
+    Set-TestRelevantQuality -Candidate $candidate -Request $request `
+        -RequiredCapabilities $qualityCapabilities -Category 'frontier'
+    $candidate.quality.task_types.general = 'standard'
+    $candidate.quality.domains.finance = 'unknown'
+    $candidate.quality.complexities.low = 'unsupported'
+    $candidate.quality.capabilities.structured_output = 'standard'
+    $candidate.quality.capabilities.source_grounded_synthesis = 'unknown'
+    $candidate.quality.capabilities.long_context = 'unsupported'
+
+    $evaluation = Test-RouterCandidateQuality -Candidate $candidate -Request $request `
+        -RequiredCapabilities $qualityCapabilities
+
+    Assert-Equal $evaluation.passed $true
+    Assert-Equal $evaluation.reason_code $null
+    Assert-Equal $evaluation.effective_quality 'frontier'
+    Assert-Equal $evaluation.quality_bottleneck 'task_type.coding'
+    Assert-SequenceEqual @($evaluation.relevant_categories | ForEach-Object { $_.key }) @(
+        'task_type.coding'
+        'domain.computer_science'
+        'complexity.medium'
+        'instruction_following'
+        'reasoning'
+        'factual_reliability'
+    )
+}
+
+Invoke-Assertion 'quality evaluates one complete profile without price latency provider or availability factors' {
+    $request = New-MinimalRequest
+    $request.quality_floor = 'strong'
+    $candidate = Copy-TestObject @(Get-MinimalProfiles)[0]
+    Set-TestRelevantQuality -Candidate $candidate -Request $request `
+        -RequiredCapabilities $qualityCapabilities -Category 'strong'
+    $candidate.enabled = $false
+    $candidate.availability = 'unavailable'
+    $candidate.provider = 'irrelevant-provider'
+    $candidate.model = 'irrelevant-model'
+    $candidate.effort = 'irrelevant-effort'
+    $candidate.pricing.cost_comparable = $false
+    $candidate.pricing.input_usd_per_million_tokens = $null
+    $candidate.pricing.output_usd_per_million_tokens = $null
+    $candidate.latency_observation.available = $false
+    $candidate.latency_observation.milliseconds = $null
+
+    $evaluation = Test-RouterCandidateQuality -Candidate $candidate -Request $request `
+        -RequiredCapabilities $qualityCapabilities
+
+    Assert-Equal $evaluation.candidate_identity 'agy|shared-model__medium'
+    Assert-Equal $evaluation.passed $true
+    Assert-Equal $evaluation.effective_quality 'strong'
+}
 
 if ($policyAvailable) {
     Invoke-Assertion 'stable identity is ascending ordinal launcher|configuration_id' {
