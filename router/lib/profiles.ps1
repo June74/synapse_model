@@ -93,7 +93,12 @@ function Test-RouterCatalogNonnegativeNumber {
         $Value -isnot [decimal] -and $Value -isnot [Numerics.BigInteger]) { return $false }
     if ($Value -is [double] -and ([double]::IsNaN($Value) -or [double]::IsInfinity($Value))) { return $false }
     if ($Value -is [single] -and ([single]::IsNaN($Value) -or [single]::IsInfinity($Value))) { return $false }
-    return $Value -ge 0
+    try {
+        [decimal]$decimalValue = $Value
+        return $decimalValue -ge 0
+    } catch {
+        return $false
+    }
 }
 
 function Test-RouterCatalogPositiveInteger {
@@ -221,6 +226,7 @@ function Test-RouterPricingSnapshotObject {
 
     $errors = [Collections.Generic.List[object]]::new()
     $pricingByProfileModel = [Collections.Generic.Dictionary[string, object]]::new([StringComparer]::Ordinal)
+    $pricingScheduleIdentities = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
     $requiredPricingSnapshotFields = @('snapshot_date', 'retrieved_on', 'currency', 'rate_unit', 'policy', 'schedules')
     $missingPricingSnapshotFields = if ($null -eq $PricingSnapshot) {
         $requiredPricingSnapshotFields
@@ -301,6 +307,11 @@ function Test-RouterPricingSnapshotObject {
             continue
         }
 
+        $scheduleIdentity = '{0}|{1}' -f $schedule.provider, $schedule.model
+        if (-not $pricingScheduleIdentities.Add($scheduleIdentity)) {
+            $errors.Add((New-RouterCatalogError -Code 'pricing_snapshot_duplicate_schedule' -File $SourceFile -Path $schedulePath -Identity $scheduleIdentity -Message 'More than one pricing schedule uses this provider and canonical model identity.'))
+        }
+
         $periodsByEffectiveInterval = [Collections.Generic.Dictionary[string, Collections.Generic.List[object]]]::new([StringComparer]::Ordinal)
         $effectiveIntervals = [Collections.Generic.Dictionary[string, object]]::new([StringComparer]::Ordinal)
         $periodIndex = 0
@@ -361,8 +372,14 @@ function Test-RouterPricingSnapshotObject {
                         $partitionValid = $null -eq $current.input_tokens_max
                     } else {
                         $next = $partition[$partitionIndex + 1].value
-                        $partitionValid = $null -ne $current.input_tokens_max -and
-                            [decimal]$next.input_tokens_min -eq ([decimal]$current.input_tokens_max + 1)
+                        if ($null -eq $current.input_tokens_max) {
+                            $partitionValid = $false
+                        } else {
+                            [decimal]$currentMaximum = $current.input_tokens_max
+                            [decimal]$nextMinimum = $next.input_tokens_min
+                            $partitionValid = $currentMaximum -lt [decimal]::MaxValue -and
+                                ($nextMinimum - $currentMaximum) -eq 1
+                        }
                     }
                 }
                 if (-not $partitionValid) {

@@ -1605,6 +1605,21 @@ Invoke-Assertion 'pricing snapshot rejects overlapping and gapped token partitio
     }
 }
 
+Invoke-Assertion 'direct pricing snapshot validation rejects a non-final decimal MaxValue token bound without throwing' {
+    $snapshot = New-TestPricingSnapshot
+    $first = $snapshot.schedules[0].rate_periods[0]
+    $first.input_tokens_max = [decimal]::MaxValue
+    $second = Copy-TestObject $first
+    $second.input_tokens_min = [decimal]::MaxValue
+    $second.input_tokens_max = $null
+    $snapshot.schedules[0].rate_periods = @($first, $second)
+
+    $validation = Test-RouterPricingSnapshotObject -PricingSnapshot $snapshot
+
+    Assert-Equal $validation.valid $false
+    Assert-CatalogError -Catalog $validation -Code 'pricing_snapshot_invalid'
+}
+
 Invoke-Assertion 'pricing snapshot requires real arrays for schedules models and periods' {
     Assert-PricingSnapshotMutationRejected -Mutation {
         param($snapshot)
@@ -1627,6 +1642,18 @@ Invoke-Assertion 'pricing snapshot rejects duplicate profile-model mappings' {
         $duplicate.model = 'duplicate-schedule'
         $snapshot.schedules = @($snapshot.schedules[0], $duplicate)
     }
+}
+
+Invoke-Assertion 'direct pricing snapshot validation rejects duplicate provider and canonical model schedules' {
+    $snapshot = New-TestPricingSnapshot
+    $duplicate = Copy-TestObject $snapshot.schedules[0]
+    $duplicate.profile_models = @('disjoint-profile-model-alias')
+    $snapshot.schedules = @($snapshot.schedules[0], $duplicate)
+
+    $validation = Test-RouterPricingSnapshotObject -PricingSnapshot $snapshot
+
+    Assert-Equal $validation.valid $false
+    Assert-CatalogError -Catalog $validation -Code 'pricing_snapshot_duplicate_schedule'
 }
 
 Invoke-Assertion 'pricing snapshot requires schedule source and retrieval metadata' {
@@ -4151,10 +4178,31 @@ foreach ($invalidPolicyPartitionCase in $invalidPolicyPartitionCases) {
     }
 }
 
+Invoke-Assertion 'policy rejects a non-final decimal MaxValue token bound without throwing' {
+    $snapshot = New-TestPolicyPricingSnapshot
+    $first = $snapshot.schedules[0].rate_periods[0]
+    $first.input_tokens_max = [decimal]::MaxValue
+    $second = Copy-TestObject $first
+    $second.input_tokens_min = [decimal]::MaxValue
+    $second.input_tokens_max = $null
+    $snapshot.schedules[0].rate_periods = @($first, $second)
+
+    Assert-PolicyPricingSnapshotRejected -PricingSnapshot $snapshot
+}
+
 Invoke-Assertion 'policy rejects duplicate applicable schedules before ranking' {
     $snapshot = New-TestPolicyPricingSnapshot
     $duplicate = Copy-TestObject $snapshot.schedules[0]
     $duplicate.model = 'duplicate-google-schedule'
+    $snapshot.schedules = @($snapshot.schedules + $duplicate)
+
+    Assert-PolicyPricingSnapshotRejected -PricingSnapshot $snapshot
+}
+
+Invoke-Assertion 'policy rejects duplicate provider and canonical model schedules with disjoint aliases' {
+    $snapshot = New-TestPolicyPricingSnapshot
+    $duplicate = Copy-TestObject $snapshot.schedules[0]
+    $duplicate.profile_models = @('disjoint-profile-model-alias')
     $snapshot.schedules = @($snapshot.schedules + $duplicate)
 
     Assert-PolicyPricingSnapshotRejected -PricingSnapshot $snapshot
