@@ -1,8 +1,8 @@
 # SB-20260824-035416-sqlite-schema-admission-atomicity: SQLite schema admission was not exact or atomic
 
-- **Status:** closed
+- **Status:** open
 - **First observed:** 2026-08-24T03:54:16.235083Z
-- **Last observed:** 2026-08-24T03:54:16.235083Z
+- **Last observed:** 2026-08-24
 - **Phase/task:** Task 7 post-implementation review
 - **Environment:** Windows PowerShell worktree; bundled CPython standard library SQLite
 - **Version/commit:** `950d7701be0825a9bbabd0967a4d7b2971c01ea2`
@@ -49,3 +49,16 @@ The bundled-Python suite passed all 29 tests. The full router PowerShell suite e
 
 - 2026-08-24T03:54:16.235083Z: First observed.
 - 2026-08-24: Closed after product commit `44d920a` and final acceptance verification.
+- 2026-08-24: Reopened after re-review found a V0 internal-object bypass and incomplete nested-result and status-state consistency.
+
+## Recurrence: Task 7 consistency re-review
+
+- **Version/commit:** `44d920a924f4b2c64acd76141f75e48ee5c7e7b1`
+- **Symptom:** A dropped AUTOINCREMENT table left `sqlite_sequence` in a version-0 database that was still admitted as fresh. Candidate nested results could contradict their pass/fail flags or rejection reasons, nonselected eligible candidates bypassed winner-only checks, and the failure-state rule rejected a valid attempted winner for `execution_failed` while allowing contradictory pre-execution metadata.
+- **Impact:** Malformed traces could become immutable history, and Task 8 could not correctly persist an attempted route after launcher failure.
+- **Safe evidence:** The expanded bundled-Python suite ran 42 tests and produced 34 targeted RED failures. No provider calls, credentials, raw trace payloads, hashes, or runtime database contents were recorded.
+- **Confirmed cause:** Fresh-V0 admission filtered out `sqlite_%` catalog rows. Nested validators checked local types and broad nullability without reconstructing the Task 4-6 producer invariants, while top-level failure validation used one rule for four semantically different statuses.
+- **Known exclusions:** The PowerShell stdin bridge remains outside the failing validation boundary and no Task 8 execution code exists.
+- **Correction:** Pending exact zero-row V0 admission, complete nested-result/rejection consistency, and a status-specific trace matrix.
+- **Prevention:** Retain direct internal-catalog, nonselected-eligible, canonical-reason, and all-status regression fixtures.
+- **Next diagnostic step:** Implement the minimum validator changes and rerun all Task 7 acceptance gates.
