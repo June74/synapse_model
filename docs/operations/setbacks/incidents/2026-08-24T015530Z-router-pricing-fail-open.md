@@ -2,7 +2,7 @@
 
 - **Status:** closed
 - **First observed:** 2026-08-24T01:55:30Z
-- **Last observed:** 2026-08-24T02:02:31Z
+- **Last observed:** 2026-08-24T02:24:06Z
 - **Phase/task:** Deterministic router V1 Task 6 specification-review fix
 - **Environment:** Windows PowerShell 7 in the deterministic-router-v1 worktree
 - **Version/commit:** 50f1813229b354c18ae5a152f99d61fccced5517
@@ -18,13 +18,16 @@ A Gemini 3.1 request above 200,000 input tokens could use the lower profile rate
 ## Cause classification
 
 - **Confirmed cause:** `Get-RouterEstimatedPrice` implemented a profile-rate fallback when `PricingSnapshot` was omitted and did not reject a calculated price less than or equal to zero.
+- **Recurrence cause:** Runtime pricing checked only for a schedule list and independently reimplemented partial schedule/profile matching instead of calling the catalog's complete validation rules.
 - **Contributing test gap:** Selection tests preserved the old two-argument policy call, and the zero-rate test asserted the opposite of the V1 no-free-route invariant.
 - **Known exclusions:** Requirements and quality ordering, dated/tiered snapshot matching when explicitly injected, provider execution, calibration, Task 7 storage, pushes, PRs, and merges are not involved.
 
 ## Correction and prevention
 
 - **Correction:** Added failing regressions for omitted/null snapshots, Gemini tier exposure, provider mismatch, and zero-price selection; removed the fallback and rejected non-positive calculated prices.
+- **Recurrence correction:** Extracted pure object-level snapshot and profile-pricing validators from catalog import, reused them in both catalog and runtime pricing, and required global snapshot validity before any candidate can calculate price.
 - **Prevention:** Every policy test that expects a winner must inject an explicit valid pricing snapshot, and pricing regressions must include missing-snapshot and non-positive-price fail-closed cases.
+- **Recurrence prevention:** Policy tests now cover incomplete metadata, malformed schedules, token/date gaps and overlaps, duplicate mappings/periods, and exact profile-rate mismatch using provider-distinct model mappings.
 - **Owner:** Codex.
 - **Next diagnostic step:** None.
 
@@ -34,8 +37,16 @@ A Gemini 3.1 request above 200,000 input tokens could use the lower profile rate
 - GREEN run: `pwsh -NoProfile -File .\router\tests\router.tests.ps1` exited 0 with 283 passes and 0 failures.
 - `git diff --check` completed without whitespace errors; only expected Windows line-ending and sandbox global-ignore warnings were emitted.
 - Product correction: `34efcb6cd0e31676524daf1153415745ce614046` (`fix: fail closed on unavailable router pricing`).
+- Recurrence RED run: exit 1 with 283 passes and 13 expected fail-open failures.
+- Recurrence GREEN run: `pwsh -NoProfile -File .\router\tests\router.tests.ps1` exited 0 with 296 passes and 0 failures.
+- Standalone pricing import loaded `Get-RouterEstimatedPrice` and both shared validation helpers successfully.
+- Recurrence product correction: `1b6941298cf7b2a299578244fc36968e151f755b` (`fix: validate injected router pricing snapshots`).
 
 ## Recurrence history
 
 - 2026-08-24T01:55:30Z: Review-discovered Task 6 implementation mistakes recorded and contained before corrective implementation.
 - 2026-08-24T02:02:31Z: Closed after the fail-closed correction, full router suite, and whitespace verification passed.
+- 2026-08-24T02:18:15Z: Reopened after re-review showed runtime pricing still bypassed complete snapshot/profile validation. The first GREEN attempt then exposed an invalid test fixture: two provider schedules reused one profile-model mapping, which the shared validator correctly rejected as a duplicate. The malformed-snapshot regressions passed, while 13 ordinary policy assertions had no selected candidate. No provider/model call, Task 7 work, persistent routing result, push, PR, or merge occurred. The next step is to give the two test providers distinct profile-model identities and rerun the full suite.
+- During that correction, one consolidated test-helper patch was rejected before application because its context assumed a different function order. No repository file was partially changed; the retry uses smaller exact hunks.
+- The second GREEN attempt reached 295 passes and one failure because the date-gap fixture used August 24 after an interval ending August 23, which is contiguous coverage. This rejected the test hypothesis rather than the validator; the corrected gap begins August 25.
+- 2026-08-24T02:24:06Z: Closed after the centralized validator passed the standalone import, all 296 router assertions, and `git diff --check`.
