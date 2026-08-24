@@ -22,6 +22,7 @@ $schemaModulePath = Join-Path $projectRoot 'router/lib/schema.ps1'
 $profilesModulePath = Join-Path $projectRoot 'router/lib/profiles.ps1'
 $requirementsModulePath = Join-Path $projectRoot 'router/lib/requirements.ps1'
 $qualityModulePath = Join-Path $projectRoot 'router/lib/quality.ps1'
+$pricingModulePath = Join-Path $projectRoot 'router/lib/pricing.ps1'
 $policyModulePath = Join-Path $projectRoot 'router/lib/policy.ps1'
 $requestSchemaPath = Join-Path $projectRoot 'router/schemas/request-profile.schema.json'
 $profileSchemaPath = Join-Path $projectRoot 'router/schemas/model-profile.schema.json'
@@ -30,6 +31,7 @@ $profilesRoot = Join-Path $projectRoot 'profiles'
 $matrixPath = Join-Path $projectRoot 'pilot/model_matrix.json'
 $pricingSnapshotPath = Join-Path $projectRoot 'router/data/pricing-snapshot-2026-08-22.json'
 $qualitySnapshotPath = Join-Path $projectRoot 'router/data/quality-snapshot-2026-08-22.json'
+$tokenEstimatesPath = Join-Path $projectRoot 'router/tests/fixtures/token-estimates.json'
 
 $schemaBoundary = [ordered]@{
     'schema module' = $schemaModulePath
@@ -67,7 +69,14 @@ if (-not $qualityAvailable) {
     exit 1
 }
 . $qualityModulePath
+$pricingAvailable = Test-Path -LiteralPath $pricingModulePath -PathType Leaf
+if ($pricingAvailable) {
+    . $pricingModulePath
+}
 $policyAvailable = Test-Path -LiteralPath $policyModulePath -PathType Leaf
+if ($policyAvailable) {
+    . $policyModulePath
+}
 $task4Assertions = {
 Invoke-Assertion 'Task 4 requirements module is available' {
     Assert-Equal $requirementsAvailable $true
@@ -987,6 +996,40 @@ function New-MinimalRuntimeState {
     }
 }
 
+function Get-TestTokenEstimates {
+    return Get-Content -LiteralPath $tokenEstimatesPath -Raw | ConvertFrom-Json -Depth 30
+}
+
+function New-TestTokenObservation {
+    param(
+        [Parameter(Mandatory)][object]$Candidate,
+        [string]$RequestProfileGroup = 'coding|computer_science|medium|normal',
+        [long]$EstimatedInputTokens = 1000,
+        [long]$EstimatedVisibleOutputTokens = 500,
+        [long]$EstimatedReasoningTokens = 250
+    )
+
+    return [pscustomobject][ordered]@{
+        launcher = $Candidate.launcher
+        configuration_id = $Candidate.configuration_id
+        model = $Candidate.model
+        effort = $Candidate.effort
+        request_profile_group = $RequestProfileGroup
+        estimated_input_tokens = $EstimatedInputTokens
+        estimated_visible_output_tokens = $EstimatedVisibleOutputTokens
+        estimated_reasoning_tokens = $EstimatedReasoningTokens
+        observed_on = '2026-08-22'
+    }
+}
+
+function New-TestPriceRequirements {
+    param([long]$EstimatedInputTokens = 1000)
+
+    return [pscustomobject]@{
+        estimated_input_tokens = $EstimatedInputTokens
+    }
+}
+
 function Write-TestJson {
     param(
         [Parameter(Mandatory)][string]$Path,
@@ -1049,6 +1092,82 @@ function New-TestPricingSnapshot {
             }
         )
     }
+}
+
+function New-TestPolicyPricingSnapshot {
+    param(
+        [decimal]$AgyInputRate = 1,
+        [decimal]$AgyOutputRate = 5,
+        [decimal]$CodexInputRate = 1,
+        [decimal]$CodexOutputRate = 5
+    )
+
+    $snapshot = New-TestPricingSnapshot
+    $snapshot.schedules = @(
+        [pscustomobject]@{
+            provider = 'google'
+            model = 'shared-model-google-schedule'
+            profile_models = @('shared-model')
+            cost_comparable = $true
+            source_url = 'https://fixtures.invalid/pricing/shared-model-google'
+            retrieved_on = '2026-08-23'
+            rate_periods = @([pscustomobject]@{
+                effective_from = '2026-08-22'
+                effective_through = $null
+                input_tokens_min = 0
+                input_tokens_max = $null
+                input_usd_per_million_tokens = $AgyInputRate
+                output_usd_per_million_tokens = $AgyOutputRate
+            })
+        }
+        [pscustomobject]@{
+            provider = 'openai'
+            model = 'shared-model-openai-schedule'
+            profile_models = @('shared-model')
+            cost_comparable = $true
+            source_url = 'https://fixtures.invalid/pricing/shared-model-openai'
+            retrieved_on = '2026-08-23'
+            rate_periods = @([pscustomobject]@{
+                effective_from = '2026-08-22'
+                effective_through = $null
+                input_tokens_min = 0
+                input_tokens_max = $null
+                input_usd_per_million_tokens = $CodexInputRate
+                output_usd_per_million_tokens = $CodexOutputRate
+            })
+        }
+    )
+    return $snapshot
+}
+
+function Invoke-TestRouterPolicy {
+    param(
+        [Parameter(Mandatory)][object[]]$Profiles,
+        [object]$Request = (New-MinimalRequest),
+        [AllowNull()][object]$PricingSnapshot,
+        [AllowNull()][object[]]$TokenEstimates,
+        [AllowNull()][object[]]$RuntimeStates
+    )
+
+    $parameters = @{
+        Request = $Request
+        Profiles = $Profiles
+        RequestSchemaPath = $requestSchemaPath
+        ProjectInstructions = ''
+        OutputReserveTokens = 128
+        LongContextThresholdTokens = 100000
+        AsOfDate = '2026-08-22'
+    }
+    if ($PSBoundParameters.ContainsKey('PricingSnapshot')) {
+        $parameters.PricingSnapshot = $PricingSnapshot
+    }
+    if ($PSBoundParameters.ContainsKey('TokenEstimates')) {
+        $parameters.TokenEstimates = $TokenEstimates
+    }
+    if ($PSBoundParameters.ContainsKey('RuntimeStates')) {
+        $parameters.RuntimeStates = $RuntimeStates
+    }
+    return Invoke-RouterPolicy @parameters
 }
 
 function New-TestQualitySnapshot {
@@ -3491,15 +3610,435 @@ Invoke-Assertion 'quality evaluates one complete profile without price latency p
     Assert-Equal $evaluation.effective_quality 'strong'
 }
 
-if ($policyAvailable) {
-    Invoke-Assertion 'stable identity is ascending ordinal launcher|configuration_id' {
+Invoke-Assertion 'Task 6 token fixture uses exact profile model effort and request-profile-group identities' {
+    $fixture = Get-TestTokenEstimates
+
+    Assert-Equal $fixture.version 'router-token-estimates/v1'
+    Assert-Equal @($fixture.observations).Count 2
+    Assert-SequenceEqual @($fixture.observations | ForEach-Object { $_.request_profile_group }) @(
+        'coding|computer_science|medium|normal'
+        'coding|computer_science|medium|normal'
+    )
+    Assert-SequenceEqual @($fixture.observations | ForEach-Object {
+        '{0}|{1}|{2}|{3}' -f $_.launcher, $_.configuration_id, $_.model, $_.effort
+    }) @(
+        'agy|shared-model__medium|shared-model|medium'
+        'codex|shared-model__medium|shared-model|medium'
+    )
+}
+
+Invoke-Assertion 'Task 6 pricing module is available' {
+    Assert-Equal $pricingAvailable $true
+}
+
+Invoke-Assertion 'price uses current request input and separate visible plus reasoning output estimates' {
+    $candidate = Copy-TestObject @(Get-MinimalProfiles)[0]
+    $request = New-MinimalRequest
+    $fixture = Get-TestTokenEstimates
+    $snapshot = New-TestPricingSnapshot
+    $estimate = Get-RouterEstimatedPrice -Candidate $candidate -Request $request `
+        -Requirements (New-TestPriceRequirements -EstimatedInputTokens 2000) `
+        -PricingSnapshot $snapshot -TokenEstimates $fixture.observations -AsOfDate '2026-08-22'
+
+    Assert-Equal $estimate.available $true
+    Assert-Equal $estimate.request_profile_group 'coding|computer_science|medium|normal'
+    Assert-Equal $estimate.estimated_input_tokens 2000
+    Assert-Equal $estimate.estimated_visible_output_tokens 500
+    Assert-Equal $estimate.estimated_reasoning_tokens 250
+    Assert-Equal $estimate.estimated_billable_output_tokens 750
+    Assert-Equal $estimate.input_usd_per_million_tokens ([decimal]1)
+    Assert-Equal $estimate.output_usd_per_million_tokens ([decimal]5)
+    Assert-Equal $estimate.price ([decimal]0.00575)
+    Assert-Equal $estimate.price_final $false
+}
+
+$promotionBoundaryCases = @(
+    [pscustomobject]@{ date = '2026-08-21'; available = $false; input_rate = $null; output_rate = $null }
+    [pscustomobject]@{ date = '2026-08-22'; available = $true; input_rate = [decimal]2; output_rate = [decimal]10 }
+    [pscustomobject]@{ date = '2026-08-31'; available = $true; input_rate = [decimal]2; output_rate = [decimal]10 }
+    [pscustomobject]@{ date = '2026-09-01'; available = $true; input_rate = [decimal]3; output_rate = [decimal]15 }
+)
+foreach ($promotionBoundaryCase in $promotionBoundaryCases) {
+    Invoke-Assertion ("dated promotional pricing treats {0} as an inclusive schedule boundary" -f $promotionBoundaryCase.date) {
+        $candidate = Copy-TestObject @(Get-MinimalProfiles)[0]
+        $candidate.provider = 'anthropic'
+        $candidate.model = 'claude-sonnet-5'
+        $candidate.configuration_id = 'claude-sonnet-5__medium'
+        $observation = New-TestTokenObservation -Candidate $candidate
+        $snapshot = Get-Content -LiteralPath $pricingSnapshotPath -Raw | ConvertFrom-Json -Depth 30
+        $estimate = Get-RouterEstimatedPrice -Candidate $candidate -Request (New-MinimalRequest) `
+            -Requirements (New-TestPriceRequirements) -PricingSnapshot $snapshot `
+            -TokenEstimates @($observation) -AsOfDate $promotionBoundaryCase.date
+
+        Assert-Equal $estimate.available $promotionBoundaryCase.available
+        Assert-Equal $estimate.input_usd_per_million_tokens $promotionBoundaryCase.input_rate
+        Assert-Equal $estimate.output_usd_per_million_tokens $promotionBoundaryCase.output_rate
+    }
+}
+
+$geminiTierCases = @(
+    [pscustomobject]@{ input_tokens = 200000; input_rate = [decimal]2; output_rate = [decimal]12 }
+    [pscustomobject]@{ input_tokens = 200001; input_rate = [decimal]4; output_rate = [decimal]18 }
+)
+foreach ($geminiTierCase in $geminiTierCases) {
+    Invoke-Assertion ("Gemini 3.1 pricing applies the exact $($geminiTierCase.input_tokens)-token tier") {
+        $candidate = Copy-TestObject @(Get-MinimalProfiles)[0]
+        $candidate.provider = 'google'
+        $candidate.model = 'gemini-3.1-pro-high'
+        $candidate.configuration_id = 'gemini-3.1-pro-high__medium'
+        $observation = New-TestTokenObservation -Candidate $candidate
+        $snapshot = Get-Content -LiteralPath $pricingSnapshotPath -Raw | ConvertFrom-Json -Depth 30
+        $estimate = Get-RouterEstimatedPrice -Candidate $candidate -Request (New-MinimalRequest) `
+            -Requirements (New-TestPriceRequirements -EstimatedInputTokens $geminiTierCase.input_tokens) `
+            -PricingSnapshot $snapshot -TokenEstimates @($observation) -AsOfDate '2026-08-22'
+
+        Assert-Equal $estimate.available $true
+        Assert-Equal $estimate.input_usd_per_million_tokens $geminiTierCase.input_rate
+        Assert-Equal $estimate.output_usd_per_million_tokens $geminiTierCase.output_rate
+    }
+}
+
+Invoke-Assertion 'explicit zero rates are comparable and produce an exact zero price' {
+    $candidate = Copy-TestObject @(Get-MinimalProfiles)[0]
+    $snapshot = New-TestPricingSnapshot
+    $snapshot.schedules[0].rate_periods[0].input_usd_per_million_tokens = 0
+    $snapshot.schedules[0].rate_periods[0].output_usd_per_million_tokens = 0
+    $estimate = Get-RouterEstimatedPrice -Candidate $candidate -Request (New-MinimalRequest) `
+        -Requirements (New-TestPriceRequirements) -PricingSnapshot $snapshot `
+        -TokenEstimates (Get-TestTokenEstimates).observations -AsOfDate '2026-08-22'
+
+    Assert-Equal $estimate.available $true
+    Assert-Equal $estimate.price ([decimal]0)
+}
+
+Invoke-Assertion 'an explicitly injected null pricing snapshot is unavailable instead of using profile rates' {
+    $candidate = Copy-TestObject @(Get-MinimalProfiles)[0]
+    $estimate = Get-RouterEstimatedPrice -Candidate $candidate -Request (New-MinimalRequest) `
+        -Requirements (New-TestPriceRequirements) -PricingSnapshot $null `
+        -TokenEstimates (Get-TestTokenEstimates).observations -AsOfDate '2026-08-22'
+
+    Assert-Equal $estimate.available $false
+    Assert-Equal $estimate.price $null
+    Assert-Equal $estimate.price_final $false
+}
+
+$unavailablePriceCases = @(
+    [pscustomobject]@{
+        name = 'non-comparable schedule'
+        mutate = { param($candidate, $snapshot, $observations) $snapshot.schedules[0].cost_comparable = $false }
+    }
+    [pscustomobject]@{
+        name = 'missing exact provider mapping'
+        mutate = { param($candidate, $snapshot, $observations) $candidate.provider = 'openai' }
+    }
+    [pscustomobject]@{
+        name = 'mismatched pricing snapshot version'
+        mutate = { param($candidate, $snapshot, $observations) $candidate.pricing_snapshot_date = '2026-08-21' }
+    }
+    [pscustomobject]@{
+        name = 'coerced numeric injected identity'
+        mutate = {
+            param($candidate, $snapshot, $observations)
+            $candidate.launcher = '1'
+            $observations[0].launcher = 1
+        }
+    }
+    [pscustomobject]@{
+        name = 'missing exact observation'
+        mutate = { param($candidate, $snapshot, $observations) $observations.Clear() }
+    }
+    [pscustomobject]@{
+        name = 'duplicate exact observations'
+        mutate = { param($candidate, $snapshot, $observations) $observations.Add((Copy-TestObject $observations[0])) }
+    }
+)
+foreach ($unavailablePriceCase in $unavailablePriceCases) {
+    Invoke-Assertion ("price is unavailable for {0} rather than treated as zero" -f $unavailablePriceCase.name) {
+        $candidate = Copy-TestObject @(Get-MinimalProfiles)[0]
+        $snapshot = New-TestPricingSnapshot
+        $observations = [Collections.Generic.List[object]]::new()
+        foreach ($observation in @((Get-TestTokenEstimates).observations | Where-Object { $_.launcher -ceq 'agy' })) {
+            $observations.Add((Copy-TestObject $observation))
+        }
+        & $unavailablePriceCase.mutate $candidate $snapshot $observations
+        $estimate = Get-RouterEstimatedPrice -Candidate $candidate -Request (New-MinimalRequest) `
+            -Requirements (New-TestPriceRequirements) -PricingSnapshot $snapshot `
+            -TokenEstimates @($observations) -AsOfDate '2026-08-22'
+
+        Assert-Equal $estimate.available $false
+        Assert-Equal $estimate.price $null
+        Assert-Equal $estimate.price_final $false
+    }
+}
+
+Invoke-Assertion 'pricing retains full decimal precision for large integer token counts' {
+    $candidate = Copy-TestObject @(Get-MinimalProfiles)[0]
+    $snapshot = New-TestPricingSnapshot
+    $snapshot.schedules[0].rate_periods[0].input_usd_per_million_tokens = [decimal]0.123456789
+    $snapshot.schedules[0].rate_periods[0].output_usd_per_million_tokens = [decimal]9.876543211
+    $observation = New-TestTokenObservation -Candidate $candidate `
+        -EstimatedVisibleOutputTokens 4000000000 -EstimatedReasoningTokens 3000000000
+    $requirements = New-TestPriceRequirements -EstimatedInputTokens 8000000000
+    $estimate = Get-RouterEstimatedPrice -Candidate $candidate -Request (New-MinimalRequest) `
+        -Requirements $requirements -PricingSnapshot $snapshot `
+        -TokenEstimates @($observation) -AsOfDate '2026-08-22'
+    [decimal]$expected = (
+        ([decimal]8000000000 * [decimal]0.123456789) +
+        ([decimal]7000000000 * [decimal]9.876543211)
+    ) / [decimal]1000000
+
+    Assert-Equal $estimate.available $true
+    Assert-Equal $estimate.price $expected
+    Assert-Equal ($estimate.price -is [decimal]) $true
+}
+
+Invoke-Assertion 'response-boundary rounding is explicit and does not replace raw price precision' {
+    [decimal]$raw = 0.0000499999
+    $rounded = ConvertTo-RouterResponsePrice -Price $raw -DecimalPlaces 4
+
+    Assert-Equal $rounded ([decimal]0.0000)
+    Assert-Equal $raw ([decimal]0.0000499999)
+}
+
+Invoke-Assertion 'Task 6 policy module is available' {
+    Assert-Equal $policyAvailable $true
+}
+
+Invoke-Assertion 'request validation rejects every candidate before requirements' {
+    $request = New-MinimalRequest
+    $request.PSObject.Properties.Remove('request_text')
+    $decision = Invoke-TestRouterPolicy -Request $request -Profiles @(Get-MinimalProfiles)
+
+    Assert-Equal $decision.request_validation.valid $false
+    Assert-Equal $decision.selected_candidate $null
+    Assert-Equal @($decision.candidate_evaluations).Count 2
+    foreach ($evaluation in @($decision.candidate_evaluations)) {
+        Assert-Equal $evaluation.rejection_stage 'request_validation'
+        Assert-Equal $evaluation.requirements $null
+        Assert-Equal $evaluation.quality $null
+        Assert-Equal $evaluation.price $null
+    }
+}
+
+Invoke-Assertion 'requirements rejection skips quality and price evaluation' {
+    $candidate = Copy-TestObject @(Get-MinimalProfiles)[0]
+    $candidate.enabled = $false
+    $candidate.quality.task_types.coding = 'unknown'
+    $decision = Invoke-TestRouterPolicy -Profiles @($candidate) -TokenEstimates @()
+    $evaluation = @($decision.candidate_evaluations)[0]
+
+    Assert-Equal $decision.selected_candidate $null
+    Assert-Equal $evaluation.requirements.passed $false
+    Assert-SequenceEqual @($evaluation.requirements.reason_codes) @('candidate_disabled')
+    Assert-Equal $evaluation.quality $null
+    Assert-Equal $evaluation.price $null
+    Assert-Equal $evaluation.rejection_stage 'requirements'
+}
+
+Invoke-Assertion 'quality rejection skips price evaluation' {
+    $candidate = Copy-TestObject @(Get-MinimalProfiles)[0]
+    $candidate.quality.task_types.coding = 'unknown'
+    $decision = Invoke-TestRouterPolicy -Profiles @($candidate) -TokenEstimates @()
+    $evaluation = @($decision.candidate_evaluations)[0]
+
+    Assert-Equal $decision.selected_candidate $null
+    Assert-Equal $evaluation.requirements.passed $true
+    Assert-Equal $evaluation.quality.passed $false
+    Assert-Equal $evaluation.quality.reason_code 'quality_evidence_unknown'
+    Assert-Equal $evaluation.price $null
+    Assert-Equal $evaluation.rejection_stage 'quality'
+}
+
+Invoke-Assertion 'cheaper frontier beats more expensive strong after both pass the quality floor' {
+    $profiles = @(Get-MinimalProfiles | ForEach-Object { Copy-TestObject $_ })
+    $agy = @($profiles | Where-Object { $_.launcher -ceq 'agy' })[0]
+    $codex = @($profiles | Where-Object { $_.launcher -ceq 'codex' })[0]
+    Set-TestRelevantQuality -Candidate $agy -Request (New-MinimalRequest) `
+        -RequiredCapabilities $qualityCapabilities -Category 'strong'
+    Set-TestRelevantQuality -Candidate $codex -Request (New-MinimalRequest) `
+        -RequiredCapabilities $qualityCapabilities -Category 'frontier'
+    $snapshot = New-TestPolicyPricingSnapshot -AgyInputRate 10 -AgyOutputRate 50 `
+        -CodexInputRate 1 -CodexOutputRate 5
+    $decision = Invoke-TestRouterPolicy -Profiles $profiles -PricingSnapshot $snapshot `
+        -TokenEstimates (Get-TestTokenEstimates).observations
+
+    Assert-Equal (Get-CompositeIdentity $decision.selected_candidate) 'codex|shared-model__medium'
+}
+
+Invoke-Assertion 'model and effort form one jointly ranked candidate' {
+    $base = Copy-TestObject @(Get-MinimalProfiles)[0]
+    $low = Copy-TestObject $base
+    $low.configuration_id = 'shared-model__low'
+    $low.effort = 'low'
+    $high = Copy-TestObject $base
+    $high.configuration_id = 'shared-model__high'
+    $high.effort = 'high'
+    $observations = @(
+        (New-TestTokenObservation -Candidate $low -EstimatedVisibleOutputTokens 2000 -EstimatedReasoningTokens 2000)
+        (New-TestTokenObservation -Candidate $high -EstimatedVisibleOutputTokens 100 -EstimatedReasoningTokens 100)
+    )
+    $decision = Invoke-TestRouterPolicy -Profiles @($low, $high) `
+        -PricingSnapshot (New-TestPricingSnapshot) -TokenEstimates $observations
+
+    Assert-Equal (Get-CompositeIdentity $decision.selected_candidate) 'agy|shared-model__high'
+    Assert-Equal @($decision.candidate_evaluations | Where-Object { $_.selected }).Count 1
+}
+
+Invoke-Assertion 'price strictly outranks latency' {
+    $profiles = @(Get-MinimalProfiles | ForEach-Object { Copy-TestObject $_ })
+    $agy = @($profiles | Where-Object { $_.launcher -ceq 'agy' })[0]
+    $codex = @($profiles | Where-Object { $_.launcher -ceq 'codex' })[0]
+    $agy.latency_observation.milliseconds = 9000
+    $codex.latency_observation.milliseconds = 1
+    $snapshot = New-TestPolicyPricingSnapshot -AgyInputRate 1 -AgyOutputRate 5 `
+        -CodexInputRate 2 -CodexOutputRate 10
+    $decision = Invoke-TestRouterPolicy -Profiles $profiles -PricingSnapshot $snapshot `
+        -TokenEstimates (Get-TestTokenEstimates).observations
+
+    Assert-Equal (Get-CompositeIdentity $decision.selected_candidate) 'agy|shared-model__medium'
+}
+
+foreach ($latencyMode in @('fast', 'normal')) {
+    Invoke-Assertion ("lower available latency breaks an equal-price tie for $latencyMode requests") {
+        $request = New-MinimalRequest
+        $request.latency = $latencyMode
+        $profiles = @(Get-MinimalProfiles | ForEach-Object { Copy-TestObject $_ })
+        @($profiles | Where-Object { $_.launcher -ceq 'agy' })[0].latency_observation.milliseconds = 1000
+        @($profiles | Where-Object { $_.launcher -ceq 'codex' })[0].latency_observation.milliseconds = 100
+        $decision = Invoke-TestRouterPolicy -Request $request -Profiles $profiles `
+            -PricingSnapshot (New-TestPolicyPricingSnapshot) `
+            -TokenEstimates (Get-TestTokenEstimates).observations
+
+        Assert-Equal (Get-CompositeIdentity $decision.selected_candidate) 'codex|shared-model__medium'
+    }
+}
+
+Invoke-Assertion 'available latency sorts before unavailable latency on an equal-price normal request' {
+    $profiles = @(Get-MinimalProfiles | ForEach-Object { Copy-TestObject $_ })
+    $agy = @($profiles | Where-Object { $_.launcher -ceq 'agy' })[0]
+    $agy.latency_observation.available = $false
+    $agy.latency_observation.metric = $null
+    $agy.latency_observation.milliseconds = $null
+    $agy.latency_observation.sample_count = $null
+    $agy.latency_observation.observed_on = $null
+    $decision = Invoke-TestRouterPolicy -Profiles $profiles `
+        -PricingSnapshot (New-TestPolicyPricingSnapshot) `
+        -TokenEstimates (Get-TestTokenEstimates).observations
+
+    Assert-Equal (Get-CompositeIdentity $decision.selected_candidate) 'codex|shared-model__medium'
+}
+
+Invoke-Assertion 'only measured end-to-end latency can break an equal-price tie' {
+    $profiles = @(Get-MinimalProfiles | ForEach-Object { Copy-TestObject $_ })
+    $agy = @($profiles | Where-Object { $_.launcher -ceq 'agy' })[0]
+    $codex = @($profiles | Where-Object { $_.launcher -ceq 'codex' })[0]
+    $agy.latency_observation.milliseconds = 1000
+    $codex.latency_observation.metric = 'provider_only'
+    $codex.latency_observation.milliseconds = 1
+    $decision = Invoke-TestRouterPolicy -Profiles $profiles `
+        -PricingSnapshot (New-TestPolicyPricingSnapshot) `
+        -TokenEstimates (Get-TestTokenEstimates).observations
+
+    Assert-Equal (Get-CompositeIdentity $decision.selected_candidate) 'agy|shared-model__medium'
+}
+
+Invoke-Assertion 'relaxed latency skips measurements and proceeds to stable identity' {
+    $request = New-MinimalRequest
+    $request.latency = 'relaxed'
+    $profiles = @(Get-MinimalProfiles | ForEach-Object { Copy-TestObject $_ })
+    @($profiles | Where-Object { $_.launcher -ceq 'agy' })[0].latency_observation.milliseconds = 9000
+    @($profiles | Where-Object { $_.launcher -ceq 'codex' })[0].latency_observation.milliseconds = 1
+    $decision = Invoke-TestRouterPolicy -Request $request -Profiles $profiles `
+        -PricingSnapshot (New-TestPolicyPricingSnapshot) `
+        -TokenEstimates (Get-TestTokenEstimates).observations
+
+    Assert-Equal (Get-CompositeIdentity $decision.selected_candidate) 'agy|shared-model__medium'
+}
+
+Invoke-Assertion 'raw decimal price selects the winner even when response-boundary values round equally' {
+    $profiles = @(Get-MinimalProfiles | ForEach-Object { Copy-TestObject $_ })
+    $snapshot = New-TestPolicyPricingSnapshot -AgyInputRate ([decimal]0.10001) -AgyOutputRate 0 `
+        -CodexInputRate ([decimal]0.10002) -CodexOutputRate 0
+    $decision = Invoke-TestRouterPolicy -Profiles $profiles -PricingSnapshot $snapshot `
+        -TokenEstimates (Get-TestTokenEstimates).observations
+    $prices = @($decision.candidate_evaluations | ForEach-Object { $_.price.price })
+
+    Assert-Equal (Get-CompositeIdentity $decision.selected_candidate) 'agy|shared-model__medium'
+    Assert-Equal ($prices[0] -ne $prices[1]) $true
+    Assert-Equal (ConvertTo-RouterResponsePrice $prices[0] -DecimalPlaces 4) `
+        (ConvertTo-RouterResponsePrice $prices[1] -DecimalPlaces 4)
+}
+
+Invoke-Assertion 'all failed candidates receive deterministic evaluations and no candidate is selected' {
+    $profiles = @(Get-MinimalProfiles | ForEach-Object { Copy-TestObject $_ })
+    foreach ($profile in $profiles) {
+        $profile.enabled = $false
+        $profile.availability = 'unavailable'
+    }
+    $decision = Invoke-TestRouterPolicy -Profiles $profiles
+
+    Assert-Equal $decision.selected_candidate $null
+    Assert-Equal @($decision.candidate_evaluations).Count 2
+    Assert-SequenceEqual @($decision.candidate_evaluations | ForEach-Object { $_.candidate_identity }) @(
+        'agy|shared-model__medium'
+        'codex|shared-model__medium'
+    )
+    foreach ($evaluation in @($decision.candidate_evaluations)) {
+        Assert-SequenceEqual @($evaluation.rejection_reason_codes) @('candidate_disabled', 'candidate_unavailable')
+    }
+}
+
+Invoke-Assertion 'duplicate explicit runtime states fail conservatively without arbitrary matching' {
+    $profiles = @(Get-MinimalProfiles)
+    $agyRuntime = New-MinimalRuntimeState
+    $codexRuntime = [pscustomobject]@{
+        launcher = 'codex'; model = 'shared-model'; effort = 'medium'; available = $true
+        authenticated = $true; working = $true; quota_exhausted = $false
+    }
+    $decision = Invoke-TestRouterPolicy -Profiles $profiles -RuntimeStates @(
+        $agyRuntime
+        (Copy-TestObject $agyRuntime)
+        $codexRuntime
+    )
+    $agyEvaluation = @($decision.candidate_evaluations | Where-Object { $_.launcher -ceq 'agy' })[0]
+
+    Assert-Equal $agyEvaluation.rejection_stage 'requirements'
+    Assert-SequenceEqual @($agyEvaluation.rejection_reason_codes) @('runtime_state_invalid')
+    Assert-Equal (Get-CompositeIdentity $decision.selected_candidate) 'codex|shared-model__medium'
+}
+
+Invoke-Assertion 'stable identity sorting is ordinal under a non-default culture' {
+    $base = Copy-TestObject @(Get-MinimalProfiles)[0]
+    $ascii = Copy-TestObject $base
+    $ascii.launcher = 'I'
+    $unicode = Copy-TestObject $base
+    $unicode.launcher = 'ı'
+    $observations = @(
+        (New-TestTokenObservation -Candidate $ascii)
+        (New-TestTokenObservation -Candidate $unicode)
+    )
+    $request = New-MinimalRequest
+    $request.latency = 'relaxed'
+    $originalCulture = [Globalization.CultureInfo]::CurrentCulture
+    try {
+        [Globalization.CultureInfo]::CurrentCulture = [Globalization.CultureInfo]::GetCultureInfo('tr-TR')
+        $decision = Invoke-TestRouterPolicy -Request $request -Profiles @($unicode, $ascii) `
+            -TokenEstimates $observations
+    } finally {
+        [Globalization.CultureInfo]::CurrentCulture = $originalCulture
+    }
+
+    Assert-Equal (Get-CompositeIdentity $decision.selected_candidate) 'I|shared-model__medium'
+}
+
+Invoke-Assertion 'stable identity is ascending ordinal launcher|configuration_id' {
         $agyIdentity = 'agy|shared-model__medium'
         $codexIdentity = 'codex|shared-model__medium'
 
         Assert-Equal ([string]::CompareOrdinal($agyIdentity, $codexIdentity) -lt 0) $true
     }
 
-    Invoke-Assertion 'policy preserves exact composite identity' {
+Invoke-Assertion 'policy preserves exact composite identity' {
         $decision = Invoke-RouterPolicy -Request (New-MinimalRequest) -Profiles (Get-MinimalProfiles)
         $identities = @(
             $decision.candidate_evaluations |
@@ -3511,14 +4050,14 @@ if ($policyAvailable) {
         Assert-Equal (@($identities | Where-Object { $_ -ceq 'codex|shared-model__medium' }).Count) 1
     }
 
-    Invoke-Assertion 'policy selects exactly one candidate' {
+Invoke-Assertion 'policy selects exactly one candidate' {
         $decision = Invoke-RouterPolicy -Request (New-MinimalRequest) -Profiles (Get-MinimalProfiles)
 
         Assert-Equal (@($decision.selected_candidate).Count) 1
         Assert-Equal (Get-CompositeIdentity $decision.selected_candidate) 'agy|shared-model__medium'
     }
 
-    Invoke-Assertion 'policy selection is invariant to forward and reverse tied input order' {
+Invoke-Assertion 'policy selection is invariant to forward and reverse tied input order' {
         $forwardProfiles = @(Get-MinimalProfiles)
         $reverseProfiles = [object[]]$forwardProfiles.Clone()
         [array]::Reverse($reverseProfiles)
@@ -3549,9 +4088,6 @@ if ($policyAvailable) {
 
         Assert-Equal (@($selectedIdentities | Select-Object -Unique).Count) 1
         Assert-Equal $selectedIdentities[0] 'agy|shared-model__medium'
-    }
-} else {
-    Write-Host 'PENDING policy tests: router/lib/policy.ps1 is planned for Task 6.'
 }
 
 if ($failures.Count -gt 0) {

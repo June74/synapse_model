@@ -1,0 +1,27 @@
+{
+  "version": "router-token-estimates/v1",
+  "observations": [
+    {
+      "launcher": "agy",
+      "configuration_id": "shared-model__medium",
+      "model": "shared-model",
+      "effort": "medium",
+      "request_profile_group": "coding|computer_science|medium|normal",
+      "estimated_input_tokens": 1000,
+      "estimated_visible_output_tokens": 500,
+      "estimated_reasoning_tokens": 250,
+      "observed_on": "2026-08-22"
+    },
+    {
+      "launcher": "codex",
+      "configuration_id": "shared-model__medium",
+      "model": "shared-model",
+      "effort": "medium",
+      "request_profile_group": "coding|computer_science|medium|normal",
+      "estimated_input_tokens": 1000,
+      "estimated_visible_output_tokens": 500,
+      "estimated_reasoning_tokens": 250,
+      "observed_on": "2026-08-22"
+    }
+  ]
+}
