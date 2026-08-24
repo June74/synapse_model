@@ -86,3 +86,13 @@
 - **Correction:** Retry only the bounded documentation staging and commit through approved Git-metadata access.
 - **Prevention:** Treat all Task 7 staging and commit operations as requiring approved Git-metadata access.
 - **Related verification:** The documentation passed `git diff --check` before the failed staging attempt.
+
+## Recurrence: 2026-08-24, Task 7 review-fix documentation
+
+- **Phase/task:** Deterministic router V1 Task 7 review fixes, durability setback record commit.
+- **Symptom:** Scoped staging and commit could not create `.git/worktrees/deterministic-router-v1/index.lock`; Git returned permission denied.
+- **Confirmed cause:** The worktree remains writable while its shared Git metadata is outside the managed write boundary.
+- **Impact:** No file was staged and no commit was created. The RED tests and documentation edits remain intact; implementation has not started.
+- **Correction:** Retry only the bounded documentation staging and commit through approved Git-metadata access.
+- **Prevention:** Continue treating this worktree's staging and commit operations as requiring approved Git-metadata access.
+- **Related verification:** The 29-test RED run produced 14 targeted failures before this staging attempt.
