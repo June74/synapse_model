@@ -4632,8 +4632,8 @@ function New-Task7TraceFixture {
                     estimated_billable_output_tokens = 75
                     input_usd_per_million_tokens = '1.25'
                     output_usd_per_million_tokens = '10.00'
-                    price = '0.000875'
-                    price_final = $false
+                    price = '0.0100000000000000000000000001'
+                    price_final = $true
                 }
                 latency_available = $true
                 latency_milliseconds = '10.5'

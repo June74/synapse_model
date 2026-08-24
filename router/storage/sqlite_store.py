@@ -258,8 +258,12 @@ class DuplicateJsonField(ValueError):
         self.field_name = field_name
 
 
-class StorageVersionError(Exception):
-    pass
+class StorageSchemaError(Exception):
+    def __init__(self, code: str, detail: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+        self.detail = detail
+        self.message = message
 
 
 class StructuredArgumentParser(argparse.ArgumentParser):
@@ -662,31 +666,73 @@ def validate_candidate(value: Any, index: int) -> dict[str, Any]:
         candidate["latency_milliseconds"], f"{path}.latency_milliseconds", nullable=True
     )
 
-    if selected and not eligible:
-        raise TraceInputError("A selected candidate must be eligible.", path=f"{path}.selected")
-    if eligible and (rejection_stage is not None or rejection_reasons):
-        raise TraceInputError("Eligible candidates cannot be rejected.", path=f"{path}.rejection_stage")
-    if not eligible and (rejection_stage is None or not rejection_reasons):
-        raise TraceInputError("Rejected candidates require a stage and reason.", path=f"{path}.rejection_stage")
-    if eligible and (requirements is None or not requirements["passed"]):
-        raise TraceInputError("Eligible candidates require passed requirements.", path=f"{path}.requirements")
-    if eligible and (quality is None or not quality["passed"]):
-        raise TraceInputError("Eligible candidates require passed quality.", path=f"{path}.quality")
-    if eligible and (price is None or not price["available"]):
-        raise TraceInputError("Eligible candidates require an available price.", path=f"{path}.price")
     if latency_available != (latency_ms is not None):
         raise TraceInputError(
             "Latency availability must match latency value presence.",
             path=f"{path}.latency_milliseconds",
         )
-    if rejection_stage == "request_validation" and requirements is not None:
-        raise TraceInputError("Request-validation rejection must skip requirements.", path=f"{path}.requirements")
-    if rejection_stage == "requirements" and (requirements is None or requirements["passed"]):
-        raise TraceInputError("Requirements rejection requires a failed evaluation.", path=f"{path}.requirements")
-    if rejection_stage == "quality" and (quality is None or quality["passed"]):
-        raise TraceInputError("Quality rejection requires a failed evaluation.", path=f"{path}.quality")
-    if rejection_stage == "price" and (price is None or price["available"]):
-        raise TraceInputError("Price rejection requires an unavailable price.", path=f"{path}.price")
+
+    def require_rejection(expected_stage: str) -> None:
+        if eligible or selected:
+            raise TraceInputError(
+                "Rejected candidates cannot be eligible or selected.",
+                path=f"{path}.selected" if selected else f"{path}.eligible",
+            )
+        if rejection_stage != expected_stage or not rejection_reasons:
+            raise TraceInputError(
+                "Candidate rejection must identify the first failed stage and a reason.",
+                path=f"{path}.rejection_stage",
+            )
+
+    if rejection_stage == "request_validation":
+        require_rejection("request_validation")
+        if requirements is not None or quality is not None or price is not None:
+            raise TraceInputError(
+                "Request-validation rejection must skip candidate evaluation stages.",
+                path=f"{path}.requirements",
+            )
+    elif requirements is None:
+        raise TraceInputError(
+            "Candidate requirements must be evaluated before quality or price.",
+            path=f"{path}.requirements",
+        )
+    elif not requirements["passed"]:
+        require_rejection("requirements")
+        if quality is not None or price is not None:
+            raise TraceInputError(
+                "Failed requirements must stop quality and price evaluation.",
+                path=f"{path}.quality" if quality is not None else f"{path}.price",
+            )
+    elif quality is None:
+        raise TraceInputError(
+            "Passed requirements must be followed by quality evaluation.",
+            path=f"{path}.quality",
+        )
+    elif not quality["passed"]:
+        require_rejection("quality")
+        if price is not None:
+            raise TraceInputError(
+                "Failed quality must stop price evaluation.",
+                path=f"{path}.price",
+            )
+    elif price is None:
+        raise TraceInputError(
+            "Passed quality must be followed by price evaluation.",
+            path=f"{path}.price",
+        )
+    elif not price["available"]:
+        require_rejection("price")
+    else:
+        if not eligible:
+            raise TraceInputError(
+                "Candidates passing requirements, quality, and price must be eligible.",
+                path=f"{path}.eligible",
+            )
+        if rejection_stage is not None or rejection_reasons:
+            raise TraceInputError(
+                "Eligible candidates cannot have rejection metadata.",
+                path=f"{path}.rejection_stage",
+            )
 
     return {
         "candidate_identity": identity,
@@ -746,16 +792,14 @@ def validate_trace(value: dict[str, Any]) -> dict[str, Any]:
             raise TraceInputError("Completed decisions cannot have a failure reason.", path="$.reason_code")
         if selected_candidate is None or len(selected_evaluations) != 1:
             raise TraceInputError("Completed decisions require exactly one selected evaluation.", path="$.selected_candidate")
-    elif reason_code is None:
-        raise TraceInputError("Failed decisions require a reason code.", path="$.reason_code")
-
-    if output_status == "execution_failed":
-        if selected_candidate is None and selected_evaluations:
-            raise TraceInputError("Selected evaluation requires selected_candidate.", path="$.selected_candidate")
-        if selected_candidate is not None and len(selected_evaluations) != 1:
-            raise TraceInputError("Execution failure selection must be singular.", path="$.selected_candidate")
-    elif output_status != "completed" and (selected_candidate is not None or selected_evaluations):
-        raise TraceInputError("Pre-selection failures cannot retain a selected candidate.", path="$.selected_candidate")
+    else:
+        if reason_code is None:
+            raise TraceInputError("Failed decisions require a reason code.", path="$.reason_code")
+        if selected_candidate is not None or selected_evaluations:
+            raise TraceInputError(
+                "Failed decisions cannot retain a selected candidate.",
+                path="$.selected_candidate",
+            )
 
     if selected_candidate is not None:
         if selected_candidate not in identities:
@@ -768,6 +812,7 @@ def validate_trace(value: dict[str, Any]) -> dict[str, Any]:
     )
     quality_bottleneck = require_nullable_string(trace["quality_bottleneck"], "$.quality_bottleneck")
     top_price = decimal_text(trace["price"], "$.price", nullable=True)
+    top_price_final = require_bool(trace["price_final"], "$.price_final")
     latency_ms = sqlite_real(trace["latency_ms"], "$.latency_ms", nullable=True)
     response_hash = require_hash(trace["response_hash"], "$.response_hash", nullable=True)
     if output_status == "completed":
@@ -781,6 +826,40 @@ def validate_trace(value: dict[str, Any]) -> dict[str, Any]:
         for item, path in completed_required:
             if item is None:
                 raise TraceInputError("Completed decision metadata cannot be null.", path=path)
+        selected_evaluation = selected_evaluations[0]
+        selected_quality = selected_evaluation["quality"]
+        selected_price = selected_evaluation["price"]
+        if effective_quality != selected_quality["effective_quality"]:
+            raise TraceInputError(
+                "Winner quality must match the selected evaluation.",
+                path="$.effective_quality",
+            )
+        if quality_bottleneck != selected_quality["quality_bottleneck"]:
+            raise TraceInputError(
+                "Winner quality bottleneck must match the selected evaluation.",
+                path="$.quality_bottleneck",
+            )
+        if top_price != selected_price["price"]:
+            raise TraceInputError(
+                "Winner price must match the selected evaluation exactly.",
+                path="$.price",
+            )
+        if top_price_final != selected_price["price_final"]:
+            raise TraceInputError(
+                "Winner price finality must match the selected evaluation.",
+                path="$.price_final",
+            )
+    else:
+        if effective_quality is not None or quality_bottleneck is not None:
+            raise TraceInputError(
+                "Failed decisions cannot retain winner quality metadata.",
+                path="$.effective_quality" if effective_quality is not None else "$.quality_bottleneck",
+            )
+        if top_price is not None or top_price_final:
+            raise TraceInputError(
+                "Failed decisions cannot retain winner price metadata.",
+                path="$.price" if top_price is not None else "$.price_final",
+            )
 
     normalized = {
         "trace_id": trace_id,
@@ -793,7 +872,7 @@ def validate_trace(value: dict[str, Any]) -> dict[str, Any]:
         "effective_quality": effective_quality,
         "quality_bottleneck": quality_bottleneck,
         "price": top_price,
-        "price_final": require_bool(trace["price_final"], "$.price_final"),
+        "price_final": top_price_final,
         "latency_ms": latency_ms,
         "router_policy_version": require_string(trace["router_policy_version"], "$.router_policy_version"),
         "profile_schema_version": require_string(trace["profile_schema_version"], "$.profile_schema_version"),
@@ -885,14 +964,98 @@ SCHEMA_STATEMENTS = (
 )
 
 
-def setup_schema(connection: sqlite3.Connection) -> None:
+SCHEMA_TABLES = ("routing_decisions", "candidate_evaluations")
+_EXPECTED_SCHEMA_SNAPSHOT: tuple[Any, ...] | None = None
+
+
+def schema_snapshot(connection: sqlite3.Connection) -> tuple[Any, ...]:
+    objects = tuple(connection.execute(
+        "SELECT type, name, tbl_name, sql FROM sqlite_schema "
+        "WHERE type IN ('table', 'index', 'view', 'trigger') "
+        "AND name NOT LIKE 'sqlite_%' ORDER BY type, name"
+    ).fetchall())
+    tables: list[tuple[Any, ...]] = []
+    for table_name in SCHEMA_TABLES:
+        columns = tuple(connection.execute(
+            "SELECT * FROM pragma_table_xinfo(?) ORDER BY cid",
+            (table_name,),
+        ).fetchall())
+        foreign_keys = tuple(sorted(
+            connection.execute(
+                "SELECT * FROM pragma_foreign_key_list(?)",
+                (table_name,),
+            ).fetchall()
+        ))
+        indexes: list[tuple[Any, ...]] = []
+        index_rows = connection.execute(
+            "SELECT * FROM pragma_index_list(?)",
+            (table_name,),
+        ).fetchall()
+        for index_row in index_rows:
+            index_name = index_row[1]
+            index_columns = tuple(
+                connection.execute(
+                    "SELECT * FROM pragma_index_info(?) ORDER BY seqno",
+                    (index_name,),
+                ).fetchall()
+            )
+            indexes.append((index_name, index_row[2], index_row[3], index_row[4], index_columns))
+        tables.append((table_name, columns, foreign_keys, tuple(sorted(indexes))))
+    return objects, tuple(tables)
+
+
+def expected_schema_snapshot() -> tuple[Any, ...]:
+    global _EXPECTED_SCHEMA_SNAPSHOT
+    if _EXPECTED_SCHEMA_SNAPSHOT is None:
+        connection = sqlite3.connect(":memory:")
+        try:
+            connection.execute("PRAGMA foreign_keys = ON")
+            for statement in SCHEMA_STATEMENTS:
+                connection.execute(statement)
+            _EXPECTED_SCHEMA_SNAPSHOT = schema_snapshot(connection)
+        finally:
+            connection.close()
+    return _EXPECTED_SCHEMA_SNAPSHOT
+
+
+def setup_schema(connection: sqlite3.Connection) -> bool:
+    if not connection.in_transaction:
+        raise sqlite3.ProgrammingError("Schema setup requires an active trace transaction.")
     current_version = connection.execute("PRAGMA user_version").fetchone()[0]
-    if current_version not in (0, SCHEMA_VERSION):
-        raise StorageVersionError("Unsupported SQLite trace schema version.")
-    with connection:
+    if current_version == 0:
+        existing_objects = connection.execute(
+            "SELECT 1 FROM sqlite_schema "
+            "WHERE type IN ('table', 'index', 'view', 'trigger') "
+            "AND name NOT LIKE 'sqlite_%' LIMIT 1"
+        ).fetchone()
+        if existing_objects is not None:
+            raise StorageSchemaError(
+                "schema_migration_required",
+                "version_zero_database_not_empty",
+                "A nonempty version-0 database requires an explicit migration.",
+            )
         for statement in SCHEMA_STATEMENTS:
             connection.execute(statement)
-        connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+        if schema_snapshot(connection) != expected_schema_snapshot():
+            raise StorageSchemaError(
+                "schema_invalid",
+                "fresh_schema_creation_mismatch",
+                "The exact V1 trace schema could not be created.",
+            )
+        return True
+    if current_version == SCHEMA_VERSION:
+        if schema_snapshot(connection) != expected_schema_snapshot():
+            raise StorageSchemaError(
+                "schema_invalid",
+                "version_one_schema_mismatch",
+                "The existing version-1 trace schema is not exact.",
+            )
+        return False
+    raise StorageSchemaError(
+        "schema_invalid",
+        "unsupported_schema_version",
+        "The SQLite trace schema version is unsupported.",
+    )
 
 
 def decision_parameters(trace: dict[str, Any]) -> tuple[Any, ...]:
@@ -971,14 +1134,21 @@ def write_trace(database_path: Path, trace: dict[str, Any]) -> int:
     try:
         connection.execute("PRAGMA foreign_keys = ON")
         connection.execute("PRAGMA busy_timeout = 5000")
-        setup_schema(connection)
-        with connection:
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            fresh_schema = setup_schema(connection)
             connection.execute(DECISION_INSERT, decision_parameters(trace))
             rows = [
                 candidate_parameters(trace["trace_id"], candidate)
                 for candidate in trace["candidate_evaluations"]
             ]
             connection.executemany(CANDIDATE_INSERT, rows)
+            if fresh_schema:
+                connection.execute("PRAGMA user_version = 1")
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
     finally:
         connection.close()
     return len(trace["candidate_evaluations"])
@@ -1015,6 +1185,17 @@ def main(argv: list[str] | None = None) -> int:
     except TraceInputError as error:
         emit(error_result(error))
         return 1
+    except StorageSchemaError as error:
+        emit({
+            "ok": False,
+            "error": {
+                "code": error.code,
+                "detail": error.detail,
+                "path": "$",
+                "message": error.message,
+            },
+        })
+        return 1
     except sqlite3.IntegrityError:
         emit({
             "ok": False,
@@ -1026,7 +1207,7 @@ def main(argv: list[str] | None = None) -> int:
             },
         })
         return 1
-    except (sqlite3.Error, OSError, StorageVersionError):
+    except (sqlite3.Error, OSError):
         emit({
             "ok": False,
             "error": {

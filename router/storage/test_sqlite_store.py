@@ -7,8 +7,10 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
-from router.storage.sqlite_store import validate_trace, write_trace
+from router.storage import sqlite_store
+from router.storage.sqlite_store import SCHEMA_STATEMENTS, validate_trace, write_trace
 
 
 STORE_PATH = Path(__file__).with_name("sqlite_store.py")
@@ -58,6 +60,9 @@ def candidate(
             "price": "0.0096000000000000000000000001" if rejection_stage != "price" else None,
             "price_final": False,
         }
+        if selected:
+            price["price"] = "0.1234567890123456789012345678"
+            price["price_final"] = True
     return {
         "candidate_identity": identity,
         "launcher": launcher,
@@ -132,6 +137,23 @@ def complete_trace(trace_id: str = "trace-0001", run_mode: str = "normal") -> di
     }
 
 
+def failure_trace(evaluation: dict, trace_id: str = "failure-trace") -> dict:
+    trace = complete_trace(trace_id)
+    trace.update({
+        "selected_candidate": None,
+        "output_status": "no_eligible_configuration",
+        "reason_code": "all_routes_unavailable",
+        "effective_quality": None,
+        "quality_bottleneck": None,
+        "price": None,
+        "price_final": False,
+        "latency_ms": None,
+        "response_hash": None,
+        "candidate_evaluations": [evaluation],
+    })
+    return trace
+
+
 class SQLiteStoreTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -163,6 +185,22 @@ class SQLiteStoreTests(unittest.TestCase):
             return connection.execute(sql, parameters).fetchall()
         finally:
             connection.close()
+
+    def create_exact_v1_schema(self) -> None:
+        connection = sqlite3.connect(self.database_path)
+        try:
+            for statement in SCHEMA_STATEMENTS:
+                connection.execute(statement)
+            connection.execute("PRAGMA user_version = 1")
+            connection.commit()
+        finally:
+            connection.close()
+
+    def user_schema_objects(self) -> list[tuple]:
+        return self.rows(
+            "SELECT type, name, tbl_name, sql FROM sqlite_schema "
+            "WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"
+        )
 
     def assert_invalid(self, trace: dict, code: str = "invalid_trace") -> dict:
         result, output = self.write(trace)
@@ -197,6 +235,102 @@ class SQLiteStoreTests(unittest.TestCase):
         foreign_keys = self.rows("PRAGMA foreign_key_list(candidate_evaluations)")
         self.assertEqual(len(foreign_keys), 1)
         self.assertEqual(foreign_keys[0][2:5], ("routing_decisions", "trace_id", "trace_id"))
+
+    def test_partial_version_zero_database_is_rejected_without_mutation(self) -> None:
+        connection = sqlite3.connect(self.database_path)
+        try:
+            connection.execute("CREATE TABLE legacy_trace (id INTEGER PRIMARY KEY)")
+            connection.execute("INSERT INTO legacy_trace (id) VALUES (?)", (1,))
+            connection.commit()
+        finally:
+            connection.close()
+        before_bytes = self.database_path.read_bytes()
+        before_objects = self.user_schema_objects()
+
+        result, output = self.write(complete_trace("partial-v0"))
+
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(output["error"]["code"], "schema_migration_required")
+        self.assertEqual(self.database_path.read_bytes(), before_bytes)
+        self.assertEqual(self.user_schema_objects(), before_objects)
+        self.assertEqual(self.rows("PRAGMA user_version"), [(0,)])
+
+    def test_malformed_version_one_database_is_rejected_without_mutation(self) -> None:
+        self.create_exact_v1_schema()
+        connection = sqlite3.connect(self.database_path)
+        try:
+            connection.execute("DROP INDEX idx_routing_decisions_run_mode")
+            connection.commit()
+        finally:
+            connection.close()
+        before_bytes = self.database_path.read_bytes()
+        before_objects = self.user_schema_objects()
+
+        result, output = self.write(complete_trace("malformed-v1"))
+
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(output["error"]["code"], "schema_invalid")
+        self.assertEqual(self.database_path.read_bytes(), before_bytes)
+        self.assertEqual(self.user_schema_objects(), before_objects)
+        self.assertEqual(self.rows("PRAGMA user_version"), [(1,)])
+
+    def test_version_one_database_with_extra_object_is_rejected_without_mutation(self) -> None:
+        self.create_exact_v1_schema()
+        connection = sqlite3.connect(self.database_path)
+        try:
+            connection.execute("CREATE VIEW unapproved_trace_view AS SELECT trace_id FROM routing_decisions")
+            connection.commit()
+        finally:
+            connection.close()
+        before_bytes = self.database_path.read_bytes()
+        before_objects = self.user_schema_objects()
+
+        result, output = self.write(complete_trace("extra-v1-object"))
+
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(output["error"]["code"], "schema_invalid")
+        self.assertEqual(self.database_path.read_bytes(), before_bytes)
+        self.assertEqual(self.user_schema_objects(), before_objects)
+
+    def test_unsupported_schema_version_is_rejected_without_mutation(self) -> None:
+        connection = sqlite3.connect(self.database_path)
+        try:
+            connection.execute("PRAGMA user_version = 2")
+            connection.commit()
+        finally:
+            connection.close()
+        before_bytes = self.database_path.read_bytes()
+
+        result, output = self.write(complete_trace("unsupported-v2"))
+
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(output["error"]["code"], "schema_invalid")
+        self.assertEqual(output["error"]["detail"], "unsupported_schema_version")
+        self.assertEqual(self.database_path.read_bytes(), before_bytes)
+        self.assertEqual(self.rows("PRAGMA user_version"), [(2,)])
+
+    def test_exact_version_one_schema_is_accepted_idempotently(self) -> None:
+        self.create_exact_v1_schema()
+        before_objects = self.user_schema_objects()
+
+        result, output = self.write(complete_trace("exact-v1"))
+
+        self.assertEqual(result.returncode, 0, output)
+        self.assertEqual(self.user_schema_objects(), before_objects)
+        self.assertEqual(self.rows("PRAGMA user_version"), [(1,)])
+
+    def test_fresh_schema_and_first_write_roll_back_together(self) -> None:
+        trace = validate_trace(complete_trace("atomic-schema-write"))
+        with mock.patch.object(
+            sqlite_store,
+            "CANDIDATE_INSERT",
+            "INSERT INTO missing_candidate_table (trace_id) VALUES (?)",
+        ):
+            with self.assertRaises(sqlite3.Error):
+                write_trace(self.database_path, trace)
+
+        self.assertEqual(self.user_schema_objects(), [])
+        self.assertEqual(self.rows("PRAGMA user_version"), [(0,)])
 
     def test_one_transaction_stores_decision_and_every_candidate(self) -> None:
         self.write(complete_trace())
@@ -349,51 +483,109 @@ class SQLiteStoreTests(unittest.TestCase):
                 trace["candidate_evaluations"][0][field_name] = invalid_value
                 self.assert_invalid(trace)
 
-    def test_failure_selection_rules_allow_only_execution_failure_to_retain_a_winner(self) -> None:
-        execution_failure = complete_trace("execution-failure")
-        execution_failure.update({
+    def test_candidate_stage_transitions_are_accepted_in_order(self) -> None:
+        for index, stage in enumerate(("requirements", "quality", "price"), start=1):
+            with self.subTest(stage=stage):
+                trace = failure_trace(
+                    candidate(f"stage{index}|configuration", rejection_stage=stage),
+                    f"valid-{stage}-rejection",
+                )
+                result, output = self.write(trace)
+                self.assertEqual(result.returncode, 0, output)
+
+    def test_requirements_failure_cannot_reject_at_a_later_stage(self) -> None:
+        for index, later_stage in enumerate(("quality", "price"), start=1):
+            with self.subTest(later_stage=later_stage):
+                evaluation = candidate(
+                    f"requirements-later-{index}|configuration",
+                    rejection_stage=later_stage,
+                )
+                evaluation["requirements"]["passed"] = False
+                evaluation["requirements"]["reason_codes"] = ["candidate_unavailable"]
+                trace = failure_trace(evaluation, f"requirements-before-{later_stage}")
+                self.assert_invalid(trace)
+
+    def test_quality_failure_cannot_reject_at_price(self) -> None:
+        evaluation = candidate("quality-before-price|configuration", rejection_stage="price")
+        evaluation["quality"]["passed"] = False
+        evaluation["quality"]["reason_code"] = "quality_floor_not_met"
+        trace = failure_trace(evaluation, "quality-before-price")
+
+        self.assert_invalid(trace)
+
+    def test_null_earlier_stage_cannot_reach_price_rejection(self) -> None:
+        for index, field_name in enumerate(("requirements", "quality"), start=1):
+            with self.subTest(field_name=field_name):
+                evaluation = candidate(
+                    f"null-before-price-{index}|configuration",
+                    rejection_stage="price",
+                )
+                evaluation[field_name] = None
+                trace = failure_trace(evaluation, f"null-{field_name}-before-price")
+                self.assert_invalid(trace)
+
+    def test_unavailable_price_cannot_be_eligible_or_selected(self) -> None:
+        trace = complete_trace("selected-without-price")
+        selected = trace["candidate_evaluations"][0]
+        selected["price"].update({
+            "available": False,
+            "reason_code": "pricing_snapshot_unavailable",
+            "request_profile_group": None,
+            "estimated_input_tokens": None,
+            "estimated_visible_output_tokens": None,
+            "estimated_reasoning_tokens": None,
+            "estimated_billable_output_tokens": None,
+            "input_usd_per_million_tokens": None,
+            "output_usd_per_million_tokens": None,
+            "price": None,
+            "price_final": False,
+        })
+
+        self.assert_invalid(trace)
+
+    def test_completed_winner_quality_must_match_selected_evaluation(self) -> None:
+        cases = (
+            ("effective_quality", "frontier"),
+            ("quality_bottleneck", "domain.computer_science"),
+        )
+        for index, (field_name, value) in enumerate(cases, start=1):
+            with self.subTest(field_name=field_name):
+                trace = complete_trace(f"winner-quality-mismatch-{index}")
+                trace[field_name] = value
+                self.assert_invalid(trace)
+
+    def test_completed_winner_price_and_finality_must_match_selected_evaluation(self) -> None:
+        cases = (
+            ("price", "0.1234567890123456789012345679"),
+            ("price_final", False),
+        )
+        for index, (field_name, value) in enumerate(cases, start=1):
+            with self.subTest(field_name=field_name):
+                trace = complete_trace(f"winner-price-mismatch-{index}")
+                trace[field_name] = value
+                self.assert_invalid(trace)
+
+    def test_failure_traces_have_no_winner_or_winner_quality(self) -> None:
+        valid_failure = failure_trace(
+            candidate("failed|configuration", rejection_stage="requirements"),
+            "valid-failure",
+        )
+        result, output = self.write(valid_failure)
+        self.assertEqual(result.returncode, 0, output)
+
+        retained_winner = complete_trace("failure-retained-winner")
+        retained_winner.update({
             "output_status": "execution_failed",
             "reason_code": "launcher_execution_failed",
             "response_hash": None,
-            "effective_quality": "strong",
-            "price_final": False,
         })
-        result, _ = self.write(execution_failure)
-        self.assertEqual(result.returncode, 0)
+        self.assert_invalid(retained_winner)
 
-        preselection_failure = complete_trace("preselection-failure")
-        preselection_failure.update({
-            "selected_candidate": None,
-            "output_status": "no_eligible_configuration",
-            "reason_code": "all_routes_unavailable",
-            "effective_quality": None,
-            "quality_bottleneck": None,
-            "price": None,
-            "price_final": False,
-            "latency_ms": None,
-            "response_hash": None,
-        })
-        for evaluation in preselection_failure["candidate_evaluations"]:
-            evaluation["selected"] = False
-            evaluation["eligible"] = False
-            evaluation["rejection_stage"] = "requirements"
-            evaluation["rejection_reason_codes"] = ["candidate_unavailable"]
-            evaluation["requirements"]["passed"] = False
-            evaluation["requirements"]["reason_codes"] = ["candidate_unavailable"]
-            evaluation["quality"] = None
-            evaluation["price"] = None
-            evaluation["latency_available"] = False
-            evaluation["latency_milliseconds"] = None
-        result, _ = self.write(preselection_failure)
-        self.assertEqual(result.returncode, 0)
-
-        invalid_failure = copy.deepcopy(preselection_failure)
-        invalid_failure["trace_id"] = "invalid-preselection-failure"
-        invalid_failure["selected_candidate"] = invalid_failure["candidate_evaluations"][0][
-            "candidate_identity"
-        ]
-        invalid_failure["candidate_evaluations"][0]["selected"] = True
-        self.assert_invalid(invalid_failure)
+        retained_quality = copy.deepcopy(valid_failure)
+        retained_quality["trace_id"] = "failure-retained-quality"
+        retained_quality["effective_quality"] = "strong"
+        retained_quality["quality_bottleneck"] = "task_type.coding"
+        self.assert_invalid(retained_quality)
 
     def test_hash_validation_and_normalization(self) -> None:
         trace = complete_trace()
