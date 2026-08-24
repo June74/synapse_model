@@ -2,6 +2,7 @@
 
 | ID | Title | Status | First observed | Last observed |
 |---|---|---|---|---|
+| [SB-20260824-012823-apply-patch-duplicate-target](incidents/2026-08-24T012823Z-apply-patch-duplicate-target.md) | Patch request repeated one target file in multiple update blocks | closed | 2026-08-24 | 2026-08-24 |
 | [SB-20260823-232717-requirements-profile-path-format-parser](incidents/2026-08-23T232717Z-requirements-profile-path-format-parser.md) | Requirements profile-path format expression caused a parser error | closed | 2026-08-23 | 2026-08-23 |
 | [SB-20260823-234012-minimal-profile-fixture-path](incidents/2026-08-23T234012Z-minimal-profile-fixture-path.md) | Assumed minimal-profile fixture filename caused a path-not-found error | closed | 2026-08-23 | 2026-08-23 |
 | SB-2026-08-19-001 | PowerShell DOCX paragraph extraction syntax error | closed | 2026-08-19 | 2026-08-19 |
@@ -9,7 +10,7 @@
 | SB-2026-08-19-003 | Skill path lookup mismatch | closed | 2026-08-19 | 2026-08-19 |
 | SB-2026-08-19-004 | Claude CLI smoke test did not return within timeout | contained | 2026-08-19 | 2026-08-19 |
 | SB-2026-08-19-005 | Antigravity CLI authentication unavailable in sandbox | contained | 2026-08-19 | 2026-08-19 |
-| SB-2026-08-19-006 | Git index unavailable to sandbox | contained | 2026-08-19 | 2026-08-23 |
+| SB-2026-08-19-006 | Git index unavailable to sandbox | contained | 2026-08-19 | 2026-08-24 |
 | SB-2026-08-19-007 | Plan review command used an invalid PowerShell parameter | contained | 2026-08-19 | 2026-08-19 |
 | SB-2026-08-19-008 | Pre-creation worktree ignore check rejected absent directory | contained | 2026-08-19 | 2026-08-23 |
 | SB-2026-08-19-009 | Existing descendant-drain test was transiently timing-sensitive | closed | 2026-08-19 | 2026-08-19 |

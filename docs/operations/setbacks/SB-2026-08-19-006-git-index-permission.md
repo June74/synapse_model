@@ -2,7 +2,7 @@
 
 - **Status:** contained
 - **First observed:** 2026-08-19
-- **Last observed:** 2026-08-23
+- **Last observed:** 2026-08-24
 - **Symptom:** A scoped `git add`/`git commit` for the design specification failed because Git could not create `C:\Users\2006i\projects\router_model\.git\index.lock` due to permission denial.
 - **Confirmed:** The design file was written successfully; no commit was created and no existing files were overwritten.
 - **Correction:** Leave the specification uncommitted in the shared workspace. If a commit is desired, run the Git command from the user's personal terminal where the repository permissions are available.
@@ -66,3 +66,13 @@
 - **Correction:** Retry only the bounded documentation staging and commit through approved Git-metadata access.
 - **Prevention:** Continue treating main-agent worktree index and commit operations as requiring approved Git-metadata access.
 - **Related verification:** Corrected source and profile inspections completed successfully before the commit retry.
+
+## Recurrence: 2026-08-24, Task 6 implementation commits
+
+- **Phase/task:** Deterministic router V1 Task 6, documentation and feature commits.
+- **Symptom:** Scoped documentation staging could not create `.git/worktrees/deterministic-router-v1/index.lock`; Git returned permission denied.
+- **Confirmed cause:** Worktree Git metadata remains outside the managed write boundary under the parent repository `.git` directory.
+- **Impact:** No file was staged and no commit was created. The Task 6 implementation, tests, fixture, and setback records remain intact in the worktree.
+- **Correction:** Retry only the bounded documentation and Task 6 staging/commit commands through approved Git-metadata access.
+- **Prevention:** Continue treating worktree index and commit operations as requiring approved Git-metadata access.
+- **Related verification:** The corrected patch structure passed `git diff --check`; the latest full router suite passed before the staging attempt. A fresh final suite remains required after the last conservative pricing guard.
