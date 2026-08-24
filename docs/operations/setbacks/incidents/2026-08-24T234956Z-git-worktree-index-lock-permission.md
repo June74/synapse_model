@@ -1,11 +1,11 @@
 # SB-20260824-234956-git-worktree-index-lock-permission: Sandbox denied Git worktree index lock creation
 
-- **Status:** open
+- **Status:** closed
 - **First observed:** 2026-08-24T23:49:56.062250Z
-- **Last observed:** 2026-08-24T23:49:56.062250Z
+- **Last observed:** 2026-08-24T23:50:12.460701Z
 - **Phase/task:** Task 10 acceptance note commit
-- **Environment:** To be established
-- **Version/commit:** To be established
+- **Environment:** Managed Codex workspace-write sandbox, Windows PowerShell 7, linked Git worktree
+- **Version/commit:** `ba8c9035a0730c1e01735081e2652c744eb3846d` before correction; verification commit `ff368ec`
 
 ## Symptom
 
@@ -17,33 +17,34 @@ Only the local documentation-log commit was delayed; Task 10 files and runtime b
 
 ## Reproduction conditions
 
-To be established.
+Run `git add` or `git commit` in the linked deterministic-router-v1 worktree while the sandbox permits repository files but exposes the parent repository's `.git/worktrees` metadata as read-only.
 
 ## Safe evidence
 
-To be established. Do not paste private or secret values.
+Git reported that it could not create `.git/worktrees/deterministic-router-v1/index.lock`. The same bounded add-and-commit operation succeeded when rerun with scoped elevated filesystem permission. No private values appeared in either result.
 
 ## Attempts and outcomes
 
-None recorded.
+1. The ordinary sandboxed `git add` and `git commit` failed before staging.
+2. The exact bounded operation was rerun with scoped elevated permission and created commit `ff368ec`.
 
 ## Cause classification
 
-- **Confirmed cause:** Unconfirmed.
-- **Hypotheses:** None recorded.
-- **Rejected hypotheses:** None recorded.
-- **Known exclusions:** None recorded.
+- **Confirmed cause:** The managed sandbox did not grant write access to the linked worktree index under the parent repository's Git metadata directory.
+- **Hypotheses:** None remaining.
+- **Rejected hypotheses:** A stale lock was not the cause; Git reported inability to create the lock, and the same operation succeeded immediately with the required permission.
+- **Known exclusions:** Task 10 source files, tests, provider authentication, and remote Git state were unaffected.
 
 ## Correction and prevention
 
-- **Correction:** Pending.
-- **Prevention:** Pending.
-- **Owner:** Codex and project owner.
-- **Next diagnostic step:** Establish the smallest safe reproduction.
+- **Correction:** Reran only the intended add-and-commit operation with scoped elevated filesystem permission.
+- **Prevention:** In this managed linked worktree, request scoped permission for Git index mutations instead of retrying ordinary sandbox writes.
+- **Owner:** Codex.
+- **Next diagnostic step:** None; the bounded commit succeeded.
 
 ## Verification and related work
 
-Pending.
+Commit `ff368ec` contains only the two acceptance setback records and the setbacks index update. The command exited successfully.
 
 ## Recurrence history
 
