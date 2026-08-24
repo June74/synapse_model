@@ -1357,6 +1357,30 @@ function New-ResultRecord {
     return [pscustomobject]$record
 }
 
+function Test-PilotExactTokenCount {
+    param([AllowNull()][object]$Value)
+
+    if ($null -eq $Value) { return $false }
+    $integerTypes = @([byte], [sbyte], [int16], [uint16], [int32], [uint32], [int64], [uint64], [Numerics.BigInteger])
+    return (($Value.GetType() -in $integerTypes) -or
+        ($Value -is [decimal] -and $Value -eq [decimal]::Truncate($Value))) -and
+        [decimal]$Value -ge 0
+}
+
+function Get-PilotExactPropertyValue {
+    param(
+        [AllowNull()][object]$InputObject,
+        [Parameter(Mandatory)][string]$Name
+    )
+
+    if ($null -eq $InputObject) { return $null }
+    $property = $InputObject.PSObject.Properties |
+        Where-Object { $_.Name -ceq $Name } |
+        Select-Object -First 1
+    if ($null -eq $property) { return $null }
+    return $property.Value
+}
+
 function ConvertTo-PilotUsageMetadata {
     param([AllowNull()][object]$ProcessResult)
 
@@ -1367,17 +1391,13 @@ function ConvertTo-PilotUsageMetadata {
     if ($null -eq $usageProperty -or $null -eq $usageProperty.Value) { return $null }
 
     $usage = $usageProperty.Value
-    $integerTypes = @([byte], [sbyte], [int16], [uint16], [int32], [uint32], [int64], [uint64], [Numerics.BigInteger])
     $values = [ordered]@{}
     $allTokensValid = $true
     foreach ($name in @('actual_input_tokens', 'visible_output_tokens', 'reasoning_tokens')) {
         $property = $usage.PSObject.Properties |
             Where-Object { $_.Name -ceq $name } |
             Select-Object -First 1
-        $valid = $null -ne $property -and $null -ne $property.Value -and
-            (($property.Value.GetType() -in $integerTypes) -or
-                ($property.Value -is [decimal] -and $property.Value -eq [decimal]::Truncate($property.Value))) -and
-            [decimal]$property.Value -ge 0
+        $valid = $null -ne $property -and (Test-PilotExactTokenCount -Value $property.Value)
         $values[$name] = if ($valid) { [decimal]$property.Value } else { $null }
         if (-not $valid) { $allTokensValid = $false }
     }
@@ -1413,6 +1433,26 @@ function New-PilotExtractedUsage {
     return ConvertTo-PilotUsageMetadata -ProcessResult $wrapper
 }
 
+function New-PilotSplitOutputUsage {
+    param(
+        [AllowNull()][object]$InputTokens,
+        [AllowNull()][object]$OutputTokens,
+        [AllowNull()][object]$HiddenTokens
+    )
+
+    if (-not (Test-PilotExactTokenCount -Value $InputTokens) -or
+        -not (Test-PilotExactTokenCount -Value $OutputTokens) -or
+        -not (Test-PilotExactTokenCount -Value $HiddenTokens) -or
+        [decimal]$HiddenTokens -gt [decimal]$OutputTokens) {
+        return New-PilotExtractedUsage -InputTokens $InputTokens `
+            -VisibleOutputTokens $null -ReasoningTokens $null
+    }
+
+    return New-PilotExtractedUsage -InputTokens $InputTokens `
+        -VisibleOutputTokens ([decimal]$OutputTokens - [decimal]$HiddenTokens) `
+        -ReasoningTokens $HiddenTokens
+}
+
 function Get-PilotProviderUsage {
     param(
         [Parameter(Mandatory)][object]$Candidate,
@@ -1432,9 +1472,10 @@ function Get-PilotProviderUsage {
                     }
                 }
                 if ($null -eq $finalUsage) { return $null }
-                return New-PilotExtractedUsage -InputTokens $finalUsage.input_tokens `
-                    -VisibleOutputTokens $finalUsage.visible_output_tokens `
-                    -ReasoningTokens $finalUsage.reasoning_tokens
+                return New-PilotSplitOutputUsage `
+                    -InputTokens (Get-PilotExactPropertyValue -InputObject $finalUsage -Name 'input_tokens') `
+                    -OutputTokens (Get-PilotExactPropertyValue -InputObject $finalUsage -Name 'output_tokens') `
+                    -HiddenTokens (Get-PilotExactPropertyValue -InputObject $finalUsage -Name 'reasoning_output_tokens')
             }
             'claude' {
                 $envelope = $Text | ConvertFrom-Json -Depth 30 -ErrorAction Stop
@@ -1445,17 +1486,19 @@ function Get-PilotProviderUsage {
                     Select-Object -First 1
                 if ($null -eq $modelProperty -or $null -eq $modelProperty.Value) { return $null }
                 $usage = $modelProperty.Value
-                return New-PilotExtractedUsage -InputTokens $usage.inputTokens `
-                    -VisibleOutputTokens $usage.outputTokens -ReasoningTokens $usage.reasoningTokens
+                return New-PilotExtractedUsage `
+                    -InputTokens (Get-PilotExactPropertyValue -InputObject $usage -Name 'inputTokens') `
+                    -VisibleOutputTokens $null -ReasoningTokens $null
             }
             'agy' {
                 $objects = @(Get-AgyJsonObjects -Text $Text)
                 if ($objects.Count -ne 1 -or
-                    $objects[0].PSObject.Properties.Name -cnotcontains 'usageMetadata') { return $null }
-                $usage = $objects[0].usageMetadata
-                return New-PilotExtractedUsage -InputTokens $usage.promptTokenCount `
-                    -VisibleOutputTokens $usage.candidatesTokenCount `
-                    -ReasoningTokens $usage.thoughtsTokenCount
+                    $objects[0].PSObject.Properties.Name -cnotcontains 'usage') { return $null }
+                $usage = $objects[0].usage
+                return New-PilotSplitOutputUsage `
+                    -InputTokens (Get-PilotExactPropertyValue -InputObject $usage -Name 'input_tokens') `
+                    -OutputTokens (Get-PilotExactPropertyValue -InputObject $usage -Name 'output_tokens') `
+                    -HiddenTokens (Get-PilotExactPropertyValue -InputObject $usage -Name 'thinking_tokens')
             }
         }
     } catch {

@@ -5153,6 +5153,29 @@ Invoke-Assertion 'complete actual usage finalizes price while absent usage prese
     Assert-Equal $estimated.trace.price_final $false
 }
 
+Invoke-Assertion 'router finalizes price only from trustworthy provider usage splits' {
+    $storage = { param($Trace) [pscustomobject]@{ ok = $true; trace_id = $Trace.trace_id; candidate_evaluations_inserted = @($Trace.candidate_evaluations).Count } }
+    $codexText = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'pilot/tests/fixtures/codex-usage-complete.jsonl')
+    $codexUsage = Get-PilotProviderUsage -Candidate ([pscustomobject]@{ tool = 'codex'; model = 'fixture-model' }) -Text $codexText
+    $parameters = New-Task8RouterParameters -Executor {
+        New-Task8ExecutionResult -Usage $codexUsage
+    } -StorageInvoker $storage
+    $final = Invoke-RouterRun @parameters
+    Assert-Equal $final.response.price ([decimal]'0.000345')
+    Assert-Equal $final.response.price_final $true
+    Assert-Equal $final.trace.price_final $true
+
+    $claudeText = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'pilot/tests/fixtures/claude-usage-input-output-only.json')
+    $claudeUsage = Get-PilotProviderUsage -Candidate ([pscustomobject]@{ tool = 'claude'; model = 'claude-sonnet-5' }) -Text $claudeText
+    $parameters = New-Task8RouterParameters -Executor {
+        New-Task8ExecutionResult -Usage $claudeUsage
+    } -StorageInvoker $storage
+    $estimated = Invoke-RouterRun @parameters
+    Assert-Equal $estimated.response.price ([decimal]'0.003849')
+    Assert-Equal $estimated.response.price_final $false
+    Assert-Equal $estimated.trace.price_final $false
+}
+
 Invoke-Assertion 'selected execution failure is normalized traced and never falls back' {
     $script:task8ExecutionFailures = 0
     $script:task8FailureTrace = $null

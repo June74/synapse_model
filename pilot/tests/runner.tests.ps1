@@ -1655,50 +1655,121 @@ Invoke-Assertion 'Invoke-PilotCandidate rejects every unsuccessful transport sta
     }
 }
 
-$usageCases = @(
-    [pscustomobject]@{
-        tool = 'codex'; model = $null; complete = 'codex-usage-complete.jsonl'; incomplete = 'codex-usage-incomplete.jsonl'
-        input = 120; visible = 34; reasoning = 11
-    }
-    [pscustomobject]@{
-        tool = 'claude'; model = 'claude-sonnet-5'; complete = 'claude-usage-complete.json'; incomplete = 'claude-usage-incomplete.json'
-        input = 140; visible = 40; reasoning = 12
-    }
-    [pscustomobject]@{
-        tool = 'agy'; model = $null; complete = 'agy-usage-complete.json'; incomplete = 'agy-usage-incomplete.json'
-        input = 160; visible = 44; reasoning = 13
-    }
-)
-foreach ($usageCase in $usageCases) {
-    Invoke-Assertion ("Invoke-PilotCandidate extracts trustworthy final {0} usage without changing canonical parsing" -f $usageCase.tool) {
-        $matrix = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'pilot/model_matrix.json') | ConvertFrom-Json
-        $candidate = @($matrix.candidates | Where-Object {
-            $_.tool -ceq $usageCase.tool -and
-            ($null -eq $usageCase.model -or $_.model -ceq $usageCase.model)
-        } | Select-Object -First 1)[0]
-        $completeText = Get-Content -Raw -LiteralPath (Join-Path $projectRoot ('pilot/tests/fixtures/' + $usageCase.complete))
-        $complete = Invoke-PilotCandidate -Candidate $candidate -Prompt ('complete ' + $usageCase.tool) -NativeInvoker {
-            [pscustomobject]@{
-                exit_code = 0; stdout = $completeText; stderr = ''; duration_ms = 10
-                timed_out = $false; cleanup_failed = $false; cleanup_status = 'not_required'; process_exited = $true
-            }
-        }
-        Assert-Equal $complete.canonical.answer '4'
-        Assert-True $complete.usage.complete
-        Assert-Equal $complete.usage.actual_input_tokens $usageCase.input
-        Assert-Equal $complete.usage.visible_output_tokens $usageCase.visible
-        Assert-Equal $complete.usage.reasoning_tokens $usageCase.reasoning
+function Get-TestUsageCandidate {
+    param([Parameter(Mandatory)][string]$Tool, [AllowNull()][string]$Model)
 
-        $incompleteText = Get-Content -Raw -LiteralPath (Join-Path $projectRoot ('pilot/tests/fixtures/' + $usageCase.incomplete))
-        $incomplete = Invoke-PilotCandidate -Candidate $candidate -Prompt ('incomplete ' + $usageCase.tool) -NativeInvoker {
+    $matrix = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'pilot/model_matrix.json') | ConvertFrom-Json
+    return @($matrix.candidates | Where-Object {
+        $_.tool -ceq $Tool -and ([string]::IsNullOrEmpty($Model) -or $_.model -ceq $Model)
+    } | Select-Object -First 1)[0]
+}
+
+function New-TestCodexUsageEnvelope {
+    param(
+        [AllowNull()][object]$InputTokens = 120,
+        [AllowNull()][object]$OutputTokens = 45,
+        [AllowNull()][object]$ReasoningTokens = 11,
+        [bool]$IncludeReasoning = $true
+    )
+
+    $usage = [ordered]@{ input_tokens = $InputTokens; cached_input_tokens = 80; output_tokens = $OutputTokens }
+    if ($IncludeReasoning) { $usage.reasoning_output_tokens = $ReasoningTokens }
+    $message = [ordered]@{
+        type = 'item.completed'
+        item = [ordered]@{ type = 'agent_message'; text = '{"status":"success","answer":"4","error":null}' }
+    }
+    $completed = [ordered]@{ type = 'turn.completed'; usage = $usage }
+    return (($message | ConvertTo-Json -Depth 10 -Compress), ($completed | ConvertTo-Json -Depth 10 -Compress)) -join "`n"
+}
+
+function New-TestAgyUsageEnvelope {
+    param(
+        [AllowNull()][object]$InputTokens = 160,
+        [AllowNull()][object]$OutputTokens = 57,
+        [AllowNull()][object]$ThinkingTokens = 13,
+        [bool]$IncludeThinking = $true
+    )
+
+    $usage = [ordered]@{ input_tokens = $InputTokens; output_tokens = $OutputTokens; total_tokens = 217 }
+    if ($IncludeThinking) { $usage.thinking_tokens = $ThinkingTokens }
+    return [ordered]@{
+        thread_id = 'fixture-thread'; session_id = 'fixture-session'; status = 'SUCCESS'
+        created_at = '2026-08-24T18:00:00Z'; finished_at = '2026-08-24T18:00:01Z'; result = '4'
+        structured_output = [ordered]@{ status = 'success'; answer = '4'; error = $null }
+        usage = $usage
+    } | ConvertTo-Json -Depth 10
+}
+
+$completeUsageCases = @(
+    [pscustomobject]@{ tool = 'codex'; model = $null; fixture = 'codex-usage-complete.jsonl'; input = 120; visible = 34; reasoning = 11 }
+    [pscustomobject]@{ tool = 'agy'; model = $null; fixture = 'agy-usage-complete.json'; input = 160; visible = 44; reasoning = 13 }
+)
+foreach ($usageCase in $completeUsageCases) {
+    Invoke-Assertion ("Invoke-PilotCandidate derives visible output from documented final {0} usage" -f $usageCase.tool) {
+        $candidate = Get-TestUsageCandidate -Tool $usageCase.tool -Model $usageCase.model
+        $nativeText = Get-Content -Raw -LiteralPath (Join-Path $projectRoot ('pilot/tests/fixtures/' + $usageCase.fixture))
+        $execution = Invoke-PilotCandidate -Candidate $candidate -Prompt ('complete ' + $usageCase.tool) -NativeInvoker {
             [pscustomobject]@{
-                exit_code = 0; stdout = $incompleteText; stderr = ''; duration_ms = 11
+                exit_code = 0; stdout = $nativeText; stderr = ''; duration_ms = 10
                 timed_out = $false; cleanup_failed = $false; cleanup_status = 'not_required'; process_exited = $true
             }
         }
-        Assert-Equal $incomplete.canonical.answer '4'
-        Assert-True (-not $incomplete.usage.complete)
+        Assert-Equal $execution.canonical.answer '4'
+        Assert-True $execution.usage.complete
+        Assert-Equal $execution.usage.actual_input_tokens $usageCase.input
+        Assert-Equal $execution.usage.visible_output_tokens $usageCase.visible
+        Assert-Equal $execution.usage.reasoning_tokens $usageCase.reasoning
     }
+}
+
+Invoke-Assertion 'Codex final usage is incomplete for missing or invalid exact counts and impossible splits' {
+    $candidate = Get-TestUsageCandidate -Tool 'codex' -Model $null
+    $cases = @(
+        [pscustomobject]@{ name = 'missing reasoning'; text = New-TestCodexUsageEnvelope -IncludeReasoning $false }
+        [pscustomobject]@{ name = 'negative'; text = New-TestCodexUsageEnvelope -ReasoningTokens (-1) }
+        [pscustomobject]@{ name = 'fractional'; text = New-TestCodexUsageEnvelope -OutputTokens 45.5 }
+        [pscustomobject]@{ name = 'boolean'; text = New-TestCodexUsageEnvelope -InputTokens $true }
+        [pscustomobject]@{ name = 'string'; text = New-TestCodexUsageEnvelope -ReasoningTokens '11' }
+        [pscustomobject]@{ name = 'reasoning exceeds output'; text = New-TestCodexUsageEnvelope -OutputTokens 10 -ReasoningTokens 11 }
+    )
+    foreach ($case in $cases) {
+        $usage = Get-PilotProviderUsage -Candidate $candidate -Text $case.text
+        Assert-True ($null -ne $usage)
+        Assert-True (-not $usage.complete)
+    }
+}
+
+Invoke-Assertion 'Agy final usage is incomplete for missing or invalid exact counts and impossible splits' {
+    $candidate = Get-TestUsageCandidate -Tool 'agy' -Model $null
+    $cases = @(
+        [pscustomobject]@{ name = 'missing thinking'; text = New-TestAgyUsageEnvelope -IncludeThinking $false }
+        [pscustomobject]@{ name = 'negative'; text = New-TestAgyUsageEnvelope -ThinkingTokens (-1) }
+        [pscustomobject]@{ name = 'fractional'; text = New-TestAgyUsageEnvelope -OutputTokens 57.5 }
+        [pscustomobject]@{ name = 'boolean'; text = New-TestAgyUsageEnvelope -InputTokens $true }
+        [pscustomobject]@{ name = 'string'; text = New-TestAgyUsageEnvelope -ThinkingTokens '13' }
+        [pscustomobject]@{ name = 'thinking exceeds output'; text = New-TestAgyUsageEnvelope -OutputTokens 12 -ThinkingTokens 13 }
+    )
+    foreach ($case in $cases) {
+        $usage = Get-PilotProviderUsage -Candidate $candidate -Text $case.text
+        Assert-True ($null -ne $usage)
+        Assert-True (-not $usage.complete)
+    }
+}
+
+Invoke-Assertion 'Claude modelUsage input and output counts remain incomplete without a documented reasoning split' {
+    $candidate = Get-TestUsageCandidate -Tool 'claude' -Model 'claude-sonnet-5'
+    $nativeText = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'pilot/tests/fixtures/claude-usage-input-output-only.json')
+    $execution = Invoke-PilotCandidate -Candidate $candidate -Prompt 'claude incomplete usage' -NativeInvoker {
+        [pscustomobject]@{
+            exit_code = 0; stdout = $nativeText; stderr = ''; duration_ms = 10
+            timed_out = $false; cleanup_failed = $false; cleanup_status = 'not_required'; process_exited = $true
+        }
+    }
+    Assert-Equal $execution.canonical.answer '4'
+    Assert-True ($null -ne $execution.usage)
+    Assert-True (-not $execution.usage.complete)
+    Assert-Equal $execution.usage.visible_output_tokens $null
+    Assert-Equal $execution.usage.reasoning_tokens $null
 }
 
 if ($failures.Count -gt 0) {
