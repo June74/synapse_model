@@ -50,3 +50,4 @@ Addressing the minimal profile with a filename inferred from its candidate ident
 ## Recurrence history
 
 - 2026-08-23T23:40:12.4218627Z: First observed and closed after bounded enumeration verified the correction.
+- 2026-08-23, Task 6 pricing inspection: A guessed Gemini 3.1 profile filename did not exist. Bounded enumeration found `gemini-3.1-pro-high__high.json` and `gemini-3.1-pro-low__low.json`. No files or external state changed. Prevention remains to enumerate profile directories before constructing filenames from model identity assumptions.
