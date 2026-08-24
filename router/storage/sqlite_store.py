@@ -40,6 +40,7 @@ FAILURE_REASON_CODES = {
 }
 QUALITY_CATEGORIES = {"standard", "strong", "frontier"}
 EVIDENCE_CATEGORIES = QUALITY_CATEGORIES | {"unknown", "unsupported"}
+QUALITY_RANKS = {"standard": 0, "strong": 1, "frontier": 2}
 REJECTION_STAGES = {"request_validation", "requirements", "quality", "price"}
 CAPABILITIES = {
     "instruction_following",
@@ -48,6 +49,72 @@ CAPABILITIES = {
     "factual_reliability",
     "source_grounded_synthesis",
     "long_context",
+}
+
+REQUIREMENT_REASON_ORDER = (
+    "candidate_disabled",
+    "candidate_unavailable",
+    "runtime_state_invalid",
+    "runtime_identity_mismatch",
+    "launcher_unavailable",
+    "launcher_unauthenticated",
+    "launcher_unhealthy",
+    "quota_exhausted",
+    "text_input_unsupported",
+    "text_output_unsupported",
+    "english_unsupported",
+    "single_turn_unsupported",
+    "context_window_exceeded",
+    "output_window_exceeded",
+    "price_unavailable",
+    "required_function_unsupported",
+    "required_capability_unavailable",
+)
+REQUIREMENT_REASON_CODES = set(REQUIREMENT_REASON_ORDER)
+QUALITY_FAILURE_REASON_CODES = {
+    "required_capability_unavailable",
+    "quality_evidence_unknown",
+    "quality_floor_not_met",
+}
+PRICE_FAILURE_REASON_CODES = {
+    "request_profile_group_invalid",
+    "pricing_snapshot_unavailable",
+    "pricing_snapshot_invalid",
+    "pricing_snapshot_mismatch",
+    "pricing_date_invalid",
+    "token_estimate_unavailable",
+    "token_estimate_invalid",
+    "pricing_schedule_unavailable",
+    "pricing_period_unavailable",
+    "pricing_rate_unavailable",
+    "price_calculation_unavailable",
+    "free_route_disallowed",
+}
+STATUS_REASON_CODES = {
+    "invalid_request": {
+        "unsupported_language",
+        "unsupported_modality",
+        "sensitive_request_unsupported",
+        "high_stakes_unsupported",
+    },
+    "unsupported_request": {
+        "unsupported_language",
+        "unsupported_modality",
+        "sensitive_request_unsupported",
+        "high_stakes_unsupported",
+        "context_too_large",
+        "required_capability_unavailable",
+        "quality_floor_not_met",
+        "quality_evidence_unknown",
+    },
+    "no_eligible_configuration": {
+        "context_too_large",
+        "required_capability_unavailable",
+        "quality_floor_not_met",
+        "quality_evidence_unknown",
+        "all_routes_unavailable",
+    },
+    "execution_failed": {"launcher_execution_failed"},
 }
 
 FORBIDDEN_FIELD_NAMES = {
@@ -531,25 +598,82 @@ def validate_requirements(value: Any, identity: str, path: str) -> dict[str, Any
     if require_string(requirements["candidate_identity"], f"{path}.candidate_identity") != identity:
         raise TraceInputError("Nested candidate identity does not match.", path=f"{path}.candidate_identity")
     passed = require_bool(requirements["passed"], f"{path}.passed")
-    reason_codes = require_string_list(requirements["reason_codes"], f"{path}.reason_codes")
+    reason_codes = require_string_list(
+        requirements["reason_codes"],
+        f"{path}.reason_codes",
+        allowed=REQUIREMENT_REASON_CODES,
+    )
+    canonical_reasons = sorted(
+        reason_codes,
+        key=REQUIREMENT_REASON_ORDER.index,
+    )
+    if reason_codes != canonical_reasons:
+        raise TraceInputError(
+            "Requirement reasons must use canonical producer order.",
+            path=f"{path}.reason_codes",
+        )
     unavailable = require_string_list(
-        requirements["unavailable_capabilities"], f"{path}.unavailable_capabilities"
+        requirements["unavailable_capabilities"],
+        f"{path}.unavailable_capabilities",
+        allowed=CAPABILITIES,
     )
     unsupported_value = requirements["unsupported_requirements"]
     if not isinstance(unsupported_value, list):
         raise TraceInputError("Expected an array.", path=f"{path}.unsupported_requirements", detail="wrong_type")
     unsupported: list[dict[str, str]] = []
+    unsupported_dimensions: set[str] = set()
+    profile_maps = {
+        "task_type": "task_types",
+        "domain": "domains",
+        "complexity": "complexities",
+    }
     for index, item in enumerate(unsupported_value):
         item_path = f"{path}.unsupported_requirements[{index}]"
         record = require_exact_fields(item, UNSUPPORTED_REQUIREMENT_FIELDS, set(), item_path)
-        unsupported.append({
+        normalized_record = {
             name: require_string(record[name], f"{item_path}.{name}")
             for name in ("dimension", "value", "profile_path")
-        })
-    if passed and reason_codes:
-        raise TraceInputError("Passed requirements cannot have failure reasons.", path=f"{path}.reason_codes")
+        }
+        dimension = normalized_record["dimension"]
+        if dimension not in profile_maps:
+            raise TraceInputError(
+                "Unsupported requirement dimension is not canonical.",
+                path=f"{item_path}.dimension",
+            )
+        expected_path = (
+            f"quality.{profile_maps[dimension]}.{normalized_record['value']}"
+        )
+        if normalized_record["profile_path"] != expected_path:
+            raise TraceInputError(
+                "Unsupported requirement profile path is inconsistent.",
+                path=f"{item_path}.profile_path",
+            )
+        if dimension in unsupported_dimensions:
+            raise TraceInputError(
+                "Unsupported requirement dimensions must be unique.",
+                path=f"{item_path}.dimension",
+            )
+        unsupported_dimensions.add(dimension)
+        unsupported.append(normalized_record)
+    if passed and (reason_codes or unavailable or unsupported):
+        raise TraceInputError(
+            "Passed requirements cannot retain failure reasons or details.",
+            path=f"{path}.reason_codes",
+        )
     if not passed and not reason_codes:
         raise TraceInputError("Failed requirements require a reason.", path=f"{path}.reason_codes")
+    capability_reason = "required_capability_unavailable" in reason_codes
+    if capability_reason != bool(unavailable):
+        raise TraceInputError(
+            "Unavailable capabilities must match their requirement reason.",
+            path=f"{path}.unavailable_capabilities",
+        )
+    function_reason = "required_function_unsupported" in reason_codes
+    if function_reason != bool(unsupported):
+        raise TraceInputError(
+            "Unsupported requirement details must match their requirement reason.",
+            path=f"{path}.unsupported_requirements",
+        )
     return {
         "candidate_identity": identity,
         "passed": passed,
@@ -559,14 +683,21 @@ def validate_requirements(value: Any, identity: str, path: str) -> dict[str, Any
     }
 
 
-def validate_quality(value: Any, identity: str, path: str) -> dict[str, Any] | None:
+def validate_quality(
+    value: Any,
+    identity: str,
+    quality_floor: str,
+    path: str,
+) -> dict[str, Any] | None:
     if value is None:
         return None
     quality = require_exact_fields(value, QUALITY_FIELDS, set(), path)
     if require_string(quality["candidate_identity"], f"{path}.candidate_identity") != identity:
         raise TraceInputError("Nested candidate identity does not match.", path=f"{path}.candidate_identity")
     passed = require_bool(quality["passed"], f"{path}.passed")
-    reason_code = require_nullable_string(quality["reason_code"], f"{path}.reason_code")
+    reason_code = require_nullable_enum(
+        quality["reason_code"], QUALITY_FAILURE_REASON_CODES, f"{path}.reason_code"
+    )
     effective_quality = require_nullable_enum(
         quality["effective_quality"], QUALITY_CATEGORIES, f"{path}.effective_quality"
     )
@@ -575,17 +706,75 @@ def validate_quality(value: Any, identity: str, path: str) -> dict[str, Any] | N
     if not isinstance(categories_value, list):
         raise TraceInputError("Expected an array.", path=f"{path}.relevant_categories", detail="wrong_type")
     categories: list[dict[str, str]] = []
+    category_keys: set[str] = set()
     for index, item in enumerate(categories_value):
         item_path = f"{path}.relevant_categories[{index}]"
         record = require_exact_fields(item, RELEVANT_CATEGORY_FIELDS, set(), item_path)
-        categories.append({
+        normalized_category = {
             "key": require_string(record["key"], f"{item_path}.key"),
             "category": require_enum(record["category"], EVIDENCE_CATEGORIES, f"{item_path}.category"),
-        })
-    if passed and reason_code is not None:
-        raise TraceInputError("Passed quality cannot have a failure reason.", path=f"{path}.reason_code")
-    if not passed and reason_code is None:
-        raise TraceInputError("Failed quality requires a reason.", path=f"{path}.reason_code")
+        }
+        if normalized_category["key"] in category_keys:
+            raise TraceInputError(
+                "Relevant quality category keys must be unique.",
+                path=f"{item_path}.key",
+            )
+        category_keys.add(normalized_category["key"])
+        categories.append(normalized_category)
+    if not categories:
+        raise TraceInputError(
+            "Quality evaluation requires relevant categories.",
+            path=f"{path}.relevant_categories",
+        )
+
+    unsupported = next(
+        (item for item in categories if item["category"] == "unsupported"),
+        None,
+    )
+    unknown = next(
+        (item for item in categories if item["category"] == "unknown"),
+        None,
+    )
+    if unsupported is not None:
+        expected_passed = False
+        expected_reason = "required_capability_unavailable"
+        expected_quality = None
+        expected_bottleneck = unsupported["key"]
+    elif unknown is not None:
+        expected_passed = False
+        expected_reason = "quality_evidence_unknown"
+        expected_quality = None
+        expected_bottleneck = unknown["key"]
+    else:
+        expected_bottleneck_entry = min(
+            enumerate(categories),
+            key=lambda item: (QUALITY_RANKS[item[1]["category"]], item[0]),
+        )[1]
+        expected_quality = expected_bottleneck_entry["category"]
+        expected_bottleneck = expected_bottleneck_entry["key"]
+        expected_passed = QUALITY_RANKS[expected_quality] >= QUALITY_RANKS[quality_floor]
+        expected_reason = None if expected_passed else "quality_floor_not_met"
+
+    if passed != expected_passed:
+        raise TraceInputError(
+            "Quality pass state is inconsistent with relevant categories and floor.",
+            path=f"{path}.passed",
+        )
+    if reason_code != expected_reason:
+        raise TraceInputError(
+            "Quality reason does not match the canonical failure shape.",
+            path=f"{path}.reason_code",
+        )
+    if effective_quality != expected_quality:
+        raise TraceInputError(
+            "Effective quality must equal the lowest relevant category.",
+            path=f"{path}.effective_quality",
+        )
+    if bottleneck != expected_bottleneck:
+        raise TraceInputError(
+            "Quality bottleneck must identify the first lowest relevant category.",
+            path=f"{path}.quality_bottleneck",
+        )
     return {
         "candidate_identity": identity,
         "passed": passed,
@@ -603,7 +792,9 @@ def validate_price(value: Any, identity: str, path: str) -> dict[str, Any] | Non
     if require_string(price["candidate_identity"], f"{path}.candidate_identity") != identity:
         raise TraceInputError("Nested candidate identity does not match.", path=f"{path}.candidate_identity")
     available = require_bool(price["available"], f"{path}.available")
-    reason_code = require_nullable_string(price["reason_code"], f"{path}.reason_code")
+    reason_code = require_nullable_enum(
+        price["reason_code"], PRICE_FAILURE_REASON_CODES, f"{path}.reason_code"
+    )
     profile_group = require_nullable_string(price["request_profile_group"], f"{path}.request_profile_group")
     token_fields = (
         "estimated_input_tokens",
@@ -634,12 +825,61 @@ def validate_price(value: Any, identity: str, path: str) -> dict[str, Any] | Non
         for name in required_available:
             if normalized[name] is None:
                 raise TraceInputError("Available price is missing metadata.", path=f"{path}.{name}")
-    elif reason_code is None:
-        raise TraceInputError("Unavailable price requires a reason.", path=f"{path}.reason_code")
+        if Decimal(normalized["price"]) <= 0:
+            raise TraceInputError(
+                "Available price must be positive.",
+                path=f"{path}.price",
+            )
+        expected_billable = (
+            normalized["estimated_visible_output_tokens"]
+            + normalized["estimated_reasoning_tokens"]
+        )
+        if normalized["estimated_billable_output_tokens"] != expected_billable:
+            raise TraceInputError(
+                "Billable output tokens must equal visible plus reasoning tokens.",
+                path=f"{path}.estimated_billable_output_tokens",
+            )
+        if not normalized["price_final"]:
+            expected_price = (
+                Decimal(normalized["estimated_input_tokens"])
+                * Decimal(normalized["input_usd_per_million_tokens"])
+                + Decimal(normalized["estimated_billable_output_tokens"])
+                * Decimal(normalized["output_usd_per_million_tokens"])
+            ) / Decimal(1_000_000)
+            if Decimal(normalized["price"]) != expected_price:
+                raise TraceInputError(
+                    "Estimated price must match its token and rate inputs exactly.",
+                    path=f"{path}.price",
+                )
+    else:
+        if reason_code is None:
+            raise TraceInputError("Unavailable price requires a reason.", path=f"{path}.reason_code")
+        for name in token_fields + decimal_fields:
+            if normalized[name] is not None:
+                raise TraceInputError(
+                    "Unavailable price cannot retain estimate, rate, or result values.",
+                    path=f"{path}.{name}",
+                )
+        if normalized["price_final"]:
+            raise TraceInputError(
+                "Unavailable price cannot be final.",
+                path=f"{path}.price_final",
+            )
+        if reason_code == "request_profile_group_invalid":
+            if profile_group is not None:
+                raise TraceInputError(
+                    "Invalid profile group result cannot retain a group.",
+                    path=f"{path}.request_profile_group",
+                )
+        elif profile_group is None:
+            raise TraceInputError(
+                "Unavailable price requires the resolved request profile group.",
+                path=f"{path}.request_profile_group",
+            )
     return normalized
 
 
-def validate_candidate(value: Any, index: int) -> dict[str, Any]:
+def validate_candidate(value: Any, index: int, quality_floor: str) -> dict[str, Any]:
     path = f"$.candidate_evaluations[{index}]"
     candidate = require_exact_fields(value, CANDIDATE_FIELDS, set(), path)
     identity = require_string(candidate["candidate_identity"], f"{path}.candidate_identity")
@@ -659,7 +899,9 @@ def validate_candidate(value: Any, index: int) -> dict[str, Any]:
         candidate["rejection_reason_codes"], f"{path}.rejection_reason_codes"
     )
     requirements = validate_requirements(candidate["requirements"], identity, f"{path}.requirements")
-    quality = validate_quality(candidate["quality"], identity, f"{path}.quality")
+    quality = validate_quality(
+        candidate["quality"], identity, quality_floor, f"{path}.quality"
+    )
     price = validate_price(candidate["price"], identity, f"{path}.price")
     latency_available = require_bool(candidate["latency_available"], f"{path}.latency_available")
     latency_ms = sqlite_real(
@@ -672,20 +914,30 @@ def validate_candidate(value: Any, index: int) -> dict[str, Any]:
             path=f"{path}.latency_milliseconds",
         )
 
-    def require_rejection(expected_stage: str) -> None:
+    def require_rejection(expected_stage: str, expected_reasons: list[str]) -> None:
         if eligible or selected:
             raise TraceInputError(
                 "Rejected candidates cannot be eligible or selected.",
                 path=f"{path}.selected" if selected else f"{path}.eligible",
             )
-        if rejection_stage != expected_stage or not rejection_reasons:
+        if rejection_stage != expected_stage:
             raise TraceInputError(
-                "Candidate rejection must identify the first failed stage and a reason.",
+                "Candidate rejection must identify the first failed stage.",
                 path=f"{path}.rejection_stage",
+            )
+        if rejection_reasons != expected_reasons:
+            raise TraceInputError(
+                "Candidate rejection reasons must exactly match the first failed stage.",
+                path=f"{path}.rejection_reason_codes",
+            )
+        if latency_available or latency_ms is not None:
+            raise TraceInputError(
+                "Pre-execution rejected candidates cannot have latency results.",
+                path=f"{path}.latency_available",
             )
 
     if rejection_stage == "request_validation":
-        require_rejection("request_validation")
+        require_rejection("request_validation", ["request_validation_failed"])
         if requirements is not None or quality is not None or price is not None:
             raise TraceInputError(
                 "Request-validation rejection must skip candidate evaluation stages.",
@@ -697,7 +949,7 @@ def validate_candidate(value: Any, index: int) -> dict[str, Any]:
             path=f"{path}.requirements",
         )
     elif not requirements["passed"]:
-        require_rejection("requirements")
+        require_rejection("requirements", requirements["reason_codes"])
         if quality is not None or price is not None:
             raise TraceInputError(
                 "Failed requirements must stop quality and price evaluation.",
@@ -709,7 +961,7 @@ def validate_candidate(value: Any, index: int) -> dict[str, Any]:
             path=f"{path}.quality",
         )
     elif not quality["passed"]:
-        require_rejection("quality")
+        require_rejection("quality", [quality["reason_code"]])
         if price is not None:
             raise TraceInputError(
                 "Failed quality must stop price evaluation.",
@@ -721,7 +973,7 @@ def validate_candidate(value: Any, index: int) -> dict[str, Any]:
             path=f"{path}.price",
         )
     elif not price["available"]:
-        require_rejection("price")
+        require_rejection("price", [price["reason_code"]])
     else:
         if not eligible:
             raise TraceInputError(
@@ -772,7 +1024,10 @@ def validate_trace(value: dict[str, Any]) -> dict[str, Any]:
     evaluations_value = trace["candidate_evaluations"]
     if not isinstance(evaluations_value, list):
         raise TraceInputError("Expected an array.", path="$.candidate_evaluations", detail="wrong_type")
-    evaluations = [validate_candidate(item, index) for index, item in enumerate(evaluations_value)]
+    evaluations = [
+        validate_candidate(item, index, request_profile["quality_floor"])
+        for index, item in enumerate(evaluations_value)
+    ]
     identities: set[str] = set()
     for index, evaluation in enumerate(evaluations):
         identity = evaluation["candidate_identity"]
@@ -787,25 +1042,47 @@ def validate_trace(value: dict[str, Any]) -> dict[str, Any]:
     reason_code = require_nullable_enum(trace["reason_code"], FAILURE_REASON_CODES, "$.reason_code")
     selected_candidate = require_nullable_string(trace["selected_candidate"], "$.selected_candidate")
     selected_evaluations = [item for item in evaluations if item["selected"]]
+    winner_status = output_status in {"completed", "execution_failed"}
     if output_status == "completed":
         if reason_code is not None:
             raise TraceInputError("Completed decisions cannot have a failure reason.", path="$.reason_code")
-        if selected_candidate is None or len(selected_evaluations) != 1:
-            raise TraceInputError("Completed decisions require exactly one selected evaluation.", path="$.selected_candidate")
     else:
         if reason_code is None:
             raise TraceInputError("Failed decisions require a reason code.", path="$.reason_code")
-        if selected_candidate is not None or selected_evaluations:
+        if reason_code not in STATUS_REASON_CODES[output_status]:
             raise TraceInputError(
-                "Failed decisions cannot retain a selected candidate.",
-                path="$.selected_candidate",
+                "Failure reason is not approved for this output status.",
+                path="$.reason_code",
             )
 
-    if selected_candidate is not None:
+    selected_evaluation: dict[str, Any] | None = None
+    if winner_status:
+        if selected_candidate is None or len(selected_evaluations) != 1:
+            raise TraceInputError(
+                "Winner statuses require exactly one selected evaluation.",
+                path="$.selected_candidate",
+            )
         if selected_candidate not in identities:
             raise TraceInputError("Selected candidate was not evaluated.", path="$.selected_candidate")
-        if len(selected_evaluations) != 1 or selected_evaluations[0]["candidate_identity"] != selected_candidate:
+        selected_evaluation = selected_evaluations[0]
+        if selected_evaluation["candidate_identity"] != selected_candidate:
             raise TraceInputError("Selected candidate does not match selected evaluation.", path="$.selected_candidate")
+        if not selected_evaluation["eligible"]:
+            raise TraceInputError(
+                "Selected evaluation must be eligible.",
+                path="$.selected_candidate",
+            )
+    else:
+        if selected_candidate is not None or selected_evaluations:
+            raise TraceInputError(
+                "Pre-execution failures cannot retain a selected candidate.",
+                path="$.selected_candidate",
+            )
+        if any(item["eligible"] for item in evaluations):
+            raise TraceInputError(
+                "Pre-execution failure candidates must all be rejected.",
+                path="$.candidate_evaluations",
+            )
 
     effective_quality = require_nullable_enum(
         trace["effective_quality"], QUALITY_CATEGORIES, "$.effective_quality"
@@ -815,18 +1092,15 @@ def validate_trace(value: dict[str, Any]) -> dict[str, Any]:
     top_price_final = require_bool(trace["price_final"], "$.price_final")
     latency_ms = sqlite_real(trace["latency_ms"], "$.latency_ms", nullable=True)
     response_hash = require_hash(trace["response_hash"], "$.response_hash", nullable=True)
-    if output_status == "completed":
-        completed_required = (
+    if winner_status:
+        winner_required = (
             (effective_quality, "$.effective_quality"),
             (quality_bottleneck, "$.quality_bottleneck"),
             (top_price, "$.price"),
-            (latency_ms, "$.latency_ms"),
-            (response_hash, "$.response_hash"),
         )
-        for item, path in completed_required:
+        for item, path in winner_required:
             if item is None:
-                raise TraceInputError("Completed decision metadata cannot be null.", path=path)
-        selected_evaluation = selected_evaluations[0]
+                raise TraceInputError("Winner metadata cannot be null.", path=path)
         selected_quality = selected_evaluation["quality"]
         selected_price = selected_evaluation["price"]
         if effective_quality != selected_quality["effective_quality"]:
@@ -849,6 +1123,28 @@ def validate_trace(value: dict[str, Any]) -> dict[str, Any]:
                 "Winner price finality must match the selected evaluation.",
                 path="$.price_final",
             )
+    if output_status == "completed":
+        if latency_ms is None or response_hash is None:
+            raise TraceInputError(
+                "Completed decisions require latency and a response hash.",
+                path="$.latency_ms" if latency_ms is None else "$.response_hash",
+            )
+        if not selected_evaluation["latency_available"]:
+            raise TraceInputError(
+                "Completed winner must have candidate latency.",
+                path="$.candidate_evaluations",
+            )
+        if latency_ms != selected_evaluation["latency_ms"]:
+            raise TraceInputError(
+                "Completed latency must match the selected evaluation.",
+                path="$.latency_ms",
+            )
+    elif output_status == "execution_failed":
+        if response_hash is not None or response_content is not None:
+            raise TraceInputError(
+                "Execution failure cannot retain normalized response metadata.",
+                path="$.response_hash" if response_hash is not None else "$.response_content",
+            )
     else:
         if effective_quality is not None or quality_bottleneck is not None:
             raise TraceInputError(
@@ -859,6 +1155,16 @@ def validate_trace(value: dict[str, Any]) -> dict[str, Any]:
             raise TraceInputError(
                 "Failed decisions cannot retain winner price metadata.",
                 path="$.price" if top_price is not None else "$.price_final",
+            )
+        if response_hash is not None or response_content is not None:
+            raise TraceInputError(
+                "Pre-execution failures cannot retain response metadata.",
+                path="$.response_hash" if response_hash is not None else "$.response_content",
+            )
+        if latency_ms is not None:
+            raise TraceInputError(
+                "Pre-execution failures cannot retain top-level latency.",
+                path="$.latency_ms",
             )
 
     normalized = {
@@ -971,8 +1277,7 @@ _EXPECTED_SCHEMA_SNAPSHOT: tuple[Any, ...] | None = None
 def schema_snapshot(connection: sqlite3.Connection) -> tuple[Any, ...]:
     objects = tuple(connection.execute(
         "SELECT type, name, tbl_name, sql FROM sqlite_schema "
-        "WHERE type IN ('table', 'index', 'view', 'trigger') "
-        "AND name NOT LIKE 'sqlite_%' ORDER BY type, name"
+        "WHERE type IN ('table', 'index', 'view', 'trigger') ORDER BY type, name"
     ).fetchall())
     tables: list[tuple[Any, ...]] = []
     for table_name in SCHEMA_TABLES:
@@ -1024,9 +1329,7 @@ def setup_schema(connection: sqlite3.Connection) -> bool:
     current_version = connection.execute("PRAGMA user_version").fetchone()[0]
     if current_version == 0:
         existing_objects = connection.execute(
-            "SELECT 1 FROM sqlite_schema "
-            "WHERE type IN ('table', 'index', 'view', 'trigger') "
-            "AND name NOT LIKE 'sqlite_%' LIMIT 1"
+            "SELECT 1 FROM sqlite_schema LIMIT 1"
         ).fetchone()
         if existing_objects is not None:
             raise StorageSchemaError(

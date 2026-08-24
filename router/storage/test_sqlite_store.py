@@ -1,4 +1,3 @@
-import copy
 import gc
 import json
 import sqlite3
@@ -34,14 +33,18 @@ def candidate(
     quality = None
     price = None
     if requirements["passed"]:
+        quality_failed = rejection_stage == "quality"
         quality = {
             "candidate_identity": identity,
-            "passed": rejection_stage != "quality",
-            "reason_code": "quality_floor_not_met" if rejection_stage == "quality" else None,
-            "effective_quality": "strong",
+            "passed": not quality_failed,
+            "reason_code": "quality_floor_not_met" if quality_failed else None,
+            "effective_quality": "standard" if quality_failed else "strong",
             "quality_bottleneck": "task_type.coding",
             "relevant_categories": [
-                {"key": "task_type.coding", "category": "strong"},
+                {
+                    "key": "task_type.coding",
+                    "category": "standard" if quality_failed else "strong",
+                },
                 {"key": "domain.computer_science", "category": "frontier"},
             ],
         }
@@ -57,7 +60,7 @@ def candidate(
             "estimated_billable_output_tokens": 768 if rejection_stage != "price" else None,
             "input_usd_per_million_tokens": "1.25" if rejection_stage != "price" else None,
             "output_usd_per_million_tokens": "10.00" if rejection_stage != "price" else None,
-            "price": "0.0096000000000000000000000001" if rejection_stage != "price" else None,
+            "price": "0.0096" if rejection_stage != "price" else None,
             "price_final": False,
         }
         if selected:
@@ -85,7 +88,7 @@ def candidate(
         "quality": quality,
         "price": price,
         "latency_available": eligible,
-        "latency_milliseconds": "275.125" if eligible else None,
+        "latency_milliseconds": "421.875" if selected else ("275.125" if eligible else None),
     }
 
 
@@ -133,6 +136,7 @@ def complete_trace(trace_id: str = "trace-0001", run_mode: str = "normal") -> di
             candidate("codex|gpt-test__medium", selected=True),
             candidate("agy|gemini-test__high", rejection_stage="quality"),
             candidate("claude|claude-test__medium", rejection_stage="requirements"),
+            candidate("local|other-test__low"),
         ],
     }
 
@@ -151,6 +155,34 @@ def failure_trace(evaluation: dict, trace_id: str = "failure-trace") -> dict:
         "response_hash": None,
         "candidate_evaluations": [evaluation],
     })
+    return trace
+
+
+def status_trace(status: str, trace_id: str) -> dict:
+    if status == "completed":
+        return complete_trace(trace_id)
+    if status == "execution_failed":
+        trace = complete_trace(trace_id)
+        trace.update({
+            "output_status": status,
+            "reason_code": "launcher_execution_failed",
+            "latency_ms": "500.25",
+            "response_hash": None,
+            "response_content": None,
+        })
+        return trace
+    if status == "invalid_request":
+        reason_code = "unsupported_language"
+        evaluation = candidate("invalid|configuration", rejection_stage="request_validation")
+    elif status == "unsupported_request":
+        reason_code = "sensitive_request_unsupported"
+        evaluation = candidate("unsupported|configuration", rejection_stage="request_validation")
+    else:
+        reason_code = "all_routes_unavailable"
+        evaluation = candidate("unavailable|configuration", rejection_stage="requirements")
+    trace = failure_trace(evaluation, trace_id)
+    trace["output_status"] = status
+    trace["reason_code"] = reason_code
     return trace
 
 
@@ -215,7 +247,7 @@ class SQLiteStoreTests(unittest.TestCase):
         self.assertEqual(output, {
             "ok": True,
             "trace_id": "trace-0001",
-            "candidate_evaluations_inserted": 3,
+            "candidate_evaluations_inserted": 4,
         })
 
         objects = self.rows(
@@ -253,6 +285,34 @@ class SQLiteStoreTests(unittest.TestCase):
         self.assertEqual(output["error"]["code"], "schema_migration_required")
         self.assertEqual(self.database_path.read_bytes(), before_bytes)
         self.assertEqual(self.user_schema_objects(), before_objects)
+        self.assertEqual(self.rows("PRAGMA user_version"), [(0,)])
+
+    def test_version_zero_sqlite_sequence_remnant_is_not_fresh(self) -> None:
+        connection = sqlite3.connect(self.database_path)
+        try:
+            connection.execute(
+                "CREATE TABLE transient_autoincrement (id INTEGER PRIMARY KEY AUTOINCREMENT)"
+            )
+            connection.execute("INSERT INTO transient_autoincrement DEFAULT VALUES")
+            connection.execute("DROP TABLE transient_autoincrement")
+            connection.commit()
+        finally:
+            connection.close()
+        before_bytes = self.database_path.read_bytes()
+        before_schema = self.rows(
+            "SELECT type, name, tbl_name, sql FROM sqlite_schema ORDER BY type, name"
+        )
+        self.assertEqual([row[1] for row in before_schema], ["sqlite_sequence"])
+
+        result, output = self.write(complete_trace("v0-internal-remnant"))
+
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(output["error"]["code"], "schema_migration_required")
+        self.assertEqual(self.database_path.read_bytes(), before_bytes)
+        self.assertEqual(
+            self.rows("SELECT type, name, tbl_name, sql FROM sqlite_schema ORDER BY type, name"),
+            before_schema,
+        )
         self.assertEqual(self.rows("PRAGMA user_version"), [(0,)])
 
     def test_malformed_version_one_database_is_rejected_without_mutation(self) -> None:
@@ -339,7 +399,7 @@ class SQLiteStoreTests(unittest.TestCase):
             "task_type, quality_floor FROM routing_decisions"
         )
         self.assertEqual(decision, [
-            ("codex|gpt-test__medium", "completed", 3, "coding", "strong")
+            ("codex|gpt-test__medium", "completed", 4, "coding", "strong")
         ])
         evaluations = self.rows(
             "SELECT candidate_identity, selected, rejection_stage "
@@ -349,6 +409,7 @@ class SQLiteStoreTests(unittest.TestCase):
             ("agy|gemini-test__high", 0, "quality"),
             ("claude|claude-test__medium", 0, "requirements"),
             ("codex|gpt-test__medium", 1, None),
+            ("local|other-test__low", 0, None),
         ])
 
     def test_stores_versions_normalized_hashes_and_exact_price_text(self) -> None:
@@ -422,10 +483,10 @@ class SQLiteStoreTests(unittest.TestCase):
         self.assertEqual(output["error"]["code"], "storage_conflict")
         self.assertEqual(self.rows(
             "SELECT candidate_count FROM routing_decisions WHERE trace_id = 'trace-0001'"
-        ), [(3,)])
+        ), [(4,)])
         self.assertEqual(self.rows(
             "SELECT COUNT(*) FROM candidate_evaluations WHERE trace_id = 'trace-0001'"
-        ), [(3,)])
+        ), [(4,)])
 
     def test_rejects_non_object_multiple_objects_unknown_fields_and_duplicate_json_keys(self) -> None:
         cases = [
@@ -482,6 +543,164 @@ class SQLiteStoreTests(unittest.TestCase):
                 trace = complete_trace(f"incomplete-eligible-{field_name}")
                 trace["candidate_evaluations"][0][field_name] = invalid_value
                 self.assert_invalid(trace)
+
+    def test_nonselected_eligible_requirements_have_no_failure_details(self) -> None:
+        cases = (
+            ("reason_codes", ["candidate_unavailable"]),
+            ("unavailable_capabilities", ["reasoning"]),
+            ("unsupported_requirements", [{
+                "dimension": "task_type",
+                "value": "coding",
+                "profile_path": "quality.task_types.coding",
+            }]),
+        )
+        for index, (field_name, value) in enumerate(cases, start=1):
+            with self.subTest(field_name=field_name):
+                trace = complete_trace(f"eligible-requirements-detail-{index}")
+                trace["candidate_evaluations"][3]["requirements"][field_name] = value
+                self.assert_invalid(trace)
+
+    def test_failed_requirements_reasons_are_canonical_and_match_details(self) -> None:
+        cases = []
+        mismatch = candidate("requirements-mismatch|configuration", rejection_stage="requirements")
+        mismatch["rejection_reason_codes"] = ["runtime_state_invalid"]
+        cases.append(mismatch)
+
+        missing_detail_reason = candidate(
+            "requirements-detail|configuration", rejection_stage="requirements"
+        )
+        missing_detail_reason["requirements"]["unavailable_capabilities"] = ["reasoning"]
+        cases.append(missing_detail_reason)
+
+        wrong_order = candidate(
+            "requirements-order|configuration", rejection_stage="requirements"
+        )
+        wrong_order["requirements"]["reason_codes"] = [
+            "required_capability_unavailable",
+            "candidate_unavailable",
+        ]
+        wrong_order["requirements"]["unavailable_capabilities"] = ["reasoning"]
+        wrong_order["rejection_reason_codes"] = list(
+            wrong_order["requirements"]["reason_codes"]
+        )
+        cases.append(wrong_order)
+
+        for index, evaluation in enumerate(cases, start=1):
+            with self.subTest(index=index):
+                self.assert_invalid(failure_trace(evaluation, f"requirements-consistency-{index}"))
+
+    def test_nonselected_eligible_quality_is_the_first_lowest_relevant_category(self) -> None:
+        cases = []
+        higher_effective = complete_trace("eligible-quality-higher")
+        higher_effective["candidate_evaluations"][3]["quality"]["effective_quality"] = "frontier"
+        cases.append(higher_effective)
+
+        wrong_bottleneck = complete_trace("eligible-quality-bottleneck")
+        wrong_bottleneck["candidate_evaluations"][3]["quality"]["quality_bottleneck"] = (
+            "domain.computer_science"
+        )
+        cases.append(wrong_bottleneck)
+
+        unknown_category = complete_trace("eligible-quality-unknown")
+        unknown_category["candidate_evaluations"][3]["quality"]["relevant_categories"][0][
+            "category"
+        ] = "unknown"
+        cases.append(unknown_category)
+
+        null_result = complete_trace("eligible-quality-null")
+        null_result["candidate_evaluations"][3]["quality"]["effective_quality"] = None
+        null_result["candidate_evaluations"][3]["quality"]["quality_bottleneck"] = None
+        cases.append(null_result)
+
+        for trace in cases:
+            with self.subTest(trace_id=trace["trace_id"]):
+                self.assert_invalid(trace)
+
+    def test_failed_quality_shape_matches_failure_precedence(self) -> None:
+        wrong_reason = candidate("quality-wrong-reason|configuration", rejection_stage="quality")
+        wrong_reason["quality"]["reason_code"] = "quality_evidence_unknown"
+        wrong_reason["rejection_reason_codes"] = ["quality_evidence_unknown"]
+        self.assert_invalid(failure_trace(wrong_reason, "quality-wrong-reason"))
+
+        null_floor_result = candidate(
+            "quality-null-floor|configuration", rejection_stage="quality"
+        )
+        null_floor_result["quality"]["effective_quality"] = None
+        null_floor_result["quality"]["quality_bottleneck"] = None
+        self.assert_invalid(failure_trace(null_floor_result, "quality-null-floor"))
+
+        for index, category in enumerate(("unsupported", "unknown"), start=1):
+            with self.subTest(category=category):
+                evaluation = candidate(
+                    f"quality-valid-{index}|configuration", rejection_stage="quality"
+                )
+                quality = evaluation["quality"]
+                quality["relevant_categories"][0]["category"] = category
+                quality["reason_code"] = (
+                    "required_capability_unavailable"
+                    if category == "unsupported"
+                    else "quality_evidence_unknown"
+                )
+                quality["effective_quality"] = None
+                quality["quality_bottleneck"] = "task_type.coding"
+                evaluation["rejection_reason_codes"] = [quality["reason_code"]]
+                result, output = self.write(
+                    failure_trace(evaluation, f"valid-quality-{category}")
+                )
+                self.assertEqual(result.returncode, 0, output)
+
+    def test_nonselected_eligible_price_is_positive_and_estimate_consistent(self) -> None:
+        cases = []
+        zero_price = complete_trace("eligible-zero-price")
+        zero_price["candidate_evaluations"][3]["price"]["price"] = "0"
+        cases.append(zero_price)
+
+        wrong_billable = complete_trace("eligible-wrong-billable")
+        wrong_billable["candidate_evaluations"][3]["price"][
+            "estimated_billable_output_tokens"
+        ] = 769
+        cases.append(wrong_billable)
+
+        wrong_estimate = complete_trace("eligible-wrong-estimate")
+        wrong_estimate["candidate_evaluations"][3]["price"]["price"] = "0.0097"
+        cases.append(wrong_estimate)
+
+        for trace in cases:
+            with self.subTest(trace_id=trace["trace_id"]):
+                self.assert_invalid(trace)
+
+    def test_unavailable_price_nulls_results_rates_and_finality(self) -> None:
+        cases = (
+            ("price", "0.01"),
+            ("input_usd_per_million_tokens", "1.25"),
+            ("estimated_input_tokens", 1),
+            ("price_final", True),
+            ("reason_code", "not_a_canonical_price_reason"),
+        )
+        for index, (field_name, value) in enumerate(cases, start=1):
+            with self.subTest(field_name=field_name):
+                evaluation = candidate(
+                    f"price-unavailable-{index}|configuration", rejection_stage="price"
+                )
+                evaluation["price"][field_name] = value
+                if field_name == "reason_code":
+                    evaluation["rejection_reason_codes"] = [value]
+                trace = failure_trace(evaluation, f"unavailable-price-{index}")
+                self.assert_invalid(trace)
+
+    def test_candidate_rejection_reasons_exactly_match_first_failed_stage(self) -> None:
+        for index, stage in enumerate(
+            ("request_validation", "requirements", "quality", "price"),
+            start=1,
+        ):
+            with self.subTest(stage=stage):
+                evaluation = candidate(
+                    f"rejection-reason-{index}|configuration", rejection_stage=stage
+                )
+                evaluation["rejection_reason_codes"] = ["runtime_state_invalid"]
+                self.assert_invalid(
+                    failure_trace(evaluation, f"rejection-reason-mismatch-{stage}")
+                )
 
     def test_candidate_stage_transitions_are_accepted_in_order(self) -> None:
         for index, stage in enumerate(("requirements", "quality", "price"), start=1):
@@ -565,27 +784,84 @@ class SQLiteStoreTests(unittest.TestCase):
                 trace[field_name] = value
                 self.assert_invalid(trace)
 
-    def test_failure_traces_have_no_winner_or_winner_quality(self) -> None:
-        valid_failure = failure_trace(
-            candidate("failed|configuration", rejection_stage="requirements"),
-            "valid-failure",
+    def test_all_status_specific_trace_shapes_are_accepted(self) -> None:
+        for status in (
+            "invalid_request",
+            "unsupported_request",
+            "no_eligible_configuration",
+            "completed",
+            "execution_failed",
+        ):
+            with self.subTest(status=status):
+                result, output = self.write(status_trace(status, f"valid-status-{status}"))
+                self.assertEqual(result.returncode, 0, output)
+
+    def test_preexecution_failures_reject_response_and_latency_metadata(self) -> None:
+        cases = []
+        response_hash = status_trace("invalid_request", "invalid-with-response-hash")
+        response_hash["response_hash"] = "C" * 64
+        cases.append(response_hash)
+
+        latency = status_trace("invalid_request", "invalid-with-latency")
+        latency["latency_ms"] = "1.5"
+        cases.append(latency)
+
+        response_content = status_trace("unsupported_request", "unsupported-with-content")
+        response_content["run_mode"] = "benchmark"
+        response_content["response_content"] = "must not exist before execution"
+        cases.append(response_content)
+
+        eligible = status_trace("unsupported_request", "unsupported-with-eligible")
+        eligible["candidate_evaluations"] = [candidate("unexpected|eligible")]
+        cases.append(eligible)
+
+        for trace in cases:
+            with self.subTest(trace_id=trace["trace_id"]):
+                self.assert_invalid(trace)
+
+    def test_no_eligible_status_has_zero_eligible_candidates(self) -> None:
+        trace = status_trace("no_eligible_configuration", "no-eligible-with-eligible")
+        trace["candidate_evaluations"].append(candidate("unexpected|eligible"))
+
+        self.assert_invalid(trace)
+
+    def test_completed_latency_matches_selected_candidate(self) -> None:
+        trace = complete_trace("completed-latency-mismatch")
+        trace["latency_ms"] = "421.876"
+
+        self.assert_invalid(trace)
+
+    def test_execution_failure_requires_attempted_winner_and_no_response(self) -> None:
+        missing_winner = failure_trace(
+            candidate("execution-missing|configuration", rejection_stage="requirements"),
+            "execution-missing-winner",
         )
-        result, output = self.write(valid_failure)
-        self.assertEqual(result.returncode, 0, output)
+        missing_winner["output_status"] = "execution_failed"
+        missing_winner["reason_code"] = "launcher_execution_failed"
+        self.assert_invalid(missing_winner)
 
-        retained_winner = complete_trace("failure-retained-winner")
-        retained_winner.update({
-            "output_status": "execution_failed",
-            "reason_code": "launcher_execution_failed",
-            "response_hash": None,
-        })
-        self.assert_invalid(retained_winner)
+        for index, field_name in enumerate(("response_hash", "response_content"), start=1):
+            with self.subTest(field_name=field_name):
+                trace = status_trace("execution_failed", f"execution-response-{index}")
+                if field_name == "response_hash":
+                    trace[field_name] = "D" * 64
+                else:
+                    trace["run_mode"] = "benchmark"
+                    trace[field_name] = "no normalized output exists"
+                self.assert_invalid(trace)
 
-        retained_quality = copy.deepcopy(valid_failure)
-        retained_quality["trace_id"] = "failure-retained-quality"
-        retained_quality["effective_quality"] = "strong"
-        retained_quality["quality_bottleneck"] = "task_type.coding"
-        self.assert_invalid(retained_quality)
+    def test_failure_reason_codes_are_status_specific(self) -> None:
+        cases = (
+            ("invalid_request", "all_routes_unavailable"),
+            ("unsupported_request", "all_routes_unavailable"),
+            ("no_eligible_configuration", "launcher_execution_failed"),
+            ("execution_failed", "all_routes_unavailable"),
+        )
+        for index, (status, reason_code) in enumerate(cases, start=1):
+            with self.subTest(status=status):
+                trace = status_trace(status, f"wrong-status-reason-{index}")
+                trace["reason_code"] = reason_code
+                self.assert_invalid(trace)
 
     def test_hash_validation_and_normalization(self) -> None:
         trace = complete_trace()
