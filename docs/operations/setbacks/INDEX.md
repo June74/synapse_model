@@ -12,6 +12,8 @@
 | [SB-20260824-044250-sqlite-trace-quality-review](incidents/2026-08-24T044250Z-sqlite-trace-quality-review.md) | SQLite trace admission and bridge durability gaps | closed | 2026-08-24 | 2026-08-24 |
 | [SB-20260824-051403-python-alias-unavailable](incidents/2026-08-24T051403Z-python-alias-unavailable.md) | Python alias unavailable during storage baseline | closed | 2026-08-24 | 2026-08-24 |
 | [SB-20260824-052419-nullable-trace-id-diagnostic](incidents/2026-08-24T052419Z-nullable-trace-id-diagnostic.md) | Nullable trace ID test expected a leaf diagnostic | closed | 2026-08-24 | 2026-08-24 |
+| [SB-20260824-052700-patch-tool-call-omitted](incidents/2026-08-24T052700Z-patch-tool-call-omitted.md) | Pricing patch text was not sent to the edit tool | closed | 2026-08-24 | 2026-08-24 |
+| [SB-20260824-052823-router-test-assert-helper](incidents/2026-08-24T052823Z-router-test-assert-helper.md) | Task 8 pricing test used an unavailable assertion helper | closed | 2026-08-24 | 2026-08-24 |
 | SB-2026-08-19-001 | PowerShell DOCX paragraph extraction syntax error | closed | 2026-08-19 | 2026-08-19 |
 | SB-2026-08-19-002 | Current DOCX locked during full-document scan | closed | 2026-08-19 | 2026-08-19 |
 | SB-2026-08-19-003 | Skill path lookup mismatch | closed | 2026-08-19 | 2026-08-23 |
