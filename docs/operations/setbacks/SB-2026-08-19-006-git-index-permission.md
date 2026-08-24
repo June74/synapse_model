@@ -76,3 +76,13 @@
 - **Correction:** Retry only the bounded documentation and Task 6 staging/commit commands through approved Git-metadata access.
 - **Prevention:** Continue treating worktree index and commit operations as requiring approved Git-metadata access.
 - **Related verification:** The corrected patch structure passed `git diff --check`; the latest full router suite passed before the staging attempt. A fresh final suite remains required after the last conservative pricing guard.
+
+## Recurrence: 2026-08-24, Task 7 preflight documentation
+
+- **Phase/task:** Deterministic router V1 Task 7, preflight setback documentation commit.
+- **Symptom:** Scoped staging and commit could not create `.git/worktrees/deterministic-router-v1/index.lock`; Git returned permission denied.
+- **Confirmed cause:** The worktree is writable, but its Git index metadata remains under the parent repository `.git` directory outside the managed write boundary.
+- **Impact:** No file was staged and no commit was created. The verified documentation edits remain intact; Task 7 product files have not been changed.
+- **Correction:** Retry only the bounded documentation staging and commit through approved Git-metadata access.
+- **Prevention:** Treat all Task 7 staging and commit operations as requiring approved Git-metadata access.
+- **Related verification:** The documentation passed `git diff --check` before the failed staging attempt.
