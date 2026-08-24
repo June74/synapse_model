@@ -152,6 +152,20 @@ AIzaGoogleProviderSecret789
 
     $environmentDump = "PATH=C:\private-bin`nUSERPROFILE=C:\private-user`nTEMP=C:\private-temp"
     Assert-Equal (ConvertTo-CalibrationCredentialSafeText $environmentDump) '[environment redacted]'
+
+    $exactEnvironmentObject = '{"environment":{"PATH":"C:\\private-bin","USERPROFILE":"C:\\private-user"}}' |
+        ConvertFrom-Json
+    $safeEnvironmentObject = Copy-CalibrationCredentialSafeValue -Value $exactEnvironmentObject
+    $safeEnvironmentJson = $safeEnvironmentObject | ConvertTo-Json -Depth 10 -Compress
+    Assert-False $safeEnvironmentJson.Contains('C:\private-bin', [StringComparison]::Ordinal)
+    Assert-False $safeEnvironmentJson.Contains('C:\private-user', [StringComparison]::Ordinal)
+
+    $twoLineEnvironment = "Path=C:\private-bin`nUSERPROFILE=C:\private-user"
+    $safeTwoLineEnvironment = ConvertTo-CalibrationCredentialSafeText $twoLineEnvironment
+    Assert-False $safeTwoLineEnvironment.Contains('C:\private-bin', [StringComparison]::Ordinal)
+    Assert-False $safeTwoLineEnvironment.Contains('C:\private-user', [StringComparison]::Ordinal)
+    Assert-True (ConvertTo-CalibrationCredentialSafeText 'The PATH through this explanation remains ordinary prose.').Contains(
+        'ordinary prose', [StringComparison]::Ordinal)
 }
 
 Invoke-Assertion 'judge rationale must be a non-empty string before conversion' {
@@ -266,7 +280,9 @@ Invoke-Assertion 'per-item failures continue and final manifest explains candida
             if ($PromptDefinition.id -ceq 'general-low-biology-v1') {
                 throw 'candidate failure OPENAI_API_KEY=candidate-secret-must-not-persist'
             }
-            $answer = if ($PromptDefinition.id -ceq 'math-low-mathematics-v1') {
+            $answer = if ($PromptDefinition.id -ceq 'general-medium-business-v1') {
+                '{"environment":{"PATH":"C:\\private-bin","USERPROFILE":"C:\\private-user"}}'
+            } elseif ($PromptDefinition.id -ceq 'math-low-mathematics-v1') {
                 'x = 5 subtract 5 divide by 3 OPENAI_API_KEY=grading-secret-must-stay-raw'
             } else { "answer-$($PromptDefinition.id)" }
             [pscustomobject]@{
@@ -302,6 +318,12 @@ Invoke-Assertion 'per-item failures continue and final manifest explains candida
                 $JudgeProfileId -ceq 'gemini-3.7-flash-high__high') {
                 throw 'second judge failure COOKIE=judge-two-secret'
             }
+            if ($PromptDefinition.id -ceq 'general-medium-business-v1') {
+                return [pscustomobject]@{
+                    decision = 'pass'
+                    rationale = "Path=C:\private-bin`nUSERPROFILE=C:\private-user"
+                }
+            }
             [pscustomobject]@{ decision = 'pass'; rationale = 'rubric evidence is present' }
         }
 
@@ -333,12 +355,81 @@ Invoke-Assertion 'per-item failures continue and final manifest explains candida
         $rawJudgeArtifact = Get-Content -Raw -LiteralPath (Join-Path $runDirectory $firstJudgeReview.raw_review_file) |
             ConvertFrom-Json -Depth 100
         Assert-Equal @($rawJudgeArtifact.raw_judge_outputs).Count 2
+        $environmentReview = @($artifact.reviews | Where-Object { $_.item_id -ceq 'general-medium-business-v1' })[0]
+        $environmentCandidateArtifact = Get-Content -Raw -LiteralPath `
+            (Join-Path $runDirectory $environmentReview.raw_response_file)
+        $environmentJudgeArtifact = Get-Content -Raw -LiteralPath `
+            (Join-Path $runDirectory $environmentReview.raw_review_file)
+        foreach ($privateValue in @('C:\private-bin', 'C:\private-user')) {
+            Assert-False $environmentCandidateArtifact.Contains($privateValue, [StringComparison]::Ordinal) `
+                "Candidate artifact leaked '$privateValue'."
+            Assert-False $environmentJudgeArtifact.Contains($privateValue, [StringComparison]::Ordinal) `
+                "Judge artifact leaked '$privateValue'."
+        }
         $persisted = @(Get-ChildItem -LiteralPath $runDirectory -File -Recurse |
             ForEach-Object { Get-Content -Raw -LiteralPath $_.FullName }) -join "`n"
         foreach ($secret in @('candidate-secret-must-not-persist', 'grader-secret-must-not-persist',
             'grading-secret-must-stay-raw', 'judge-one-secret', 'judge-two-secret')) {
             Assert-False $persisted.Contains($secret, [StringComparison]::Ordinal) "Failure output leaked '$secret'."
         }
+    } finally {
+        Remove-TestPath -Path $runDirectory
+    }
+}
+
+Invoke-Assertion 'route-only outer failure writes a safe partial failure manifest without execution' {
+    $runId = 'route-failure-test-{0}' -f [guid]::NewGuid().ToString('N')
+    $runDirectory = Join-Path $resultsRoot $runId
+    $artifactPath = Join-Path $runDirectory 'route-plan.json'
+    $profileHashesBefore = @(Get-ChildItem -LiteralPath (Join-Path $projectRoot 'profiles') -File -Recurse |
+        Sort-Object FullName | ForEach-Object { '{0}|{1}' -f $_.FullName, (Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName).Hash })
+    try {
+        $script:RouteFailureCalls = 0
+        $script:RouteFailureCandidateCalls = 0
+        $script:RouteFailureJudgeCalls = 0
+        $routeInvoker = {
+            param($Request, $PromptDefinition)
+            $script:RouteFailureCalls++
+            if ($script:RouteFailureCalls -eq 2) {
+                throw 'route failed OPENAI_API_KEY=route-private-secret C:\private-route-path'
+            }
+            [pscustomobject]@{
+                status = 'selected'
+                selected_route = [pscustomobject]@{
+                    configuration_id = 'gpt-5.6-sol__max'
+                    launcher = 'codex'
+                    model = 'gpt-5.6-sol'
+                    effort = 'max'
+                }
+            }
+        }
+        $candidateSpy = { $script:RouteFailureCandidateCalls++; throw 'candidate execution was called' }
+        $judgeSpy = { $script:RouteFailureJudgeCalls++; throw 'judge execution was called' }
+        $threw = $false
+        try {
+            Invoke-Calibration -Route -RunId $runId -ResultsRoot $resultsRoot `
+                -CalibrationSetPath $setPath -RubricsRoot $rubricsRoot `
+                -RouteInvoker $routeInvoker -RouterInvoker $candidateSpy -JudgeInvoker $judgeSpy | Out-Null
+        } catch { $threw = $true }
+        Assert-True $threw 'Route-only failure did not propagate to the caller.'
+        Assert-Equal $script:RouteFailureCalls 2
+        Assert-Equal $script:RouteFailureCandidateCalls 0
+        Assert-Equal $script:RouteFailureJudgeCalls 0
+        Assert-True (Test-Path -LiteralPath $artifactPath -PathType Leaf) 'Route failure manifest was not written.'
+        $manifest = Get-Content -Raw -LiteralPath $artifactPath | ConvertFrom-Json -Depth 100
+        Assert-Equal $manifest.mode 'route'
+        Assert-Equal $manifest.status 'failed'
+        Assert-Equal $manifest.error.code 'calibration_route_failed'
+        Assert-Equal $manifest.provider_calls 0
+        Assert-Equal $manifest.completed_count 1
+        Assert-Equal @($manifest.routes).Count 1
+        Assert-Equal ([IO.Path]::GetFullPath($artifactPath)) ([IO.Path]::GetFullPath((Join-Path $resultsRoot "$runId\route-plan.json")))
+        $persisted = Get-Content -Raw -LiteralPath $artifactPath
+        Assert-False $persisted.Contains('route-private-secret', [StringComparison]::Ordinal)
+        Assert-False $persisted.Contains('C:\private-route-path', [StringComparison]::Ordinal)
+        $profileHashesAfter = @(Get-ChildItem -LiteralPath (Join-Path $projectRoot 'profiles') -File -Recurse |
+            Sort-Object FullName | ForEach-Object { '{0}|{1}' -f $_.FullName, (Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName).Hash })
+        Assert-Equal ($profileHashesAfter -join "`n") ($profileHashesBefore -join "`n")
     } finally {
         Remove-TestPath -Path $runDirectory
     }

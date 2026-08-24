@@ -369,6 +369,17 @@ function Test-CalibrationEnvironmentFieldName {
 function ConvertTo-CalibrationCredentialSafeText {
     param([AllowNull()][string]$Text)
     if ($null -eq $Text) { return $null }
+    $trimmed = $Text.Trim()
+    if ($trimmed.StartsWith('{', [StringComparison]::Ordinal) -or
+        $trimmed.StartsWith('[', [StringComparison]::Ordinal)) {
+        try {
+            $jsonValue = $trimmed | ConvertFrom-Json -Depth 100 -ErrorAction Stop
+            $safeJsonValue = Copy-CalibrationCredentialSafeValue -Value $jsonValue
+            return ($safeJsonValue | ConvertTo-Json -Depth 100 -Compress)
+        } catch {
+            # Continue with conservative text redaction when the value is not one unambiguous JSON payload.
+        }
+    }
     $environmentAssignments = @([regex]::Matches(
         $Text,
         '(?m)^\s*(?:\$env:)?[A-Z_][A-Z0-9_]{1,63}\s*=',
@@ -376,6 +387,9 @@ function ConvertTo-CalibrationCredentialSafeText {
     ))
     if ($environmentAssignments.Count -ge 3) { return '[environment redacted]' }
     $result = $Text
+    $knownEnvironmentPattern = '(?im)(?<prefix>^\s*(?:\$env:)?(?:PATH|USERPROFILE|HOMEPATH|HOME|TEMP|TMP|APPDATA|LOCALAPPDATA|USERNAME|USER|SHELL|COMSPEC|PSMODULEPATH|PATHEXT|PROGRAMFILES(?:\(X86\))?|PROGRAMDATA|WINDIR|SYSTEMROOT|SYSTEMDRIVE|JAVA_HOME|PYTHONPATH|VIRTUAL_ENV|NODE_PATH|NVM_HOME|NVM_SYMLINK|GEM_HOME|GOPATH|CARGO_HOME|RUSTUP_HOME|DOTNET_ROOT)\s*=\s*)(?<value>[^\r\n]*)'
+    $result = [regex]::Replace($result, $knownEnvironmentPattern, '${prefix}[environment redacted]',
+        [Text.RegularExpressions.RegexOptions]::IgnoreCase -bor [Text.RegularExpressions.RegexOptions]::Multiline)
     $result = [regex]::Replace($result, '(?i)(\bBearer\s+)[A-Za-z0-9._~+/=-]+', '$1[credential redacted]')
     $result = [regex]::Replace($result, '(?i)(\bBasic\s+)[A-Za-z0-9+/=_-]+', '$1[credential redacted]')
     $result = [regex]::Replace($result, '(?i)\bsk-(?:proj-|ant-)?[A-Za-z0-9_-]{8,}', '[credential redacted]')
@@ -657,6 +671,7 @@ function Invoke-Calibration {
     $claim = New-CalibrationRunClaim -ResultsRoot $ResultsRoot -RunId $RunId
     $runDirectory = [string]$claim.run_directory
     $reviews = [Collections.Generic.List[object]]::new()
+    $routes = [Collections.Generic.List[object]]::new()
     try {
     if ($Route) {
         if ($null -eq $RouteInvoker) {
@@ -666,32 +681,30 @@ function Invoke-Calibration {
                 Invoke-CalibrationDefaultRoute -Request $Request -PromptDefinition $PromptDefinition -Context $routeContext
             }.GetNewClosure()
         }
-        $routes = @(
-            foreach ($prompt in @($loaded.set.prompts)) {
-                $routeResult = & $RouteInvoker $prompt.request $prompt
-                if ($null -eq $routeResult -or -not (Test-CalibrationProperty $routeResult 'status') -or
-                    $routeResult.status -cnotin @('selected', 'no_eligible') -or
-                    ($routeResult.status -ceq 'selected' -and (-not (Test-CalibrationProperty $routeResult 'selected_route') -or
-                        $null -eq $routeResult.selected_route))) {
-                    throw "Calibration route-only selection failed for '$($prompt.id)'."
-                }
-                [pscustomobject][ordered]@{
-                    item_id = [string]$prompt.id
-                    item_version = [string]$prompt.version
-                    task_type = [string]$prompt.request.task_type
-                    domain = [string]$prompt.request.domain
-                    complexity = [string]$prompt.request.complexity
-                    status = [string]$routeResult.status
-                    selected_route = $routeResult.selected_route
-                }
+        foreach ($prompt in @($loaded.set.prompts)) {
+            $routeResult = & $RouteInvoker $prompt.request $prompt
+            if ($null -eq $routeResult -or -not (Test-CalibrationProperty $routeResult 'status') -or
+                $routeResult.status -cnotin @('selected', 'no_eligible') -or
+                ($routeResult.status -ceq 'selected' -and (-not (Test-CalibrationProperty $routeResult 'selected_route') -or
+                    $null -eq $routeResult.selected_route))) {
+                throw "Calibration route-only selection failed for '$($prompt.id)'."
             }
-        )
+            $routes.Add([pscustomobject][ordered]@{
+                item_id = [string]$prompt.id
+                item_version = [string]$prompt.version
+                task_type = [string]$prompt.request.task_type
+                domain = [string]$prompt.request.domain
+                complexity = [string]$prompt.request.complexity
+                status = [string]$routeResult.status
+                selected_route = $routeResult.selected_route
+            }) | Out-Null
+        }
         $artifact = [pscustomobject][ordered]@{
             artifact_version = 'calibration-route-plan/v1'
             calibration_set_version = [string]$loaded.set.version
             run_id = $RunId
             provider_calls = 0
-            routes = $routes
+            routes = @($routes)
         }
         Write-CalibrationJsonFile -Path $artifactPath -Value $artifact -AllowedRunRoot $runDirectory
         return [pscustomobject][ordered]@{
@@ -700,7 +713,7 @@ function Invoke-Calibration {
             run_id = $RunId
             artifact_path = $artifactPath
             provider_calls = 0
-            routes = $routes
+            routes = @($routes)
         }
     }
 
@@ -898,7 +911,21 @@ function Invoke-Calibration {
         reviews = @($reviews)
     }
     } catch {
-        if ($Run) {
+        if ($Route) {
+            $routeFailureArtifact = [pscustomobject][ordered]@{
+                artifact_version = 'calibration-route-plan/v1'
+                calibration_set_version = [string]$loaded.set.version
+                run_id = $RunId
+                mode = 'route'
+                status = 'failed'
+                error = [pscustomobject][ordered]@{ code = 'calibration_route_failed' }
+                provider_calls = 0
+                completed_count = $routes.Count
+                routes = @($routes)
+            }
+            $safeRouteFailureArtifact = Copy-CalibrationCredentialSafeValue -Value $routeFailureArtifact
+            Write-CalibrationJsonFile -Path $artifactPath -Value $safeRouteFailureArtifact -AllowedRunRoot $runDirectory
+        } elseif ($Run) {
             $fatalArtifact = [pscustomobject][ordered]@{
                 artifact_version = 'calibration-review-artifact/v1'
                 calibration_set_version = [string]$loaded.set.version
