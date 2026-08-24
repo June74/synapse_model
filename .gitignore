@@ -9,3 +9,7 @@ pilot/results/*.jsonl
 data/*.sqlite
 data/*.sqlite-shm
 data/*.sqlite-wal
+
+# Local calibration outputs contain reproducibility artifacts and raw responses.
+calibration/results/*
+!calibration/results/.gitkeep

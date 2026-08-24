@@ -1,0 +1,9 @@
+{
+  "id": "coding",
+  "version": "1.0.0",
+  "criteria": [
+    "The submitted function satisfies every executable test.",
+    "The result follows the requested language and interface.",
+    "The explanation is accurate and concise."
+  ]
+}

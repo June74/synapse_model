@@ -1,0 +1,9 @@
+{
+  "id": "summarization",
+  "version": "1.0.0",
+  "criteria": [
+    "Every required fact is present.",
+    "Required omissions and length limits are respected.",
+    "No unsupported claim appears."
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "id": "reasoning",
+  "version": "1.0.0",
+  "criteria": [
+    "The conclusion follows from the supplied facts.",
+    "The explanation makes each required inference explicit.",
+    "No outside assumption changes the result."
+  ]
+}
