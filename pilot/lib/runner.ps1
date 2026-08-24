@@ -1501,7 +1501,8 @@ function Invoke-PilotRun {
         # new runner writes use this separate normalized-results target by default.
         [string]$ResultsPath = 'pilot/results/runner-test-run.jsonl',
         [switch]$DryRun,
-        [scriptblock]$NativeInvoker
+        [scriptblock]$NativeInvoker,
+        [scriptblock]$PromptFactory
     )
 
     [void](Resolve-PilotResultsPath $ResultsPath)
@@ -1512,12 +1513,22 @@ function Invoke-PilotRun {
 
     $runId = [guid]::NewGuid().ToString('N')
     $records = [System.Collections.Generic.List[object]]::new()
+    if ($null -eq $PromptFactory) {
+        $PromptFactory = { param($Candidate) New-PilotPrompt -Candidate $Candidate }
+    }
     foreach ($candidate in $selected) {
-        $prompt = New-PilotPrompt -Candidate $candidate
-        $execution = Invoke-PilotCandidate -Candidate $candidate -Prompt $prompt `
-            -NativeInvoker $NativeInvoker -RunId $runId
-        Add-PilotResultRecord -Record $execution.record -ResultsPath $ResultsPath
-        [void]$records.Add($execution.record)
+        try {
+            $prompt = & $PromptFactory $candidate
+            $execution = Invoke-PilotCandidate -Candidate $candidate -Prompt $prompt `
+                -NativeInvoker $NativeInvoker -RunId $runId
+            $record = $execution.record
+        } catch {
+            $record = New-ResultRecord -Candidate $candidate -ProcessResult $null `
+                -Canonical $null -RunId $runId -DiagnosticNote 'execution failure' `
+                -FailureError 'execution failure' -Prompt $null -CliReportedCostUsd $null
+        }
+        Add-PilotResultRecord -Record $record -ResultsPath $ResultsPath
+        [void]$records.Add($record)
     }
     $summary.records = @($records)
     return $summary

@@ -1469,6 +1469,55 @@ Invoke-Assertion 'RunAll continues after one injected candidate failure in the s
     }
 }
 
+Invoke-Assertion 'RunAll records prompt construction failure and continues to the next candidate' {
+    $matrix = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'pilot/model_matrix.json') | ConvertFrom-Json
+    $runMatrix = [pscustomobject]@{
+        candidates = @($matrix.candidates | Where-Object { $_.tool -eq 'codex' } | Select-Object -First 2)
+        special_routes = @()
+    }
+    $failedRoute = $runMatrix.candidates[0].route_id
+    $sensitiveFailure = 'prompt-construction-sensitive-detail'
+    $survivingPrompt = 'offline prompt for the surviving candidate'
+    $resultsPath = New-OfflineResultPath 'prompt-failure-continue'
+    $invocations = [Collections.Generic.List[string]]::new()
+    if (Test-Path -LiteralPath $resultsPath) { Remove-Item -LiteralPath $resultsPath -Force }
+    try {
+        $promptFactory = {
+            param($candidate)
+            if ($candidate.route_id -ceq $failedRoute) { throw $sensitiveFailure }
+            return $survivingPrompt
+        }
+        $invoker = {
+            param($command)
+            $invocations.Add([string]$command.route_id)
+            [pscustomobject]@{
+                exit_code = 0
+                stdout = Get-Content -Raw (Join-Path $projectRoot 'pilot/tests/fixtures/codex-success.jsonl')
+                stderr = ''
+                duration_ms = 6
+            }
+        }
+
+        $run = Invoke-PilotRun -Matrix $runMatrix -RunAll -ResultsPath $resultsPath `
+            -NativeInvoker $invoker -PromptFactory $promptFactory
+        $records = @(Get-Content -LiteralPath $resultsPath | ForEach-Object { $_ | ConvertFrom-Json })
+        Assert-Equal $run.records.Count 2
+        Assert-Equal $records.Count 2
+        Assert-Equal $invocations.Count 1
+        Assert-Equal $invocations[0] $runMatrix.candidates[1].route_id
+        Assert-Equal $records[0].diagnostic_note 'execution failure'
+        Assert-Equal $records[0].error 'execution failure'
+        Assert-True (-not $records[0].transport_success)
+        Assert-True $records[1].transport_success
+        $serialized = ($run | ConvertTo-Json -Depth 30 -Compress) + "`n" +
+            (Get-Content -Raw $resultsPath)
+        Assert-True (-not $serialized.Contains($sensitiveFailure))
+        Assert-True (-not $serialized.Contains($survivingPrompt))
+    } finally {
+        if (Test-Path -LiteralPath $resultsPath) { Remove-Item -LiteralPath $resultsPath -Force }
+    }
+}
+
 Invoke-Assertion 'public CLI no-switch entrypoint performs a 63-candidate dry-run without writing results' {
     $resultsPath = Join-Path 'pilot/results' 'runner-test-run.jsonl'
     $legacyResultsPath = Join-Path 'pilot/results' 'test-run.jsonl'
