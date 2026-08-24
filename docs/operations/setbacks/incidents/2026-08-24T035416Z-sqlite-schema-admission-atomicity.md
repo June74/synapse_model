@@ -1,6 +1,6 @@
 # SB-20260824-035416-sqlite-schema-admission-atomicity: SQLite schema admission was not exact or atomic
 
-- **Status:** open
+- **Status:** closed
 - **First observed:** 2026-08-24T03:54:16.235083Z
 - **Last observed:** 2026-08-24
 - **Phase/task:** Task 7 post-implementation review
@@ -50,6 +50,7 @@ The bundled-Python suite passed all 29 tests. The full router PowerShell suite e
 - 2026-08-24T03:54:16.235083Z: First observed.
 - 2026-08-24: Closed after product commit `44d920a` and final acceptance verification.
 - 2026-08-24: Reopened after re-review found a V0 internal-object bypass and incomplete nested-result and status-state consistency.
+- 2026-08-24: Closed after product commit `16f3d51` and final acceptance verification.
 
 ## Recurrence: Task 7 consistency re-review
 
@@ -59,7 +60,8 @@ The bundled-Python suite passed all 29 tests. The full router PowerShell suite e
 - **Safe evidence:** The expanded bundled-Python suite ran 42 tests and produced 34 targeted RED failures. No provider calls, credentials, raw trace payloads, hashes, or runtime database contents were recorded.
 - **Confirmed cause:** Fresh-V0 admission filtered out `sqlite_%` catalog rows. Nested validators checked local types and broad nullability without reconstructing the Task 4-6 producer invariants, while top-level failure validation used one rule for four semantically different statuses.
 - **Known exclusions:** The PowerShell stdin bridge remains outside the failing validation boundary and no Task 8 execution code exists.
-- **Correction:** Pending exact zero-row V0 admission, complete nested-result/rejection consistency, and a status-specific trace matrix.
+- **Correction:** Product commit `16f3d51` requires a truly empty SQLite catalog for fresh V0 admission, reconstructs canonical requirements/quality/price results for every candidate, makes the first failed stage authoritative, and enforces status-specific winner and response/latency rules.
 - **Prevention:** Retain direct internal-catalog, nonselected-eligible, canonical-reason, and all-status regression fixtures.
-- **Next diagnostic step:** Implement the minimum validator changes and rerun all Task 7 acceptance gates.
+- **Next diagnostic step:** None; retain the regression fixtures.
 - **Attempt outcome:** The first GREEN attempt ran 42 tests but stopped with 12 failures and 6 errors because the newly exercised nonselected eligible fixture encoded a price one decimal quantum above the exact estimate derived from its token and rate fields. This was a fixture inconsistency, not a writer/schema regression; correct the fixture to the producer's exact `0.0096` result before evaluating the remaining implementation.
+- **Verification:** Bundled Python passed 42/42 tests. The full router PowerShell suite passed 328 assertions with zero failures. A first-write acceptance database reported `user_version=1`, the exact V1 schema fingerprint, one decision and four candidate rows, the approved foreign key, and only approved tables/indexes (plus SQLite-required autoindexes). `git diff --check` passed; zero SQLite runtime files were present, staged, or tracked.
