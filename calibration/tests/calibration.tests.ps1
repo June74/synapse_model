@@ -354,26 +354,21 @@ def other(): return 1
         $unavailable = Invoke-CalibrationDeterministicGrader -Prompt $prompt -ResponseText $code `
             -PythonExecutable 'definitely-missing-python-runtime'
         Assert-Equal $unavailable.outcome 'review_required'
-        Assert-Equal $unavailable.reason_code 'python_unavailable'
+        Assert-Equal $unavailable.reason_code 'sandbox_unavailable'
     }
 
-    Invoke-Assertion 'default executable grader runs fixed tests in an isolated temporary directory when Python exists' {
+    Invoke-Assertion 'default executable grader requires an explicitly approved sandbox executor' {
         $prompt = @((Import-CalibrationSet -Path $setPath -RubricsRoot $rubricsRoot).set.prompts |
             Where-Object { $_.id -ceq 'coding-low-computer-science-v1' })[0]
-        $resolvedPython = Resolve-RouterPythonExecutable
         $result = Invoke-CalibrationDeterministicGrader -Prompt $prompt -ResponseText @'
 ```python
 def sum_even(values):
     return sum(value for value in values if value % 2 == 0)
 ```
 '@
-        if ($null -eq $resolvedPython) {
-            Assert-Equal $result.outcome 'review_required'
-            Assert-Equal $result.reason_code 'python_unavailable'
-        } else {
-            Assert-Equal $result.outcome 'pass'
-            Assert-Equal @($result.checks).Count 3
-        }
+        Assert-Equal $result.outcome 'review_required'
+        Assert-Equal $result.reason_code 'sandbox_unavailable'
+        Assert-Equal @($result.checks).Count 0
     }
 
     Invoke-Assertion 'route-only selects all routes without candidate or judge execution and writes one bounded artifact' {

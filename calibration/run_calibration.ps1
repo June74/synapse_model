@@ -52,6 +52,39 @@ function Test-CalibrationSafeLeafName {
     return $true
 }
 
+function Assert-CalibrationNoReparseComponents {
+    param([Parameter(Mandatory)][string]$Path)
+    $cursor = [IO.Path]::GetFullPath($Path).TrimEnd(
+        [IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+    while (-not [string]::IsNullOrWhiteSpace($cursor)) {
+        if (Test-Path -LiteralPath $cursor) {
+            $item = Get-Item -LiteralPath $cursor -Force -ErrorAction Stop
+            if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw 'Calibration result paths cannot contain reparse points.'
+            }
+        }
+        $parent = [IO.Path]::GetDirectoryName($cursor)
+        if ([string]::IsNullOrWhiteSpace($parent) -or $parent -ceq $cursor) { break }
+        $cursor = $parent.TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+    }
+}
+
+function Assert-CalibrationWriteBoundary {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$AllowedRunRoot
+    )
+    $fullPath = [IO.Path]::GetFullPath($Path)
+    $fullRunRoot = [IO.Path]::GetFullPath($AllowedRunRoot).TrimEnd(
+        [IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+    if (-not (Test-CalibrationPathUnderRoot -Path $fullRunRoot -Root $script:CalibrationResultsRoot) -or
+        -not (Test-CalibrationPathUnderRoot -Path $fullPath -Root $fullRunRoot)) {
+        throw 'Calibration write path escaped its claimed run directory.'
+    }
+    Assert-CalibrationNoReparseComponents -Path $fullRunRoot
+    Assert-CalibrationNoReparseComponents -Path $fullPath
+}
+
 function Resolve-CalibrationResultPath {
     [CmdletBinding()]
     param(
@@ -68,11 +101,45 @@ function Resolve-CalibrationResultPath {
         -not (Test-CalibrationPathUnderRoot -Path $resolvedRoot -Root $script:CalibrationResultsRoot)) {
         throw 'ResultsRoot must remain beneath calibration/results.'
     }
+    Assert-CalibrationNoReparseComponents -Path $resolvedRoot
     $runDirectory = [IO.Path]::GetFullPath((Join-Path $resolvedRoot $RunId))
     if (-not (Test-CalibrationPathUnderRoot -Path $runDirectory -Root $resolvedRoot)) {
         throw 'Resolved calibration result escaped the configured results root.'
     }
     return Join-Path $runDirectory $ArtifactName
+}
+
+function New-CalibrationRunClaim {
+    [CmdletBinding()]
+    param(
+        [string]$ResultsRoot = $script:CalibrationResultsRoot,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$RunId
+    )
+    $artifactPath = Resolve-CalibrationResultPath -ResultsRoot $ResultsRoot -RunId $RunId
+    $runDirectory = Split-Path -Parent $artifactPath
+    if (Test-Path -LiteralPath $runDirectory) {
+        throw "Calibration run '$RunId' already exists and will not be overwritten."
+    }
+    $resolvedRoot = Split-Path -Parent $runDirectory
+    if (-not (Test-Path -LiteralPath $resolvedRoot -PathType Container)) {
+        Assert-CalibrationNoReparseComponents -Path $resolvedRoot
+        New-Item -ItemType Directory -Path $resolvedRoot -Force -ErrorAction Stop | Out-Null
+    }
+    Assert-CalibrationNoReparseComponents -Path $resolvedRoot
+    New-Item -ItemType Directory -Path $runDirectory -ErrorAction Stop | Out-Null
+    Assert-CalibrationNoReparseComponents -Path $runDirectory
+    $claimPath = Join-Path $runDirectory '.run.claim'
+    try {
+        $stream = [IO.File]::Open($claimPath, [IO.FileMode]::CreateNew,
+            [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+    } catch {
+        throw "Calibration run '$RunId' could not acquire its atomic claim."
+    }
+    return [pscustomobject][ordered]@{
+        run_directory = $runDirectory
+        claim_path = $claimPath
+        stream = $stream
+    }
 }
 
 function Test-CalibrationRubric {
@@ -253,44 +320,84 @@ function Get-CalibrationCandidateFamily {
     }
 }
 
-function Copy-CalibrationSanitizedValue {
-    param(
-        [AllowNull()][object]$Value,
-        [Parameter(Mandatory)][string[]]$ForbiddenValues
+function ConvertTo-CalibrationNormalizedFieldName {
+    param([AllowNull()][string]$Name)
+    if ($null -eq $Name) { return '' }
+    return ([regex]::Replace($Name, '[^A-Za-z0-9]', '')).ToLowerInvariant()
+}
+
+function Test-CalibrationIdentityFieldName {
+    param([AllowNull()][string]$Name)
+    return (ConvertTo-CalibrationNormalizedFieldName $Name) -cin @(
+        'model', 'provider', 'family', 'tool', 'launcher', 'effort', 'price', 'latency',
+        'profileid', 'candidateid', 'configurationid'
     )
-    if ($null -eq $Value) { return $null }
-    if ($Value -is [string]) {
-        $text = [string]$Value
-        foreach ($forbidden in $ForbiddenValues) {
-            if (-not [string]::IsNullOrWhiteSpace($forbidden)) {
-                $text = [regex]::Replace($text, [regex]::Escape($forbidden), '[redacted]', [Text.RegularExpressions.RegexOptions]::IgnoreCase)
-            }
-        }
-        return $text
+}
+
+function ConvertTo-CalibrationIdentitySafeText {
+    param([AllowNull()][string]$Text, [AllowEmptyCollection()][string[]]$ForbiddenValues = @())
+    if ($null -eq $Text) { return $null }
+    $result = $Text
+    $identities = @($ForbiddenValues | Where-Object {
+        -not [string]::IsNullOrWhiteSpace($_) -and
+        (($_ -match '[A-Za-z]' -and $_.Length -ge 3) -or
+            ($_ -match '^\d+(?:\.\d+)?$' -and $_.Length -ge 4))
+    } | Sort-Object Length -Descending -Unique)
+    foreach ($identity in $identities) {
+        if ($result -ceq $identity) { $result = '[identity redacted]'; continue }
+        $pattern = '(?<![\p{L}\p{Nd}])' + [regex]::Escape($identity) + '(?![\p{L}\p{Nd}])'
+        $result = [regex]::Replace($result, $pattern, '[identity redacted]',
+            [Text.RegularExpressions.RegexOptions]::IgnoreCase)
     }
-    if ($Value -is [Collections.IDictionary]) {
-        $copy = [ordered]@{}
-        foreach ($key in $Value.Keys) { $copy[[string]$key] = Copy-CalibrationSanitizedValue $Value[$key] $ForbiddenValues }
-        return [pscustomobject]$copy
-    }
-    if ($Value -is [Collections.IEnumerable] -and $Value -isnot [string]) {
-        return @($Value | ForEach-Object { Copy-CalibrationSanitizedValue $_ $ForbiddenValues })
-    }
-    if ($Value -is [ValueType]) { return $Value }
-    $objectCopy = [ordered]@{}
-    foreach ($property in $Value.PSObject.Properties) {
-        $objectCopy[$property.Name] = Copy-CalibrationSanitizedValue $property.Value $ForbiddenValues
-    }
-    return [pscustomobject]$objectCopy
+    return $result
+}
+
+function Test-CalibrationSensitiveFieldName {
+    param([AllowNull()][string]$Name)
+    $normalized = ConvertTo-CalibrationNormalizedFieldName $Name
+    if ($normalized -cin @('env', 'environment', 'environmentvariables', 'environmentdump')) { return $true }
+    return $normalized -match '(?:apikey|token|secret|password|authorization|cookie|credential|authcode|authorizationcode|accesscode|verificationcode|logincode)'
+}
+
+function Test-CalibrationEnvironmentFieldName {
+    param([AllowNull()][string]$Name)
+    return (ConvertTo-CalibrationNormalizedFieldName $Name) -cin @(
+        'env', 'environment', 'environmentvariables', 'environmentdump'
+    )
+}
+
+function ConvertTo-CalibrationCredentialSafeText {
+    param([AllowNull()][string]$Text)
+    if ($null -eq $Text) { return $null }
+    $environmentAssignments = @([regex]::Matches(
+        $Text,
+        '(?m)^\s*(?:\$env:)?[A-Z_][A-Z0-9_]{1,63}\s*=',
+        [Text.RegularExpressions.RegexOptions]::Multiline
+    ))
+    if ($environmentAssignments.Count -ge 3) { return '[environment redacted]' }
+    $result = $Text
+    $result = [regex]::Replace($result, '(?i)(\bBearer\s+)[A-Za-z0-9._~+/=-]+', '$1[credential redacted]')
+    $result = [regex]::Replace($result, '(?i)(\bBasic\s+)[A-Za-z0-9+/=_-]+', '$1[credential redacted]')
+    $result = [regex]::Replace($result, '(?i)\bsk-(?:proj-|ant-)?[A-Za-z0-9_-]{8,}', '[credential redacted]')
+    $result = [regex]::Replace($result, '(?i)\bAIza[0-9A-Za-z_-]{8,}', '[credential redacted]')
+    $assignmentPattern = '(?im)(?<prefix>(?:["'']|\$env:)?(?:[A-Za-z0-9]+[_-])*(?:api[_-]?key|access[_-]?token|auth(?:entication|orization)?[_-]?(?:token|code)?|token|secret|password|cookie|credential|verification[_-]?code|login[_-]?code)(?:["''])?\s*[:=]\s*(?:["''])?)(?<value>[^"''\s,;}\r\n]+)'
+    $result = [regex]::Replace($result, $assignmentPattern, '${prefix}[credential redacted]',
+        [Text.RegularExpressions.RegexOptions]::IgnoreCase -bor [Text.RegularExpressions.RegexOptions]::Multiline)
+    return $result
 }
 
 function Copy-CalibrationCredentialSafeValue {
     param([AllowNull()][object]$Value)
     if ($null -eq $Value) { return $null }
-    if ($Value -is [string]) { return ConvertTo-RunnerCredentialRedactedText -Text ([string]$Value) }
+    if ($Value -is [string]) { return ConvertTo-CalibrationCredentialSafeText -Text ([string]$Value) }
     if ($Value -is [Collections.IDictionary]) {
         $copy = [ordered]@{}
-        foreach ($key in $Value.Keys) { $copy[[string]$key] = Copy-CalibrationCredentialSafeValue $Value[$key] }
+        foreach ($key in $Value.Keys) {
+            $name = [string]$key
+            $copy[$name] = if (Test-CalibrationSensitiveFieldName $name) {
+                if (Test-CalibrationEnvironmentFieldName $name) { '[environment redacted]' } else { '[credential redacted]' }
+            } else { Copy-CalibrationCredentialSafeValue $Value[$key] }
+        }
         return [pscustomobject]$copy
     }
     if ($Value -is [Collections.IEnumerable] -and $Value -isnot [string]) {
@@ -299,7 +406,9 @@ function Copy-CalibrationCredentialSafeValue {
     if ($Value -is [ValueType]) { return $Value }
     $objectCopy = [ordered]@{}
     foreach ($property in $Value.PSObject.Properties) {
-        $objectCopy[$property.Name] = Copy-CalibrationCredentialSafeValue $property.Value
+        $objectCopy[$property.Name] = if (Test-CalibrationSensitiveFieldName $property.Name) {
+            if (Test-CalibrationEnvironmentFieldName $property.Name) { '[environment redacted]' } else { '[credential redacted]' }
+        } else { Copy-CalibrationCredentialSafeValue $property.Value }
     }
     return [pscustomobject]$objectCopy
 }
@@ -314,23 +423,39 @@ function New-CalibrationJudgePayload {
     )
     $forbiddenValues = @()
     if ($null -ne $IdentityMetadata) {
-        $forbiddenValues = @($IdentityMetadata.PSObject.Properties | ForEach-Object { [string]$_.Value } |
+        $forbiddenValues = @($IdentityMetadata.PSObject.Properties |
+            ForEach-Object { [string]$_.Value } |
             Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Sort-Object -Unique)
     }
+    $safeInstruction = ConvertTo-CalibrationIdentitySafeText `
+        -Text (ConvertTo-CalibrationCredentialSafeText ([string]$Prompt.request.request_text)) `
+        -ForbiddenValues $forbiddenValues
+    $safeResponse = ConvertTo-CalibrationIdentitySafeText `
+        -Text (ConvertTo-CalibrationCredentialSafeText $ResponseText) `
+        -ForbiddenValues $forbiddenValues
+    $safeCriteria = @($Rubric.criteria | ForEach-Object {
+        ConvertTo-CalibrationIdentitySafeText `
+            -Text (ConvertTo-CalibrationCredentialSafeText ([string]$_)) `
+            -ForbiddenValues $forbiddenValues
+    })
     $payload = [pscustomobject][ordered]@{
         protocol_version = 'calibration-judge-payload/v1'
         set_version = 'calibration-set-v1'
         item_id = [string]$Prompt.id
         item_version = [string]$Prompt.version
-        instruction_text = [string]$Prompt.request.request_text
-        response_text = $ResponseText
-        evaluation_guide = $Rubric
+        instruction_text = $safeInstruction
+        response_text = $safeResponse
+        evaluation_guide = [pscustomobject][ordered]@{
+            id = [string]$Rubric.id
+            version = [string]$Rubric.version
+            criteria = $safeCriteria
+        }
         required_result = [pscustomobject][ordered]@{
             decision = 'pass or fail'
             rationale = 'brief evidence tied to the evaluation guide'
         }
     }
-    return Copy-CalibrationSanitizedValue -Value $payload -ForbiddenValues $forbiddenValues
+    return $payload
 }
 
 function Get-CalibrationCategoryProposal {
@@ -450,22 +575,29 @@ function ConvertTo-CalibrationJudgeDecision {
         -not (Test-CalibrationProperty $Value 'decision') -or
         $Value.decision -cnotin @('pass', 'fail') -or
         -not (Test-CalibrationProperty $Value 'rationale') -or
+        $Value.rationale -isnot [string] -or
         [string]::IsNullOrWhiteSpace([string]$Value.rationale)) {
         throw "Judge '$JudgeProfileId' returned an invalid decision."
     }
     return [pscustomobject][ordered]@{
         judge_profile_id = $JudgeProfileId
         decision = [string]$Value.decision
-        rationale = ConvertTo-RunnerCredentialRedactedText -Text ([string]$Value.rationale)
+        rationale = ConvertTo-CalibrationCredentialSafeText -Text ([string]$Value.rationale)
     }
 }
 
 function Write-CalibrationJsonFile {
-    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][object]$Value)
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][object]$Value,
+        [Parameter(Mandatory)][string]$AllowedRunRoot
+    )
+    Assert-CalibrationWriteBoundary -Path $Path -AllowedRunRoot $AllowedRunRoot
     $parent = Split-Path -Parent $Path
     if (-not (Test-Path -LiteralPath $parent -PathType Container)) {
         New-Item -ItemType Directory -Path $parent -Force | Out-Null
     }
+    Assert-CalibrationWriteBoundary -Path $Path -AllowedRunRoot $AllowedRunRoot
     $Value | ConvertTo-Json -Depth 100 | Set-Content -LiteralPath $Path -Encoding utf8NoBOM
 }
 
@@ -484,6 +616,7 @@ function Invoke-Calibration {
         [string]$ResultsRoot = $script:CalibrationResultsRoot,
         [scriptblock]$RouteInvoker,
         [scriptblock]$RouterInvoker,
+        [scriptblock]$GraderInvoker,
         [scriptblock]$JudgeInvoker,
         [scriptblock]$PythonExecutor,
         [AllowNull()][string]$PythonExecutable,
@@ -521,10 +654,10 @@ function Invoke-Calibration {
     if ([string]::IsNullOrWhiteSpace($RunId)) { $RunId = New-CalibrationRunId }
     $artifactName = if ($Route) { 'route-plan.json' } else { 'review.json' }
     $artifactPath = Resolve-CalibrationResultPath -ResultsRoot $ResultsRoot -RunId $RunId -ArtifactName $artifactName
-    $runDirectory = Split-Path -Parent $artifactPath
-    if (Test-Path -LiteralPath $runDirectory) {
-        throw "Calibration run '$RunId' already exists and will not be overwritten."
-    }
+    $claim = New-CalibrationRunClaim -ResultsRoot $ResultsRoot -RunId $RunId
+    $runDirectory = [string]$claim.run_directory
+    $reviews = [Collections.Generic.List[object]]::new()
+    try {
     if ($Route) {
         if ($null -eq $RouteInvoker) {
             $routeContext = New-CalibrationRouteContext
@@ -560,7 +693,7 @@ function Invoke-Calibration {
             provider_calls = 0
             routes = $routes
         }
-        Write-CalibrationJsonFile -Path $artifactPath -Value $artifact
+        Write-CalibrationJsonFile -Path $artifactPath -Value $artifact -AllowedRunRoot $runDirectory
         return [pscustomobject][ordered]@{
             mode = 'route'
             calibration_set_version = [string]$loaded.set.version
@@ -573,97 +706,218 @@ function Invoke-Calibration {
 
     $rawDirectory = Join-Path $runDirectory 'raw'
     if ($null -eq $RouterInvoker) { $RouterInvoker = ${function:Invoke-CalibrationDefaultRouter} }
+    if ($null -eq $GraderInvoker) { $GraderInvoker = ${function:Invoke-CalibrationDeterministicGrader} }
     if ($null -eq $JudgeInvoker) { $JudgeInvoker = ${function:Invoke-CalibrationDefaultJudge} }
-    $reviews = [Collections.Generic.List[object]]::new()
 
     foreach ($prompt in @($loaded.set.prompts)) {
-        $routerResult = & $RouterInvoker $prompt.request $prompt
-        if ($null -eq $routerResult -or -not (Test-CalibrationProperty $routerResult 'response') -or
-            $null -eq $routerResult.response -or $routerResult.response.status -cne 'completed') {
-            throw "Calibration route failed for '$($prompt.id)'."
-        }
-        $response = $routerResult.response
-        $family = Get-CalibrationCandidateFamily -Response $response
-        $judgeIds = @(Get-CalibrationJudgePair -CandidateFamily $family)
-        $rubric = $loaded.rubrics[[string]$prompt.grading.rubric_ref]
-        $identity = [pscustomobject]@{
-            model = [string]$response.model
-            provider = [string]$response.provider
-            family = $family
-            tool = [string]$response.launcher
-            effort = [string]$response.effort
-            price = [string]$response.price
-            latency = [string]$response.latency
-            profile_id = [string]$response.configuration_id
-            candidate_id = [string]$response.configuration_id
-        }
-        $responseText = ConvertTo-RunnerCredentialRedactedText -Text ([string]$response.output)
-        $payload = New-CalibrationJudgePayload -Prompt $prompt -Rubric $rubric `
-            -ResponseText $responseText -IdentityMetadata $identity
-        $deterministicResult = if (Test-CalibrationProperty $prompt.grading 'deterministic_grader') {
-            Invoke-CalibrationDeterministicGrader -Prompt $prompt -ResponseText $responseText `
-                -PythonExecutor $PythonExecutor -PythonExecutable $PythonExecutable `
-                -PythonTimeoutMilliseconds $PythonTimeoutMilliseconds
-        } else { $null }
-        $rawJudgeOutputs = [Collections.Generic.List[object]]::new()
-        $decisions = @(
-            foreach ($judgeId in $judgeIds) {
-                $rawDecision = & $JudgeInvoker $judgeId $payload $prompt
-                $rawJudgeOutputs.Add([pscustomobject][ordered]@{
-                    judge_profile_id = $judgeId
-                    raw_output = Copy-CalibrationCredentialSafeValue $rawDecision
-                })
-                ConvertTo-CalibrationJudgeDecision -Value $rawDecision -JudgeProfileId $judgeId
-            }
-        )
-        $externalCategory = if ((Test-CalibrationProperty $response 'effective_quality') -and
-            $response.effective_quality -cin @('unknown', 'standard', 'strong', 'frontier')) {
-            [string]$response.effective_quality
-        } else { [string]$prompt.external_category }
-        $proposal = Get-CalibrationCategoryProposal -ExternalCategory $externalCategory `
-            -JudgeDecisions @($decisions.decision) -DeterministicResult $deterministicResult
-
         $safeItem = [string]$prompt.id
         $candidateOutputPath = Join-Path $rawDirectory ("$safeItem-response.json")
         $judgeOutputPath = Join-Path $rawDirectory ("$safeItem-reviews.json")
-        Write-CalibrationJsonFile -Path $candidateOutputPath -Value ([pscustomobject]@{
-            item_id = $safeItem; raw_candidate_output = $responseText
-        })
-        Write-CalibrationJsonFile -Path $judgeOutputPath -Value ([pscustomobject]@{
-            item_id = $safeItem
-            anonymized_payload = $payload
-            raw_judge_outputs = @($rawJudgeOutputs)
-            normalized_decisions = $decisions
-        })
+        $errorCodes = [Collections.Generic.List[string]]::new()
+        $rawJudgeOutputs = [Collections.Generic.List[object]]::new()
+        $decisions = [Collections.Generic.List[object]]::new()
+        $response = $null
+        $rawResponseText = $null
+        $payload = $null
+        $deterministicResult = $null
+        $externalCategory = [string]$prompt.external_category
+        $selectedConfigurationId = $null
 
+        try {
+            $routerResult = & $RouterInvoker $prompt.request $prompt
+            if ($null -eq $routerResult -or -not (Test-CalibrationProperty $routerResult 'response') -or
+                $null -eq $routerResult.response -or $routerResult.response.status -cne 'completed') {
+                throw 'candidate result invalid'
+            }
+            $response = $routerResult.response
+            $rawResponseText = [string]$response.output
+            $selectedConfigurationId = [string]$response.configuration_id
+            if ((Test-CalibrationProperty $response 'effective_quality') -and
+                $response.effective_quality -cin @('unknown', 'standard', 'strong', 'frontier')) {
+                $externalCategory = [string]$response.effective_quality
+            }
+            Write-CalibrationJsonFile -Path $candidateOutputPath -AllowedRunRoot $runDirectory -Value ([pscustomobject][ordered]@{
+                item_id = $safeItem
+                status = 'completed'
+                raw_candidate_output = ConvertTo-CalibrationCredentialSafeText -Text $rawResponseText
+                error_code = $null
+            })
+        } catch {
+            $errorCodes.Add('candidate_execution_failed')
+            Write-CalibrationJsonFile -Path $candidateOutputPath -AllowedRunRoot $runDirectory -Value ([pscustomobject][ordered]@{
+                item_id = $safeItem
+                status = 'failed'
+                raw_candidate_output = if ($null -eq $rawResponseText) { $null } else { ConvertTo-CalibrationCredentialSafeText $rawResponseText }
+                error_code = 'candidate_execution_failed'
+            })
+        }
+
+        if ($null -ne $response) {
+            try {
+                $family = Get-CalibrationCandidateFamily -Response $response
+                $judgeIds = @(Get-CalibrationJudgePair -CandidateFamily $family)
+                $rubric = $loaded.rubrics[[string]$prompt.grading.rubric_ref]
+                $identity = [pscustomobject]@{
+                    model = [string]$response.model
+                    provider = [string]$response.provider
+                    family = $family
+                    tool = [string]$response.launcher
+                    effort = [string]$response.effort
+                    price = [string]$response.price
+                    latency = [string]$response.latency
+                    profile_id = [string]$response.configuration_id
+                    candidate_id = [string]$response.configuration_id
+                }
+                $payload = New-CalibrationJudgePayload -Prompt $prompt -Rubric $rubric `
+                    -ResponseText $rawResponseText -IdentityMetadata $identity
+            } catch {
+                $errorCodes.Add('judge_payload_failed')
+                $judgeIds = @()
+            }
+
+            if (Test-CalibrationProperty $prompt.grading 'deterministic_grader') {
+                try {
+                    $deterministicResult = & $GraderInvoker $prompt $rawResponseText $PythonExecutor `
+                        $PythonExecutable $PythonTimeoutMilliseconds
+                    if ($null -eq $deterministicResult -or
+                        -not (Test-CalibrationProperty $deterministicResult 'outcome') -or
+                        $deterministicResult.outcome -cnotin @('pass', 'fail', 'review_required')) {
+                        throw 'grader result invalid'
+                    }
+                } catch {
+                    $errorCodes.Add('grader_execution_failed')
+                    $deterministicResult = [pscustomobject][ordered]@{
+                        type = [string]$prompt.grading.deterministic_grader.type
+                        outcome = 'review_required'
+                        reason_code = 'grader_execution_failed'
+                        checks = @()
+                    }
+                }
+            }
+
+            foreach ($judgeId in @($judgeIds)) {
+                $rawDecision = $null
+                $rawRecord = $null
+                try {
+                    $rawDecision = & $JudgeInvoker $judgeId $payload $prompt
+                    $rawRecord = [pscustomobject][ordered]@{
+                        judge_profile_id = $judgeId
+                        status = 'completed'
+                        raw_output = Copy-CalibrationCredentialSafeValue $rawDecision
+                        error_code = $null
+                    }
+                    $rawJudgeOutputs.Add($rawRecord)
+                    Write-CalibrationJsonFile -Path $judgeOutputPath -AllowedRunRoot $runDirectory -Value ([pscustomobject][ordered]@{
+                        item_id = $safeItem
+                        anonymized_payload = $payload
+                        raw_judge_outputs = @($rawJudgeOutputs)
+                        normalized_decisions = @($decisions)
+                    })
+                    $decisions.Add((ConvertTo-CalibrationJudgeDecision -Value $rawDecision -JudgeProfileId $judgeId))
+                } catch {
+                    if ($null -eq $rawRecord) {
+                        $rawRecord = [pscustomobject][ordered]@{
+                            judge_profile_id = $judgeId
+                            status = 'failed'
+                            raw_output = if ($null -eq $rawDecision) { $null } else { Copy-CalibrationCredentialSafeValue $rawDecision }
+                            error_code = 'judge_execution_failed'
+                        }
+                        $rawJudgeOutputs.Add($rawRecord)
+                    } else {
+                        $rawRecord.status = 'failed'
+                        $rawRecord.error_code = 'judge_execution_failed'
+                    }
+                    if (-not $errorCodes.Contains('judge_execution_failed')) { $errorCodes.Add('judge_execution_failed') }
+                } finally {
+                    Write-CalibrationJsonFile -Path $judgeOutputPath -AllowedRunRoot $runDirectory -Value ([pscustomobject][ordered]@{
+                        item_id = $safeItem
+                        anonymized_payload = $payload
+                        raw_judge_outputs = @($rawJudgeOutputs)
+                        normalized_decisions = @($decisions)
+                    })
+                }
+            }
+        }
+
+        if (-not (Test-Path -LiteralPath $judgeOutputPath -PathType Leaf)) {
+            Write-CalibrationJsonFile -Path $judgeOutputPath -AllowedRunRoot $runDirectory -Value ([pscustomobject][ordered]@{
+                item_id = $safeItem
+                anonymized_payload = $payload
+                raw_judge_outputs = @($rawJudgeOutputs)
+                normalized_decisions = @($decisions)
+            })
+        }
+
+        $proposal = if ($errorCodes.Count -eq 0 -and $decisions.Count -eq 2) {
+            Get-CalibrationCategoryProposal -ExternalCategory $externalCategory `
+                -JudgeDecisions @($decisions.decision) -DeterministicResult $deterministicResult
+        } else {
+            [pscustomobject][ordered]@{ outcome = 'review_required'; proposed_category = 'unknown' }
+        }
+        $itemStatus = if ($errorCodes.Count -gt 0) { 'failed' } elseif ($proposal.outcome -ceq 'review_required') {
+            'review_required'
+        } else { 'completed' }
         $reviews.Add([pscustomobject][ordered]@{
             item_id = $safeItem
+            item_status = $itemStatus
+            error_codes = @($errorCodes)
             category_target = [string]$prompt.category_target
             external_category = $externalCategory
             outcome = [string]$proposal.outcome
             proposed_category = [string]$proposal.proposed_category
-            selected_configuration_id = [string]$response.configuration_id
+            selected_configuration_id = $selectedConfigurationId
             deterministic_result = $deterministicResult
-            judge_decisions = $decisions
+            judge_decisions = @($decisions)
             raw_response_file = [IO.Path]::GetRelativePath($runDirectory, $candidateOutputPath)
             raw_review_file = [IO.Path]::GetRelativePath($runDirectory, $judgeOutputPath)
         })
     }
 
+    $summary = [pscustomobject][ordered]@{
+        total = $reviews.Count
+        completed = @($reviews | Where-Object { $_.item_status -ceq 'completed' }).Count
+        failed = @($reviews | Where-Object { $_.item_status -ceq 'failed' }).Count
+        review_required = @($reviews | Where-Object { $_.item_status -ceq 'review_required' }).Count
+    }
     $artifact = [pscustomobject][ordered]@{
         artifact_version = 'calibration-review-artifact/v1'
         calibration_set_version = [string]$loaded.set.version
         run_id = $RunId
         policy = 'retain only when every applicable deterministic grader and both judges pass; otherwise propose unknown; never rewrite profiles'
+        summary = $summary
+        fatal_error = $null
         reviews = @($reviews)
     }
-    Write-CalibrationJsonFile -Path $artifactPath -Value $artifact
+    Write-CalibrationJsonFile -Path $artifactPath -Value $artifact -AllowedRunRoot $runDirectory
     return [pscustomobject][ordered]@{
         mode = 'run'
         calibration_set_version = [string]$loaded.set.version
         run_id = $RunId
         artifact_path = $artifactPath
+        summary = $summary
         reviews = @($reviews)
+    }
+    } catch {
+        if ($Run) {
+            $fatalArtifact = [pscustomobject][ordered]@{
+                artifact_version = 'calibration-review-artifact/v1'
+                calibration_set_version = [string]$loaded.set.version
+                run_id = $RunId
+                policy = 'retain only when every applicable deterministic grader and both judges pass; otherwise propose unknown; never rewrite profiles'
+                summary = [pscustomobject][ordered]@{
+                    total = $reviews.Count
+                    completed = @($reviews | Where-Object { $_.item_status -ceq 'completed' }).Count
+                    failed = @($reviews | Where-Object { $_.item_status -ceq 'failed' }).Count
+                    review_required = @($reviews | Where-Object { $_.item_status -ceq 'review_required' }).Count
+                }
+                fatal_error = [pscustomobject][ordered]@{ code = 'calibration_run_failed' }
+                reviews = @($reviews)
+            }
+            try { Write-CalibrationJsonFile -Path $artifactPath -Value $fatalArtifact -AllowedRunRoot $runDirectory } catch { }
+        }
+        throw
+    } finally {
+        if ($null -ne $claim -and $null -ne $claim.stream) { $claim.stream.Dispose() }
     }
 }
 

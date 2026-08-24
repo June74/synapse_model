@@ -20,6 +20,19 @@ function ConvertTo-CalibrationEvidenceKey {
     return [regex]::Replace($normalized, '[^\p{L}\p{Nd}]', '')
 }
 
+function Test-CalibrationEvidenceNegated {
+    param(
+        [Parameter(Mandatory)][string]$ResponseText,
+        [Parameter(Mandatory)][string]$Evidence
+    )
+    $tokens = @([regex]::Matches($Evidence.Normalize([Text.NormalizationForm]::FormKC), '[\p{L}\p{Nd}]+') |
+        ForEach-Object { [regex]::Escape($_.Value) })
+    if ($tokens.Count -eq 0) { return $false }
+    $evidencePattern = $tokens -join '[^\p{L}\p{Nd}]+'
+    $pattern = '(?is)\b(?:not|never|false|incorrect|wrong)\b.{0,80}?' + $evidencePattern
+    return [regex]::IsMatch($ResponseText, $pattern)
+}
+
 function Get-CalibrationJsonPayload {
     param([Parameter(Mandatory)][string]$ResponseText)
     $trimmed = $ResponseText.Trim()
@@ -182,13 +195,16 @@ function Invoke-CalibrationVerifiedAnswerGrader {
     $responseKey = ConvertTo-CalibrationEvidenceKey $ResponseText
     $checks = [Collections.Generic.List[object]]::new()
     $expectedKey = ConvertTo-CalibrationEvidenceKey ([string]$Grader.expected_answer)
-    $expectedPassed = -not [string]::IsNullOrWhiteSpace($expectedKey) -and $responseKey.Contains($expectedKey, [StringComparison]::Ordinal)
-    $checks.Add([pscustomobject]@{ id = 'expected_answer'; kind = 'evidence_present'; passed = $expectedPassed; detail = if ($expectedPassed) { 'present' } else { 'missing' } })
+    $expectedNegated = Test-CalibrationEvidenceNegated -ResponseText $ResponseText -Evidence ([string]$Grader.expected_answer)
+    $expectedPassed = -not $expectedNegated -and -not [string]::IsNullOrWhiteSpace($expectedKey) -and
+        $responseKey.Contains($expectedKey, [StringComparison]::Ordinal)
+    $checks.Add([pscustomobject]@{ id = 'expected_answer'; kind = 'evidence_present'; passed = $expectedPassed; detail = if ($expectedNegated) { 'negated' } elseif ($expectedPassed) { 'present' } else { 'missing' } })
     $index = 0
     foreach ($reasoning in @($Grader.required_reasoning)) {
         $key = ConvertTo-CalibrationEvidenceKey ([string]$reasoning)
-        $passed = -not [string]::IsNullOrWhiteSpace($key) -and $responseKey.Contains($key, [StringComparison]::Ordinal)
-        $checks.Add([pscustomobject]@{ id = "required_reasoning[$index]"; kind = 'evidence_present'; passed = $passed; detail = if ($passed) { 'present' } else { 'missing' } })
+        $negated = Test-CalibrationEvidenceNegated -ResponseText $ResponseText -Evidence ([string]$reasoning)
+        $passed = -not $negated -and -not [string]::IsNullOrWhiteSpace($key) -and $responseKey.Contains($key, [StringComparison]::Ordinal)
+        $checks.Add([pscustomobject]@{ id = "required_reasoning[$index]"; kind = 'evidence_present'; passed = $passed; detail = if ($negated) { 'negated' } elseif ($passed) { 'present' } else { 'missing' } })
         $index++
     }
     $allPassed = @($checks | Where-Object { -not $_.passed }).Count -eq 0
@@ -247,132 +263,6 @@ function Get-CalibrationPythonCode {
     return [pscustomobject]@{ valid = $true; code = $code }
 }
 
-function Invoke-CalibrationPythonProcess {
-    param(
-        [Parameter(Mandatory)][string]$ExtractedCode,
-        [Parameter(Mandatory)][object]$Grader,
-        [AllowNull()][string]$PythonExecutable,
-        [ValidateRange(100, 10000)][int]$TimeoutMilliseconds = 2000
-    )
-    $resolvedPython = Resolve-RouterPythonExecutable -PythonExecutable $PythonExecutable
-    if ($null -eq $resolvedPython) { return [pscustomobject]@{ status = 'unavailable'; checks = @() } }
-    $temporaryRoot = Join-Path ([IO.Path]::GetTempPath()) ('router-calibration-python-{0}' -f [guid]::NewGuid().ToString('N'))
-    New-Item -ItemType Directory -Path $temporaryRoot | Out-Null
-    try {
-        $candidatePath = Join-Path $temporaryRoot 'candidate.py'
-        $testsPath = Join-Path $temporaryRoot 'tests.json'
-        $harnessPath = Join-Path $temporaryRoot 'harness.py'
-        Set-Content -LiteralPath $candidatePath -Value $ExtractedCode -Encoding utf8NoBOM
-        [pscustomobject]@{ tests = @($Grader.tests) } | ConvertTo-Json -Depth 100 -Compress |
-            Set-Content -LiteralPath $testsPath -Encoding utf8NoBOM
-        @'
-import ast
-import json
-import sys
-
-candidate_path, tests_path, entry_point = sys.argv[1:4]
-result = {"status": "error", "checks": []}
-try:
-    source = open(candidate_path, "r", encoding="utf-8").read()
-    tree = ast.parse(source, filename="candidate.py", mode="exec")
-    allowed_top = [node for node in tree.body if isinstance(node, (ast.FunctionDef, ast.Expr))]
-    functions = [node for node in tree.body if isinstance(node, ast.FunctionDef)]
-    if len(allowed_top) != len(tree.body) or len(functions) != 1 or functions[0].name != entry_point:
-        raise ValueError("unsafe_shape")
-    allowed_names = {"abs", "all", "any", "bool", "dict", "enumerate", "float", "int", "len", "list", "max", "min", "range", "reversed", "set", "sorted", "str", "sum", "tuple", "ValueError", entry_point}
-    allowed_methods = {"add", "append", "copy", "discard", "get", "items", "keys", "pop", "remove", "reverse", "setdefault", "sort", "values"}
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.Import, ast.ImportFrom, ast.ClassDef, ast.AsyncFunctionDef, ast.Global, ast.Nonlocal)):
-            raise ValueError("unsafe_syntax")
-        if isinstance(node, ast.Name) and node.id.startswith("__"):
-            raise ValueError("unsafe_name")
-        if isinstance(node, ast.Attribute) and (node.attr.startswith("__") or node.attr not in allowed_methods):
-            raise ValueError("unsafe_attribute")
-        if isinstance(node, ast.Call):
-            if isinstance(node.func, ast.Name) and node.func.id not in allowed_names:
-                raise ValueError("unsafe_call")
-            if not isinstance(node.func, (ast.Name, ast.Attribute)):
-                raise ValueError("unsafe_call")
-    safe_builtins = {name: getattr(__builtins__, name) for name in allowed_names if name != entry_point and hasattr(__builtins__, name)}
-    namespace = {"__builtins__": safe_builtins}
-    exec(compile(tree, "candidate.py", "exec"), namespace, namespace)
-    function = namespace[entry_point]
-    tests = json.load(open(tests_path, "r", encoding="utf-8"))["tests"]
-    checks = []
-    for index, test in enumerate(tests):
-        passed = False
-        detail = "mismatch"
-        try:
-            value = function(*test.get("arguments", []))
-            if "expected_error" in test:
-                detail = "missing_expected_error"
-            else:
-                passed = value == test.get("expected")
-                detail = "matched" if passed else "mismatch"
-        except Exception as error:
-            if test.get("expected_error") == type(error).__name__:
-                passed = True
-                detail = "expected_error"
-            else:
-                detail = "unexpected_error"
-        checks.append({"id": f"test[{index}]", "passed": passed, "detail": detail})
-    result = {"status": "completed", "checks": checks}
-except Exception:
-    result = {"status": "error", "checks": []}
-print(json.dumps(result, separators=(",", ":")))
-'@ | Set-Content -LiteralPath $harnessPath -Encoding utf8NoBOM
-
-        $startInfo = [Diagnostics.ProcessStartInfo]::new()
-        $startInfo.FileName = $resolvedPython
-        $startInfo.UseShellExecute = $false
-        $startInfo.CreateNoWindow = $true
-        $startInfo.RedirectStandardOutput = $true
-        $startInfo.RedirectStandardError = $true
-        $startInfo.WorkingDirectory = $temporaryRoot
-        $startInfo.ArgumentList.Add('-I')
-        $startInfo.ArgumentList.Add('-S')
-        $startInfo.ArgumentList.Add($harnessPath)
-        $startInfo.ArgumentList.Add($candidatePath)
-        $startInfo.ArgumentList.Add($testsPath)
-        $startInfo.ArgumentList.Add([string]$Grader.entry_point)
-        $startInfo.Environment.Clear()
-        $startInfo.Environment['PYTHONIOENCODING'] = 'utf-8'
-        $startInfo.Environment['PYTHONDONTWRITEBYTECODE'] = '1'
-        foreach ($name in @('SystemRoot', 'WINDIR')) {
-            $value = [Environment]::GetEnvironmentVariable($name)
-            if (-not [string]::IsNullOrWhiteSpace($value)) { $startInfo.Environment[$name] = $value }
-        }
-        $process = [Diagnostics.Process]::new()
-        $process.StartInfo = $startInfo
-        try {
-            if (-not $process.Start()) { return [pscustomobject]@{ status = 'error'; checks = @() } }
-            $stdoutTask = $process.StandardOutput.ReadToEndAsync()
-            $stderrTask = $process.StandardError.ReadToEndAsync()
-            if (-not $process.WaitForExit($TimeoutMilliseconds)) {
-                try { $process.Kill($true) } catch { }
-                $process.WaitForExit()
-                $null = $stdoutTask.GetAwaiter().GetResult()
-                $null = $stderrTask.GetAwaiter().GetResult()
-                return [pscustomobject]@{ status = 'timeout'; checks = @() }
-            }
-            $stdout = $stdoutTask.GetAwaiter().GetResult()
-            $null = $stderrTask.GetAwaiter().GetResult()
-            if ($process.ExitCode -ne 0) { return [pscustomobject]@{ status = 'error'; checks = @() } }
-            try {
-                $result = $stdout | ConvertFrom-Json -Depth 20 -ErrorAction Stop
-                if ($result.status -cnotin @('completed', 'error') -or $result.checks -isnot [Collections.IList]) { throw 'invalid result' }
-                return $result
-            } catch { return [pscustomobject]@{ status = 'error'; checks = @() } }
-        } finally {
-            $process.Dispose()
-        }
-    } catch {
-        return [pscustomobject]@{ status = 'error'; checks = @() }
-    } finally {
-        if (Test-Path -LiteralPath $temporaryRoot) { Remove-Item -LiteralPath $temporaryRoot -Recurse -Force }
-    }
-}
-
 function Invoke-CalibrationExecutableTestsGrader {
     param(
         [Parameter(Mandatory)][object]$Grader,
@@ -386,12 +276,11 @@ function Invoke-CalibrationExecutableTestsGrader {
         return New-CalibrationGraderResult -Type 'executable_tests' -Outcome 'review_required' `
             -ReasonCode 'malformed_output' -Checks @()
     }
-    $execution = if ($null -ne $PythonExecutor) {
-        & $PythonExecutor $extracted.code $Grader $PythonExecutable $TimeoutMilliseconds
-    } else {
-        Invoke-CalibrationPythonProcess -ExtractedCode $extracted.code -Grader $Grader `
-            -PythonExecutable $PythonExecutable -TimeoutMilliseconds $TimeoutMilliseconds
+    if ($null -eq $PythonExecutor) {
+        return New-CalibrationGraderResult -Type 'executable_tests' -Outcome 'review_required' `
+            -ReasonCode 'sandbox_unavailable' -Checks @()
     }
+    $execution = & $PythonExecutor $extracted.code $Grader $PythonExecutable $TimeoutMilliseconds
     if ($null -eq $execution -or $execution.status -cnotin @('completed', 'timeout', 'unavailable', 'error') -or
         $execution.checks -isnot [Collections.IList]) {
         return New-CalibrationGraderResult -Type 'executable_tests' -Outcome 'review_required' `
