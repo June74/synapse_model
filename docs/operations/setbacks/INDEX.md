@@ -5,7 +5,7 @@
 | [SB-20260824-015530-router-pricing-fail-open](incidents/2026-08-24T015530Z-router-pricing-fail-open.md) | Task 6 pricing accepted missing snapshots and free routes | closed | 2026-08-24 | 2026-08-24 |
 | [SB-20260824-012823-apply-patch-duplicate-target](incidents/2026-08-24T012823Z-apply-patch-duplicate-target.md) | Patch request repeated one target file in multiple update blocks | closed | 2026-08-24 | 2026-08-24 |
 | [SB-20260823-232717-requirements-profile-path-format-parser](incidents/2026-08-23T232717Z-requirements-profile-path-format-parser.md) | Requirements profile-path format expression caused a parser error | closed | 2026-08-23 | 2026-08-23 |
-| [SB-20260823-234012-minimal-profile-fixture-path](incidents/2026-08-23T234012Z-minimal-profile-fixture-path.md) | Assumed minimal-profile fixture filename caused a path-not-found error | closed | 2026-08-23 | 2026-08-23 |
+| [SB-20260823-234012-minimal-profile-fixture-path](incidents/2026-08-23T234012Z-minimal-profile-fixture-path.md) | Assumed minimal-profile fixture filename caused a path-not-found error | closed | 2026-08-23 | 2026-08-24 |
 | [SB-20260824-031922-baseline-session-id-not-retained](incidents/2026-08-24T031922Z-baseline-session-id-not-retained.md) | Baseline test session identifier was not retained | closed | 2026-08-24 | 2026-08-24 |
 | [SB-20260824-033023-sqlite-test-connection-not-closed](incidents/2026-08-24T033023Z-sqlite-test-connection-not-closed.md) | SQLite test reader left Windows file handles open | closed | 2026-08-24 | 2026-08-24 |
 | [SB-20260824-035416-sqlite-schema-admission-atomicity](incidents/2026-08-24T035416Z-sqlite-schema-admission-atomicity.md) | SQLite schema admission was not exact or atomic | closed | 2026-08-24 | 2026-08-24 |

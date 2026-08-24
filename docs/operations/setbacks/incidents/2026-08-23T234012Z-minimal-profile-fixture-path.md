@@ -2,7 +2,7 @@
 
 - **Status:** closed
 - **First observed:** 2026-08-23T23:40:12.4218627Z
-- **Last observed:** 2026-08-23T23:40:12.4218627Z
+- **Last observed:** 2026-08-24T05:15:19Z
 - **Phase/task:** Task 4 code-quality baseline inspection
 - **Environment:** Windows PowerShell 7 in the deterministic-router-v1 worktree
 - **Version/commit:** eeb511380847100dd68b1d74f5eccc0a41d83c9f
@@ -51,3 +51,4 @@ Addressing the minimal profile with a filename inferred from its candidate ident
 
 - 2026-08-23T23:40:12.4218627Z: First observed and closed after bounded enumeration verified the correction.
 - 2026-08-23, Task 6 pricing inspection: A guessed Gemini 3.1 profile filename did not exist. Bounded enumeration found `gemini-3.1-pro-high__high.json` and `gemini-3.1-pro-low__low.json`. No files or external state changed. Prevention remains to enumerate profile directories before constructing filenames from model identity assumptions.
+- 2026-08-24T05:15:19Z, Task 8 execution-seam inspection: `Select-String -LiteralPath` received a wildcard fixture path, so PowerShell treated `*` as a literal filename and emitted a path error after returning the bounded runner-test matches. No file changed. Correction is to enumerate fixture files with `Get-ChildItem` and pass the resolved paths to `Select-String`; prevention remains bounded enumeration before path-strict commands.
