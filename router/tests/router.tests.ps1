@@ -25,6 +25,8 @@ $qualityModulePath = Join-Path $projectRoot 'router/lib/quality.ps1'
 $pricingModulePath = Join-Path $projectRoot 'router/lib/pricing.ps1'
 $policyModulePath = Join-Path $projectRoot 'router/lib/policy.ps1'
 $traceModulePath = Join-Path $projectRoot 'router/lib/trace.ps1'
+$responseModulePath = Join-Path $projectRoot 'router/lib/response.ps1'
+$routerRunPath = Join-Path $projectRoot 'router/run_router.ps1'
 $requestSchemaPath = Join-Path $projectRoot 'router/schemas/request-profile.schema.json'
 $profileSchemaPath = Join-Path $projectRoot 'router/schemas/model-profile.schema.json'
 $responseSchemaPath = Join-Path $projectRoot 'router/schemas/router-response.schema.json'
@@ -84,6 +86,14 @@ if (-not $traceAvailable) {
     exit 1
 }
 . $traceModulePath
+$responseAvailable = Test-Path -LiteralPath $responseModulePath -PathType Leaf
+if ($responseAvailable) {
+    . $responseModulePath
+}
+$routerRunAvailable = Test-Path -LiteralPath $routerRunPath -PathType Leaf
+if ($routerRunAvailable) {
+    . $routerRunPath
+}
 $task7PythonOverride = [Environment]::GetEnvironmentVariable('ROUTER_PYTHON_EXECUTABLE')
 $task7Python = Resolve-RouterPythonExecutable -PythonExecutable $task7PythonOverride
 $task4Assertions = {
@@ -659,6 +669,7 @@ $qualityCategories = @('unsupported', 'unknown', 'standard', 'strong', 'frontier
 $responseStatuses = @('completed', 'invalid_request', 'unsupported_request', 'no_eligible_configuration', 'execution_failed')
 $failureStatuses = @('invalid_request', 'unsupported_request', 'no_eligible_configuration', 'execution_failed')
 $reasonCodes = @(
+    'request_validation_failed'
     'unsupported_language'
     'unsupported_modality'
     'sensitive_request_unsupported'
@@ -3458,6 +3469,28 @@ Invoke-Assertion 'Equals-throwing CLR candidate is rejected without invoking Equ
     Assert-Equal ([RouterSchemaThrowingEqualsProbe].GetProperty('EqualsCalls').GetValue($null)) 0
 }
 
+Invoke-Assertion 'response schema requires a nullable decision trace id in every branch' {
+    $completed = New-MinimalCompletedResponse
+    $completed.decision_trace_id = $null
+    Assert-ValidationSuccess (Test-RouterSchema -Value $completed -SchemaPath $responseSchemaPath)
+
+    $failure = New-MinimalFailureResponse
+    $failure.status = 'invalid_request'
+    $failure.reason_code = 'request_validation_failed'
+    $failure.decision_trace_id = $null
+    Assert-ValidationSuccess (Test-RouterSchema -Value $failure -SchemaPath $responseSchemaPath)
+
+    foreach ($response in @($completed, $failure)) {
+        $response.decision_trace_id = ''
+        $validation = Test-RouterSchema -Value $response -SchemaPath $responseSchemaPath
+        Assert-False $validation.valid
+        Assert-ValidationError -Validation $validation -Code 'schema_validation_failed' -Path '$'
+        $response.PSObject.Properties.Remove('decision_trace_id')
+        $validation = Test-RouterSchema -Value $response -SchemaPath $responseSchemaPath
+        Assert-RequiredPropertyError -Validation $validation -Path '$.decision_trace_id'
+    }
+}
+
 & $task4Assertions
 
 $qualityCapabilities = @('instruction_following', 'reasoning', 'factual_reliability')
@@ -4553,6 +4586,41 @@ Invoke-Assertion 'policy selection is invariant to forward and reverse tied inpu
         Assert-Equal $selectedIdentities[0] 'agy|shared-model__medium'
     }
 
+Invoke-Assertion 'complete actual usage reuses Task 6 pricing and becomes final' {
+    $candidate = @(Get-MinimalPolicyProfiles | Where-Object { $_.launcher -ceq 'agy' })[0]
+    $usage = [pscustomobject]@{
+        actual_input_tokens = 100
+        visible_output_tokens = 20
+        reasoning_tokens = 5
+        complete = $true
+    }
+    $actual = Get-RouterActualPrice -Candidate $candidate -Request (New-MinimalRequest) `
+        -PricingSnapshot (New-TestPolicyPricingSnapshot) -Usage $usage -AsOfDate '2026-08-22'
+
+    Assert-Equal $actual.available $true
+    Assert-Equal $actual.actual_input_tokens 100
+    Assert-Equal $actual.visible_output_tokens 20
+    Assert-Equal $actual.reasoning_tokens 5
+    Assert-Equal $actual.price ([decimal]0.000225)
+    Assert-Equal $actual.price_final $true
+}
+
+Invoke-Assertion 'absent incomplete and invalid actual usage cannot finalize price' {
+    $candidate = @(Get-MinimalPolicyProfiles | Where-Object { $_.launcher -ceq 'agy' })[0]
+    $cases = @(
+        $null
+        [pscustomobject]@{ actual_input_tokens = 100; visible_output_tokens = 20; reasoning_tokens = 5; complete = $false }
+        [pscustomobject]@{ actual_input_tokens = 100; visible_output_tokens = 20; reasoning_tokens = $null; complete = $true }
+        [pscustomobject]@{ actual_input_tokens = -1; visible_output_tokens = 20; reasoning_tokens = 5; complete = $true }
+    )
+    foreach ($usage in $cases) {
+        $actual = Get-RouterActualPrice -Candidate $candidate -Request (New-MinimalRequest) `
+            -PricingSnapshot (New-TestPolicyPricingSnapshot) -Usage $usage -AsOfDate '2026-08-22'
+        Assert-False $actual.available
+        Assert-False $actual.price_final
+    }
+}
+
 function New-Task7TraceFixture {
     param([string]$TraceId = 'powershell-trace-0001')
 
@@ -4940,6 +5008,372 @@ Invoke-Assertion 'Task 7 stores one trace produced by the live deterministic pol
         if (Test-Path -LiteralPath $tempRoot) {
             [IO.Directory]::Delete($tempRoot, $true)
         }
+    }
+}
+
+function New-Task8ExecutionResult {
+    param(
+        [string]$Status = 'success',
+        [string]$Answer = 'Normalized selected output',
+        [long]$LatencyMilliseconds = 2500,
+        [AllowNull()][object]$Usage = $null,
+        [AllowNull()][string]$Failure = $null
+    )
+
+    $canonical = if ($Status -ceq 'success') {
+        [pscustomobject]@{ status = 'success'; answer = $Answer; error = $null }
+    } elseif ($Status -ceq 'failure') {
+        [pscustomobject]@{ status = 'failure'; answer = ''; error = 'provider-declared failure' }
+    } else {
+        $null
+    }
+    return [pscustomobject][ordered]@{
+        run_id = 'task8-execution'
+        candidate = $null
+        process = [pscustomobject]@{
+            exit_code = if ($null -eq $Failure) { 0 } else { 1 }
+            duration_ms = $LatencyMilliseconds
+            timed_out = $false
+            cleanup_failed = $false
+            cleanup_status = 'not_required'
+            process_exited = $true
+        }
+        canonical = $canonical
+        failure = $Failure
+        diagnostic_note = if ($null -eq $Failure) { 'completed' } else { $Failure }
+        latency_ms = $LatencyMilliseconds
+        usage = $Usage
+        cli_reported_cost_usd = $null
+        record = $null
+    }
+}
+
+function New-Task8RouterParameters {
+    param(
+        [object]$Request = (New-MinimalRequest),
+        [AllowNull()][object[]]$RuntimeStates,
+        [AllowNull()][scriptblock]$Executor,
+        [AllowNull()][scriptblock]$StorageInvoker
+    )
+
+    $profiles = @(Get-MinimalPolicyProfiles)
+    $parameters = @{
+        Request = $Request
+        Catalog = [pscustomobject]@{ valid = $true; profiles = $profiles; errors = @() }
+        Matrix = New-TestMatrix
+        PricingSnapshot = New-TestPolicyPricingSnapshot
+        QualitySnapshot = [pscustomobject]@{ snapshot_date = '2026-08-22' }
+        TokenEstimates = Get-TestPolicyTokenEstimates -Profiles $profiles
+        AsOfDate = '2026-08-22'
+        Clock = { '2026-08-24T06:00:00Z' }
+        IdGenerator = { 'task8-trace-0001' }
+        ProjectInstructions = ''
+        OutputReserveTokens = 128
+        LongContextThresholdTokens = 100000
+        RunMode = 'normal'
+    }
+    if ($PSBoundParameters.ContainsKey('RuntimeStates')) { $parameters.RuntimeStates = $RuntimeStates }
+    if ($null -ne $Executor) { $parameters.Executor = $Executor }
+    if ($null -ne $StorageInvoker) { $parameters.StorageInvoker = $StorageInvoker }
+    return $parameters
+}
+
+Invoke-Assertion 'Task 8 response and router modules are available' {
+    Assert-Equal $responseAvailable $true
+    Assert-Equal $routerRunAvailable $true
+    Assert-Equal ($null -ne (Get-Command Invoke-RouterRun -ErrorAction SilentlyContinue)) $true
+}
+
+Invoke-Assertion 'router invokes exactly one selected configuration and normalizes completed output' {
+    $script:task8Executions = @()
+    $script:task8Traces = @()
+    $executor = {
+        param($Candidate, $Prompt, $RunId)
+        $script:task8Executions += [pscustomobject]@{ candidate = $Candidate; prompt = $Prompt; run_id = $RunId }
+        New-Task8ExecutionResult
+    }
+    $storage = {
+        param($Trace)
+        $script:task8Traces += $Trace
+        [pscustomobject]@{ ok = $true; trace_id = $Trace.trace_id; candidate_evaluations_inserted = @($Trace.candidate_evaluations).Count }
+    }
+
+    $parameters = New-Task8RouterParameters -Executor $executor -StorageInvoker $storage
+    $result = Invoke-RouterRun @parameters
+    Assert-Equal @($script:task8Executions).Count 1
+    Assert-Equal @($script:task8Traces).Count 1
+    Assert-Equal $script:task8Executions[0].candidate.route_id 'test-route'
+    Assert-Equal $script:task8Executions[0].candidate.model 'shared-model'
+    Assert-Equal $script:task8Executions[0].candidate.effort 'medium'
+    Assert-Equal $result.response.status 'completed'
+    Assert-Equal $result.response.configuration_id 'shared-model__medium'
+    Assert-Equal $result.response.provider 'google'
+    Assert-Equal $result.response.launcher 'agy'
+    Assert-Equal $result.response.model 'shared-model'
+    Assert-Equal $result.response.effort 'medium'
+    Assert-Equal $result.response.output 'Normalized selected output'
+    Assert-Equal $result.response.latency 2.5
+    Assert-Equal $result.response.decision_trace_id 'task8-trace-0001'
+    Assert-ValidationSuccess (Test-RouterSchema -Value $result.response -SchemaPath $responseSchemaPath)
+}
+
+Invoke-Assertion 'complete actual usage finalizes price while absent usage preserves the estimate' {
+    $storage = { param($Trace) [pscustomobject]@{ ok = $true; trace_id = $Trace.trace_id; candidate_evaluations_inserted = @($Trace.candidate_evaluations).Count } }
+    $completeExecutor = {
+        param($Candidate, $Prompt, $RunId)
+        New-Task8ExecutionResult -Usage ([pscustomobject]@{
+            actual_input_tokens = 100
+            visible_output_tokens = 20
+            reasoning_tokens = 5
+            complete = $true
+        })
+    }
+    $parameters = New-Task8RouterParameters -Executor $completeExecutor -StorageInvoker $storage
+    $final = Invoke-RouterRun @parameters
+    Assert-Equal $final.response.price ([decimal]'0.000225')
+    Assert-Equal $final.response.price_final $true
+    Assert-Equal $final.trace.price '0.000225'
+    Assert-Equal $final.trace.price_final $true
+    $selectedTraceEvaluation = @($final.trace.candidate_evaluations | Where-Object { $_.selected })[0]
+    $integerTypes = @(
+        [byte], [sbyte], [int16], [uint16], [int32], [uint32],
+        [int64], [uint64], [Numerics.BigInteger]
+    )
+    foreach ($field in @(
+        'estimated_input_tokens', 'estimated_visible_output_tokens',
+        'estimated_reasoning_tokens', 'estimated_billable_output_tokens'
+    )) {
+        Assert-Equal ($selectedTraceEvaluation.price.$field.GetType() -in $integerTypes) $true
+    }
+
+    $parameters = New-Task8RouterParameters -Executor { New-Task8ExecutionResult } -StorageInvoker $storage
+    $estimated = Invoke-RouterRun @parameters
+    Assert-Equal $estimated.response.price ([decimal]'0.003849')
+    Assert-Equal $estimated.response.price_final $false
+    Assert-Equal $estimated.trace.price_final $false
+}
+
+Invoke-Assertion 'selected execution failure is normalized traced and never falls back' {
+    $script:task8ExecutionFailures = 0
+    $script:task8FailureTrace = $null
+    $executor = {
+        param($Candidate, $Prompt, $RunId)
+        $script:task8ExecutionFailures++
+        New-Task8ExecutionResult -Status 'none' -LatencyMilliseconds 345 -Failure 'transport failure'
+    }
+    $storage = {
+        param($Trace)
+        $script:task8FailureTrace = $Trace
+        [pscustomobject]@{ ok = $true; trace_id = $Trace.trace_id; candidate_evaluations_inserted = @($Trace.candidate_evaluations).Count }
+    }
+    $parameters = New-Task8RouterParameters -Executor $executor -StorageInvoker $storage
+    $result = Invoke-RouterRun @parameters
+    Assert-Equal $script:task8ExecutionFailures 1
+    Assert-Equal $result.response.status 'execution_failed'
+    Assert-Equal $result.response.reason_code 'launcher_execution_failed'
+    Assert-Equal $result.response.decision_trace_id 'task8-trace-0001'
+    Assert-Equal $script:task8FailureTrace.selected_candidate 'agy|shared-model__medium'
+    Assert-Equal $script:task8FailureTrace.latency_ms 345
+    Assert-Equal $script:task8FailureTrace.response_hash $null
+    Assert-ValidationSuccess (Test-RouterSchema -Value $result.response -SchemaPath $responseSchemaPath)
+}
+
+Invoke-Assertion 'thrown selected executor failure is structured traced redacted and never retried' {
+    $script:task8ThrownExecutions = 0
+    $script:task8ThrownStores = 0
+    $executor = {
+        param($Candidate, $Prompt, $RunId)
+        $script:task8ThrownExecutions++
+        throw 'raw-provider-secret-sk-proj-1234567890'
+    }
+    $storage = {
+        param($Trace)
+        $script:task8ThrownStores++
+        [pscustomobject]@{ ok = $true; trace_id = $Trace.trace_id; candidate_evaluations_inserted = @($Trace.candidate_evaluations).Count }
+    }
+    $parameters = New-Task8RouterParameters -Executor $executor -StorageInvoker $storage
+    $result = Invoke-RouterRun @parameters
+    Assert-Equal $script:task8ThrownExecutions 1
+    Assert-Equal $script:task8ThrownStores 1
+    Assert-Equal $result.response.status 'execution_failed'
+    Assert-Equal $result.response.reason_code 'launcher_execution_failed'
+    Assert-Equal $result.response.decision_trace_id 'task8-trace-0001'
+    Assert-Equal (($result | ConvertTo-Json -Depth 100 -Compress).Contains('raw-provider-secret')) $false
+    Assert-ValidationSuccess (Test-RouterSchema -Value $result.response -SchemaPath $responseSchemaPath)
+}
+
+Invoke-Assertion 'invalid unsupported and no-eligible requests execute zero providers with approved responses' {
+    $script:task8SkippedExecutions = 0
+    $script:task8SkippedStores = 0
+    $script:task8UnsupportedTrace = $null
+    $executor = { $script:task8SkippedExecutions++; throw 'must not execute' }
+    $storage = { $script:task8SkippedStores++; throw 'must not store invalid input' }
+
+    $invalidRequest = New-MinimalRequest
+    $invalidRequest.PSObject.Properties.Remove('task_type')
+    $parameters = New-Task8RouterParameters -Request $invalidRequest -Executor $executor -StorageInvoker $storage
+    $invalid = Invoke-RouterRun @parameters
+    Assert-Equal $invalid.response.status 'invalid_request'
+    Assert-Equal $invalid.response.reason_code 'request_validation_failed'
+    Assert-Equal $invalid.response.decision_trace_id $null
+
+    $unsupportedRequest = New-MinimalRequest
+    $unsupportedRequest.language = 'french'
+    $unsupportedStorage = {
+        param($Trace)
+        $script:task8SkippedStores++
+        $script:task8UnsupportedTrace = $Trace
+        [pscustomobject]@{ ok = $true; trace_id = $Trace.trace_id; candidate_evaluations_inserted = @($Trace.candidate_evaluations).Count }
+    }
+    $parameters = New-Task8RouterParameters -Request $unsupportedRequest -Executor $executor -StorageInvoker $unsupportedStorage
+    $unsupported = Invoke-RouterRun @parameters
+    Assert-Equal $unsupported.response.status 'unsupported_request'
+    Assert-Equal $unsupported.response.reason_code 'unsupported_language'
+    Assert-Equal $unsupported.response.decision_trace_id 'task8-trace-0001'
+    Assert-Equal $script:task8SkippedStores 1
+    Assert-Equal $script:task8UnsupportedTrace.output_status 'unsupported_request'
+    Assert-Equal $script:task8UnsupportedTrace.reason_code 'unsupported_language'
+
+    $profiles = @(Get-MinimalPolicyProfiles)
+    $runtimeStates = @(
+        foreach ($profile in $profiles) {
+            [pscustomobject]@{
+                launcher = $profile.launcher; model = $profile.model; effort = $profile.effort
+                available = $false; authenticated = $true; working = $true; quota_exhausted = $false
+            }
+        }
+    )
+    $noEligibleStorage = {
+        param($Trace)
+        $script:task8SkippedStores++
+        [pscustomobject]@{ ok = $true; trace_id = $Trace.trace_id; candidate_evaluations_inserted = @($Trace.candidate_evaluations).Count }
+    }
+    $parameters = New-Task8RouterParameters -RuntimeStates $runtimeStates -Executor $executor -StorageInvoker $noEligibleStorage
+    $noEligible = Invoke-RouterRun @parameters
+    Assert-Equal $noEligible.response.status 'no_eligible_configuration'
+    Assert-Equal $noEligible.response.reason_code 'all_routes_unavailable'
+    Assert-Equal $noEligible.response.decision_trace_id 'task8-trace-0001'
+    Assert-Equal $script:task8SkippedExecutions 0
+    Assert-Equal $script:task8SkippedStores 2
+}
+
+Invoke-Assertion 'malformed JSON and wrong root type do not execute or persist' {
+    $script:task8MalformedExecutions = 0
+    $script:task8MalformedStores = 0
+    $executor = { $script:task8MalformedExecutions++; throw 'must not execute' }
+    $storage = { $script:task8MalformedStores++; throw 'must not store' }
+    foreach ($json in @('{', '[]', '"text"')) {
+        $result = Invoke-RouterRun -RequestJson $json -Executor $executor -StorageInvoker $storage
+        Assert-Equal $result.response.status 'invalid_request'
+        Assert-Equal $result.response.reason_code 'request_validation_failed'
+        Assert-Equal $result.response.decision_trace_id $null
+        Assert-ValidationSuccess (Test-RouterSchema -Value $result.response -SchemaPath $responseSchemaPath)
+    }
+    Assert-Equal $script:task8MalformedExecutions 0
+    Assert-Equal $script:task8MalformedStores 0
+}
+
+Invoke-Assertion 'storage failure keeps the execution outcome nulls the public trace id and does not retry' {
+    $script:task8StorageFailureExecutions = 0
+    $script:task8StorageFailureStores = 0
+    $executor = { $script:task8StorageFailureExecutions++; New-Task8ExecutionResult }
+    $storage = {
+        param($Trace)
+        $script:task8StorageFailureStores++
+        [pscustomobject]@{
+            ok = $false
+            error = [pscustomobject]@{ code = 'storage_process_error'; detail = 'test_failure'; path = '$'; message = 'Storage failed safely.' }
+        }
+    }
+    $parameters = New-Task8RouterParameters -Executor $executor -StorageInvoker $storage
+    $result = Invoke-RouterRun @parameters
+    Assert-Equal $script:task8StorageFailureExecutions 1
+    Assert-Equal $script:task8StorageFailureStores 1
+    Assert-Equal $result.response.status 'completed'
+    Assert-Equal $result.response.decision_trace_id $null
+    Assert-Equal $result.storage_error.code 'storage_process_error'
+    Assert-ValidationSuccess (Test-RouterSchema -Value $result.response -SchemaPath $responseSchemaPath)
+}
+
+Invoke-Assertion 'normal traces hash exact UTF-8 content and never retain prompt response or raw execution text' {
+    $secretPrompt = 'prompt-secret-sk-proj-1234567890'
+    $normalizedAnswer = 'normalized-secret-free-answer'
+    $request = New-MinimalRequest
+    $request.request_text = $secretPrompt
+    $script:task8HashTrace = $null
+    $storage = {
+        param($Trace)
+        $script:task8HashTrace = $Trace
+        [pscustomobject]@{ ok = $true; trace_id = $Trace.trace_id; candidate_evaluations_inserted = @($Trace.candidate_evaluations).Count }
+    }
+    $executor = {
+        param($Candidate, $Prompt, $RunId)
+        New-Task8ExecutionResult -Answer $normalizedAnswer
+    }
+    $parameters = New-Task8RouterParameters -Request $request -Executor $executor -StorageInvoker $storage
+    $result = Invoke-RouterRun @parameters
+    $expectedPromptHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($secretPrompt))).ToLowerInvariant()
+    $expectedResponseHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($normalizedAnswer))).ToLowerInvariant()
+    Assert-Equal $script:task8HashTrace.prompt_hash $expectedPromptHash
+    Assert-Equal $script:task8HashTrace.response_hash $expectedResponseHash
+    Assert-Equal $script:task8HashTrace.prompt_content $null
+    Assert-Equal $script:task8HashTrace.response_content $null
+    $serialized = $result | ConvertTo-Json -Depth 100 -Compress
+    Assert-Equal $serialized.Contains($secretPrompt) $false
+    Assert-Equal $serialized.Contains('raw_stdout') $false
+    Assert-Equal $serialized.Contains('command') $false
+}
+
+Invoke-Assertion 'all approved public status and reason combinations remain schema conforming' {
+    $completed = New-MinimalCompletedResponse
+    $completed.decision_trace_id = $null
+    Assert-ValidationSuccess (Test-RouterSchema -Value $completed -SchemaPath $responseSchemaPath)
+    $statusReasons = [ordered]@{
+        invalid_request = @('request_validation_failed')
+        unsupported_request = @('unsupported_language', 'unsupported_modality', 'sensitive_request_unsupported', 'high_stakes_unsupported')
+        no_eligible_configuration = @('context_too_large', 'required_capability_unavailable', 'quality_floor_not_met', 'quality_evidence_unknown', 'all_routes_unavailable')
+        execution_failed = @('launcher_execution_failed')
+    }
+    foreach ($entry in $statusReasons.GetEnumerator()) {
+        foreach ($reason in $entry.Value) {
+            $response = [pscustomobject]@{ status = $entry.Key; reason_code = $reason; decision_trace_id = $null }
+            Assert-ValidationSuccess (Test-RouterSchema -Value $response -SchemaPath $responseSchemaPath)
+        }
+    }
+}
+
+Invoke-Assertion 'CLI accepts request-file and stdin JSON and emits exactly one response object offline' {
+    $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('router-cli-task8-' + [guid]::NewGuid().ToString('N'))
+    try {
+        $null = New-Item -ItemType Directory -Path $tempRoot
+        $request = New-MinimalRequest
+        $request.PSObject.Properties.Remove('task_type')
+        $requestJson = $request | ConvertTo-Json -Depth 20 -Compress
+        $requestPath = Join-Path $tempRoot 'request.json'
+        Set-Content -LiteralPath $requestPath -Value $requestJson -Encoding utf8NoBOM
+
+        $fileOutput = @(& pwsh -NoProfile -File $routerRunPath -RequestFile $requestPath)
+        Assert-Equal $LASTEXITCODE 0
+        Assert-Equal $fileOutput.Count 1
+        $fileResponse = $fileOutput[0] | ConvertFrom-Json -Depth 20
+        Assert-Equal $fileResponse.status 'invalid_request'
+        Assert-Equal $fileResponse.decision_trace_id $null
+
+        $stdinOutput = @($requestJson | & pwsh -NoProfile -File $routerRunPath)
+        Assert-Equal $LASTEXITCODE 0
+        Assert-Equal $stdinOutput.Count 1
+        $stdinResponse = $stdinOutput[0] | ConvertFrom-Json -Depth 20
+        Assert-Equal $stdinResponse.status 'invalid_request'
+        Assert-Equal $stdinResponse.decision_trace_id $null
+
+        $bothOutput = @($requestJson | & pwsh -NoProfile -File $routerRunPath -RequestFile $requestPath)
+        Assert-Equal $LASTEXITCODE 0
+        Assert-Equal $bothOutput.Count 1
+        $bothResponse = $bothOutput[0] | ConvertFrom-Json -Depth 20
+        Assert-Equal $bothResponse.status 'invalid_request'
+        Assert-Equal $bothResponse.reason_code 'request_validation_failed'
+    } finally {
+        if (Test-Path -LiteralPath $tempRoot) { [IO.Directory]::Delete($tempRoot, $true) }
     }
 }
 

@@ -132,13 +132,24 @@ PRICE_FIELDS = {
 }
 
 
-def validate_request_profile(value: Any) -> dict[str, Any]:
+def validate_request_profile(
+    value: Any, *, unsupported_reason: str | None = None
+) -> dict[str, Any]:
     profile = require_exact_fields(
         value,
         REQUEST_REQUIRED_FIELDS,
         REQUEST_OPTIONAL_FIELDS,
         "$.request_profile",
     )
+
+    def boundary_value(
+        field_name: str, supported_value: str, matching_reason: str
+    ) -> str:
+        path = f"$.request_profile.{field_name}"
+        if unsupported_reason == matching_reason:
+            return require_string(profile[field_name], path)
+        return require_enum(profile[field_name], {supported_value}, path)
+
     return {
         "task_type": require_enum(
             profile["task_type"],
@@ -184,20 +195,18 @@ def validate_request_profile(value: Any) -> dict[str, Any]:
             {"fast", "normal", "relaxed"},
             "$.request_profile.latency",
         ),
-        "privacy_level": require_enum(
-            profile["privacy_level"], {"standard"}, "$.request_profile.privacy_level"
+        "privacy_level": boundary_value(
+            "privacy_level", "standard", "sensitive_request_unsupported"
         ),
-        "risk_level": require_enum(
-            profile["risk_level"], {"standard"}, "$.request_profile.risk_level"
+        "risk_level": boundary_value(
+            "risk_level", "standard", "high_stakes_unsupported"
         ),
         "output_length": require_enum(
             profile.get("output_length", "normal"),
             {"short", "normal", "detailed"},
             "$.request_profile.output_length",
         ),
-        "language": require_enum(
-            profile["language"], {"english"}, "$.request_profile.language"
-        ),
+        "language": boundary_value("language", "english", "unsupported_language"),
         "additional_capabilities": require_string_list(
             profile.get("additional_capabilities", []),
             "$.request_profile.additional_capabilities",

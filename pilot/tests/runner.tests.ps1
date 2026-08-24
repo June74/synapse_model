@@ -1497,6 +1497,84 @@ Invoke-Assertion 'special routes require explicit opt-in' {
     Assert-True ($included.selected.route_id -contains $special.route_id)
 }
 
+Invoke-Assertion 'Invoke-PilotCandidate executes one exact candidate without writing pilot JSONL' {
+    $matrix = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'pilot/model_matrix.json') | ConvertFrom-Json
+    $candidate = @($matrix.candidates | Where-Object { $_.tool -eq 'codex' } | Select-Object -First 1)[0]
+    $prompt = 'Task 8 explicit prompt that must stay off returned process metadata'
+    $invocations = [Collections.Generic.List[object]]::new()
+    $nativeInvoker = {
+        param($command)
+        $invocations.Add($command)
+        $canonicalJson = [pscustomobject]@{ status = 'success'; answer = 'normalized answer'; error = $null } | ConvertTo-Json -Compress
+        $providerOutput = [pscustomobject]@{
+            type = 'item.completed'
+            item = [pscustomobject]@{ type = 'agent_message'; text = $canonicalJson }
+        } | ConvertTo-Json -Compress
+        [pscustomobject]@{
+            exit_code = 0
+            stdout = $providerOutput
+            stderr = 'provider diagnostic must not escape'
+            duration_ms = 321
+            usage = [pscustomobject]@{
+                actual_input_tokens = 100
+                visible_output_tokens = 20
+                reasoning_tokens = 5
+                complete = $true
+            }
+        }
+    }
+
+    $execution = Invoke-PilotCandidate -Candidate $candidate -Prompt $prompt `
+        -NativeInvoker $nativeInvoker -RunId 'task8-characterization' -TimeoutSeconds 17
+
+    Assert-Equal $invocations.Count 1
+    Assert-Equal $invocations[0].route_id $candidate.route_id
+    Assert-Equal $invocations[0].prompt $prompt
+    Assert-Equal $execution.run_id 'task8-characterization'
+    Assert-Equal $execution.diagnostic_note 'completed'
+    Assert-Equal $execution.failure $null
+    Assert-Equal $execution.canonical.status 'success'
+    Assert-Equal $execution.canonical.answer 'normalized answer'
+    Assert-Equal $execution.process.exit_code 0
+    Assert-Equal $execution.process.duration_ms 321
+    Assert-Equal $execution.usage.actual_input_tokens 100
+    Assert-True $execution.usage.complete
+    Assert-True $execution.record.transport_success
+    Assert-True $execution.record.contract_compliant
+    Assert-Equal $execution.record.status 'success'
+    Assert-Equal $execution.record.answer '[provider answer omitted from JSONL for privacy]'
+    $serialized = $execution | ConvertTo-Json -Depth 20 -Compress
+    Assert-True (-not $serialized.Contains($prompt))
+    Assert-True (-not $serialized.Contains('provider diagnostic must not escape'))
+    Assert-True (-not $serialized.Contains('item.completed'))
+}
+
+Invoke-Assertion 'Invoke-PilotCandidate preserves provider-declared and parse failure diagnostics' {
+    $matrix = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'pilot/model_matrix.json') | ConvertFrom-Json
+    $candidate = @($matrix.candidates | Where-Object { $_.tool -eq 'codex' } | Select-Object -First 1)[0]
+    $providerFailure = Invoke-PilotCandidate -Candidate $candidate -Prompt 'provider failure prompt' -NativeInvoker {
+        [pscustomobject]@{
+            exit_code = 0
+            stdout = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'pilot/tests/fixtures/codex-failure.jsonl')
+            stderr = ''
+            duration_ms = 7
+        }
+    }
+    Assert-Equal $providerFailure.diagnostic_note 'provider-declared failure'
+    Assert-Equal $providerFailure.canonical.status 'failure'
+    Assert-Equal $providerFailure.record.error 'provider-declared failure'
+
+    $parseFailure = Invoke-PilotCandidate -Candidate $candidate -Prompt 'parse failure prompt' -NativeInvoker {
+        [pscustomobject]@{ exit_code = 0; stdout = 'not provider JSON'; stderr = 'sensitive raw stderr'; duration_ms = 8 }
+    }
+    Assert-Equal $parseFailure.diagnostic_note 'parse failure'
+    Assert-True ($parseFailure.failure -is [string] -and -not [string]::IsNullOrWhiteSpace($parseFailure.failure))
+    Assert-Equal $parseFailure.record.error 'parse failure'
+    $serialized = $parseFailure | ConvertTo-Json -Depth 20 -Compress
+    Assert-True (-not $serialized.Contains('not provider JSON'))
+    Assert-True (-not $serialized.Contains('sensitive raw stderr'))
+}
+
 if ($failures.Count -gt 0) {
     $failures | ForEach-Object { Write-Error $_ -ErrorAction Continue }
     exit 1

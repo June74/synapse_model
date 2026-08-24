@@ -42,7 +42,12 @@
         "price": { "type": "number", "minimum": 0 },
         "price_final": { "type": "boolean" },
         "latency": { "type": "number", "minimum": 0 },
-        "decision_trace_id": { "type": "string", "minLength": 1 }
+        "decision_trace_id": {
+          "oneOf": [
+            { "type": "string", "minLength": 1 },
+            { "type": "null" }
+          ]
+        }
       },
       "additionalProperties": false
     },
@@ -63,6 +68,7 @@
         "reason_code": {
           "type": "string",
           "enum": [
+            "request_validation_failed",
             "unsupported_language",
             "unsupported_modality",
             "sensitive_request_unsupported",
@@ -75,7 +81,12 @@
             "launcher_execution_failed"
           ]
         },
-        "decision_trace_id": { "type": "string", "minLength": 1 }
+        "decision_trace_id": {
+          "oneOf": [
+            { "type": "string", "minLength": 1 },
+            { "type": "null" }
+          ]
+        }
       },
       "additionalProperties": false
     }

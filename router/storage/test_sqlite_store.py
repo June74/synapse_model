@@ -816,6 +816,27 @@ class SQLiteStoreTests(unittest.TestCase):
                 result, output = self.write(status_trace(status, f"valid-status-{status}"))
                 self.assertEqual(result.returncode, 0, output)
 
+    def test_unsupported_boundary_profile_values_are_status_reason_scoped(self) -> None:
+        cases = (
+            ("unsupported_language", "language", "french"),
+            ("sensitive_request_unsupported", "privacy_level", "sensitive"),
+            ("high_stakes_unsupported", "risk_level", "high_stakes"),
+        )
+        for index, (reason_code, field_name, value) in enumerate(cases, start=1):
+            with self.subTest(reason_code=reason_code):
+                trace = status_trace("unsupported_request", f"unsupported-profile-{index}")
+                trace["reason_code"] = reason_code
+                trace["request_profile"][field_name] = value
+                result, output = self.write(trace)
+                self.assertEqual(result.returncode, 0, output)
+
+                mismatched = status_trace(
+                    "unsupported_request", f"unsupported-profile-mismatch-{index}"
+                )
+                mismatched["reason_code"] = "unsupported_modality"
+                mismatched["request_profile"][field_name] = value
+                self.assert_invalid(mismatched)
+
     def test_preexecution_failures_reject_response_and_latency_metadata(self) -> None:
         cases = []
         response_hash = status_trace("invalid_request", "invalid-with-response-hash")

@@ -106,7 +106,20 @@ def validate_trace(value: dict[str, Any]) -> dict[str, Any]:
     trace_id = require_string(trace["trace_id"], "$.trace_id")
     if TRACE_ID.fullmatch(trace_id) is None:
         raise TraceInputError("Trace ID has an unsupported format.", path="$.trace_id")
-    request_profile = validate_request_profile(trace["request_profile"])
+    unsupported_reason = (
+        trace["reason_code"]
+        if trace["output_status"] == "unsupported_request"
+        and trace["reason_code"]
+        in {
+            "unsupported_language",
+            "sensitive_request_unsupported",
+            "high_stakes_unsupported",
+        }
+        else None
+    )
+    request_profile = validate_request_profile(
+        trace["request_profile"], unsupported_reason=unsupported_reason
+    )
     run_mode = require_enum(trace["run_mode"], RUN_MODES, "$.run_mode")
 
     prompt_content = trace.get("prompt_content")

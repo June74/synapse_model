@@ -307,6 +307,78 @@ function Get-RouterEstimatedPrice {
     }
 }
 
+function Get-RouterActualPrice {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory)][object]$Candidate,
+        [Parameter(Mandatory)][object]$Request,
+        [AllowNull()][object]$PricingSnapshot,
+        [AllowNull()][object]$Usage,
+        [AllowNull()][string]$AsOfDate
+    )
+
+    $candidateIdentity = '{0}|{1}' -f $Candidate.launcher, $Candidate.configuration_id
+    $requestProfileGroup = Get-RouterRequestProfileGroup -Request $Request
+    $unavailable = {
+        param([string]$ReasonCode)
+        New-RouterUnavailablePrice -CandidateIdentity $candidateIdentity `
+            -ReasonCode $ReasonCode -RequestProfileGroup $requestProfileGroup
+    }
+    if ($null -eq $Usage -or -not (Test-RouterCatalogExactProperties -Value $Usage `
+        -ExpectedNames @('actual_input_tokens', 'visible_output_tokens', 'reasoning_tokens', 'complete'))) {
+        return & $unavailable 'actual_usage_invalid'
+    }
+    if ($Usage.complete -isnot [bool] -or -not $Usage.complete) {
+        return & $unavailable 'actual_usage_incomplete'
+    }
+    foreach ($name in @('actual_input_tokens', 'visible_output_tokens', 'reasoning_tokens')) {
+        if (-not (Test-RouterPricingNonnegativeInteger -Value $Usage.$name)) {
+            return & $unavailable 'actual_usage_invalid'
+        }
+    }
+
+    $actualTokenDocument = [pscustomobject][ordered]@{
+        version = 'router-token-estimates/v1'
+        observations = @(
+            [pscustomobject][ordered]@{
+                launcher = [string]$Candidate.launcher
+                configuration_id = [string]$Candidate.configuration_id
+                model = [string]$Candidate.model
+                effort = [string]$Candidate.effort
+                request_profile_group = $requestProfileGroup
+                estimated_input_tokens = [decimal]$Usage.actual_input_tokens
+                estimated_visible_output_tokens = [decimal]$Usage.visible_output_tokens
+                estimated_reasoning_tokens = [decimal]$Usage.reasoning_tokens
+                observed_on = if ([string]::IsNullOrWhiteSpace($AsOfDate)) {
+                    [string]$PricingSnapshot.snapshot_date
+                } else {
+                    $AsOfDate
+                }
+            }
+        )
+    }
+    $calculated = Get-RouterEstimatedPrice -Candidate $Candidate -Request $Request `
+        -Requirements ([pscustomobject]@{}) -PricingSnapshot $PricingSnapshot `
+        -TokenEstimates $actualTokenDocument -AsOfDate $AsOfDate
+    if (-not $calculated.available) { return $calculated }
+
+    return [pscustomobject][ordered]@{
+        candidate_identity = $candidateIdentity
+        available = $true
+        reason_code = $null
+        request_profile_group = $requestProfileGroup
+        actual_input_tokens = [decimal]$Usage.actual_input_tokens
+        visible_output_tokens = [decimal]$Usage.visible_output_tokens
+        reasoning_tokens = [decimal]$Usage.reasoning_tokens
+        billable_output_tokens = [decimal]$Usage.visible_output_tokens + [decimal]$Usage.reasoning_tokens
+        input_usd_per_million_tokens = $calculated.input_usd_per_million_tokens
+        output_usd_per_million_tokens = $calculated.output_usd_per_million_tokens
+        price = $calculated.price
+        price_final = $true
+    }
+}
+
 function ConvertTo-RouterResponsePrice {
     [CmdletBinding()]
     [OutputType([decimal])]
