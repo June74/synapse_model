@@ -2,7 +2,7 @@
 
 - **Status:** closed
 - **First observed:** 2026-08-19
-- **Last observed:** 2026-08-23
+- **Last observed:** 2026-08-24
 - **Phase/task:** Task 5 verification
 - **Environment:** PowerShell 7, project-local subscription-runner worktree
 - **Symptom:** The parser-check command failed before parsing files because a double-quoted diagnostic string used `$path:` without delimiting the variable.
@@ -63,3 +63,13 @@
 - **Correction:** Assign the loop output to `$results`, then pipe `$results` to `ConvertTo-Json`.
 - **Prevention:** Collect statement output before piping it in bounded PowerShell verification snippets.
 - **Related verification:** The corrected reproduction ran and exposed all three unsupported-dimension pass defects, after which the full corrected router suite passed 177 assertions with exit 0.
+
+## Recurrence: 2026-08-24, Task 8 unsupported-trace GREEN verification
+
+- **Phase/task:** Task 8 final contract correction
+- **Symptom:** A result-counting wrapper failed at parse time because a pipeline expression was embedded directly in a hashtable property without a complete grouped expression.
+- **Impact:** The router suite did not start in that invocation; no project state changed and no provider or external service ran.
+- **Confirmed cause:** The ad hoc wrapper combined output filtering and object construction with mismatched statement delimiters.
+- **Correction:** Compute each count in a separate statement, then emit the compact summary after the suite exits.
+- **Prevention:** Keep verification wrappers linear and preserve the child suite exit code independently of summary formatting.
+- **Related verification:** The corrected plain suite command is required before the Task 8 product commit.

@@ -14,6 +14,11 @@
 | [SB-20260824-052419-nullable-trace-id-diagnostic](incidents/2026-08-24T052419Z-nullable-trace-id-diagnostic.md) | Nullable trace ID test expected a leaf diagnostic | closed | 2026-08-24 | 2026-08-24 |
 | [SB-20260824-052700-patch-tool-call-omitted](incidents/2026-08-24T052700Z-patch-tool-call-omitted.md) | Pricing patch text was not sent to the edit tool | closed | 2026-08-24 | 2026-08-24 |
 | [SB-20260824-052823-router-test-assert-helper](incidents/2026-08-24T052823Z-router-test-assert-helper.md) | Task 8 pricing test used an unavailable assertion helper | closed | 2026-08-24 | 2026-08-24 |
+| [SB-20260824-154022-router-dot-source-schema-default](incidents/2026-08-24T154022Z-router-dot-source-schema-default.md) | Normalized request collapsed an empty capability array | closed | 2026-08-24 | 2026-08-24 |
+| [SB-20260824-154446-router-estimate-expectation](incidents/2026-08-24T154446Z-router-estimate-expectation.md) | Task 8 estimate assertion used historical input tokens | closed | 2026-08-24 | 2026-08-24 |
+| [SB-20260824-155022-task8-trace-token-type](incidents/2026-08-24T155022Z-task8-trace-token-type.md) | Finalized Task 8 trace used an incompatible token JSON type | closed | 2026-08-24 | 2026-08-24 |
+| [SB-20260824-160012-task8-sqlite-inspection-column](incidents/2026-08-24T160012Z-task8-sqlite-inspection-column.md) | Acceptance query assumed token columns instead of price JSON | closed | 2026-08-24 | 2026-08-24 |
+| [SB-20260824-160247-task8-unsupported-trace-short-circuit](incidents/2026-08-24T160247Z-task8-unsupported-trace-short-circuit.md) | Unsupported boundary request bypassed trace persistence | closed | 2026-08-24 | 2026-08-24 |
 | SB-2026-08-19-001 | PowerShell DOCX paragraph extraction syntax error | closed | 2026-08-19 | 2026-08-19 |
 | SB-2026-08-19-002 | Current DOCX locked during full-document scan | closed | 2026-08-19 | 2026-08-19 |
 | SB-2026-08-19-003 | Skill path lookup mismatch | closed | 2026-08-19 | 2026-08-23 |
@@ -23,7 +28,7 @@
 | SB-2026-08-19-007 | Plan review command used an invalid PowerShell parameter | contained | 2026-08-19 | 2026-08-19 |
 | SB-2026-08-19-008 | Pre-creation worktree ignore check rejected absent directory | contained | 2026-08-19 | 2026-08-24 |
 | SB-2026-08-19-009 | Existing descendant-drain test was transiently timing-sensitive | closed | 2026-08-19 | 2026-08-19 |
-| SB-2026-08-19-010 | Parser verification command used invalid PowerShell interpolation | closed | 2026-08-19 | 2026-08-23 |
+| SB-2026-08-19-010 | Parser verification command used invalid PowerShell interpolation | closed | 2026-08-19 | 2026-08-24 |
 | SB-20260822-190417-main-feature-branch-divergence | Fast-forward merge unavailable after main advanced | closed | 2026-08-22 | 2026-08-22 |
 | SB-20260822-190757-merged-main-legacy-result-deletion | Merged main lost required legacy pilot result fixture | closed | 2026-08-22 | 2026-08-22 |
 | SB-20260823-015506-test-json-numeric-precision | Test-Json loses numeric precision at contract boundaries | closed | 2026-08-23 | 2026-08-23 |
