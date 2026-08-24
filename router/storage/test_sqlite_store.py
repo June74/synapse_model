@@ -1,4 +1,5 @@
 import gc
+import hashlib
 import json
 import sqlite3
 import subprocess
@@ -9,10 +10,15 @@ from pathlib import Path
 from unittest import mock
 
 from router.storage import sqlite_store
-from router.storage.sqlite_store import SCHEMA_STATEMENTS, validate_trace, write_trace
+from router.storage.sqlite_store import validate_trace, write_trace
 
 
 STORE_PATH = Path(__file__).with_name("sqlite_store.py")
+PINNED_SCHEMA_PATH = Path(__file__).with_name("testdata") / "sqlite_v1_schema.sql"
+
+
+def sha256_utf8(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
 def candidate(
@@ -128,8 +134,8 @@ def complete_trace(trace_id: str = "trace-0001", run_mode: str = "normal") -> di
         "pricing_snapshot_date": "2026-08-22",
         "quality_snapshot_date": "2026-08-22",
         "calibration_set_version": "calibration-set-v1",
-        "prompt_hash": "A" * 64,
-        "response_hash": "B" * 64,
+        "prompt_hash": sha256_utf8(prompt_content) if prompt_content is not None else "A" * 64,
+        "response_hash": sha256_utf8(response_content) if response_content is not None else "B" * 64,
         "prompt_content": prompt_content,
         "response_content": response_content,
         "candidate_evaluations": [
@@ -195,7 +201,7 @@ class SQLiteStoreTests(unittest.TestCase):
     def run_raw(self, raw_input: str) -> tuple[subprocess.CompletedProcess[str], dict]:
         self.assertTrue(STORE_PATH.is_file(), f"SQLite writer is missing: {STORE_PATH}")
         result = subprocess.run(
-            [sys.executable, str(STORE_PATH), "--database", str(self.database_path)],
+            [sys.executable, "-B", str(STORE_PATH), "--database", str(self.database_path)],
             input=raw_input,
             text=True,
             capture_output=True,
@@ -221,8 +227,7 @@ class SQLiteStoreTests(unittest.TestCase):
     def create_exact_v1_schema(self) -> None:
         connection = sqlite3.connect(self.database_path)
         try:
-            for statement in SCHEMA_STATEMENTS:
-                connection.execute(statement)
+            connection.executescript(PINNED_SCHEMA_PATH.read_text(encoding="utf-8"))
             connection.execute("PRAGMA user_version = 1")
             connection.commit()
         finally:
@@ -267,6 +272,20 @@ class SQLiteStoreTests(unittest.TestCase):
         foreign_keys = self.rows("PRAGMA foreign_key_list(candidate_evaluations)")
         self.assertEqual(len(foreign_keys), 1)
         self.assertEqual(foreign_keys[0][2:5], ("routing_decisions", "trace_id", "trace_id"))
+
+    def test_integral_json_numbers_are_normalized_but_fractional_tokens_are_rejected(self) -> None:
+        trace = complete_trace("integral-json-number")
+        trace["candidate_evaluations"][0]["price"]["estimated_input_tokens"] = 1536.0
+        result, output = self.write(trace)
+        self.assertEqual(result.returncode, 0, output)
+
+        fractional = complete_trace("fractional-json-number")
+        fractional["candidate_evaluations"][0]["price"]["estimated_input_tokens"] = 1536.5
+        output = self.assert_invalid(fractional)
+        self.assertEqual(
+            output["error"]["path"],
+            "$.candidate_evaluations[0].price.estimated_input_tokens",
+        )
 
     def test_partial_version_zero_database_is_rejected_without_mutation(self) -> None:
         connection = sqlite3.connect(self.database_path)
@@ -504,7 +523,7 @@ class SQLiteStoreTests(unittest.TestCase):
 
     def test_invalid_writer_arguments_return_only_structured_diagnostics(self) -> None:
         result = subprocess.run(
-            [sys.executable, str(STORE_PATH), "--unsupported-argument"],
+            [sys.executable, "-B", str(STORE_PATH), "--unsupported-argument"],
             input=json.dumps(complete_trace()),
             text=True,
             capture_output=True,
@@ -589,18 +608,17 @@ class SQLiteStoreTests(unittest.TestCase):
             with self.subTest(index=index):
                 self.assert_invalid(failure_trace(evaluation, f"requirements-consistency-{index}"))
 
-    def test_nonselected_eligible_quality_is_the_first_lowest_relevant_category(self) -> None:
-        cases = []
-        higher_effective = complete_trace("eligible-quality-higher")
-        higher_effective["candidate_evaluations"][3]["quality"]["effective_quality"] = "frontier"
-        cases.append(higher_effective)
-
-        wrong_bottleneck = complete_trace("eligible-quality-bottleneck")
-        wrong_bottleneck["candidate_evaluations"][3]["quality"]["quality_bottleneck"] = (
+    def test_storage_does_not_recalculate_quality_ranking(self) -> None:
+        trace = complete_trace("producer-owned-quality")
+        trace["candidate_evaluations"][3]["quality"]["effective_quality"] = "frontier"
+        trace["candidate_evaluations"][3]["quality"]["quality_bottleneck"] = (
             "domain.computer_science"
         )
-        cases.append(wrong_bottleneck)
+        result, output = self.write(trace)
+        self.assertEqual(result.returncode, 0, output)
 
+    def test_passed_quality_rejects_unknown_or_null_result_shape(self) -> None:
+        cases = []
         unknown_category = complete_trace("eligible-quality-unknown")
         unknown_category["candidate_evaluations"][3]["quality"]["relevant_categories"][0][
             "category"
@@ -649,7 +667,13 @@ class SQLiteStoreTests(unittest.TestCase):
                 )
                 self.assertEqual(result.returncode, 0, output)
 
-    def test_nonselected_eligible_price_is_positive_and_estimate_consistent(self) -> None:
+    def test_storage_does_not_recalculate_router_price(self) -> None:
+        trace = complete_trace("producer-owned-price")
+        trace["candidate_evaluations"][3]["price"]["price"] = "0.0097"
+        result, output = self.write(trace)
+        self.assertEqual(result.returncode, 0, output)
+
+    def test_nonselected_eligible_price_is_positive_and_structurally_coherent(self) -> None:
         cases = []
         zero_price = complete_trace("eligible-zero-price")
         zero_price["candidate_evaluations"][3]["price"]["price"] = "0"
@@ -660,10 +684,6 @@ class SQLiteStoreTests(unittest.TestCase):
             "estimated_billable_output_tokens"
         ] = 769
         cases.append(wrong_billable)
-
-        wrong_estimate = complete_trace("eligible-wrong-estimate")
-        wrong_estimate["candidate_evaluations"][3]["price"]["price"] = "0.0097"
-        cases.append(wrong_estimate)
 
         for trace in cases:
             with self.subTest(trace_id=trace["trace_id"]):
@@ -869,12 +889,132 @@ class SQLiteStoreTests(unittest.TestCase):
         output = self.assert_invalid(trace)
         self.assertEqual(output["error"]["path"], "$.prompt_hash")
 
+    def test_full_content_hashes_exact_utf8_bytes_without_bom(self) -> None:
+        trace = complete_trace("utf8-content-hash", "benchmark")
+        trace["prompt_content"] = "Exact UTF-8 bytes: café 🧪"
+        trace["response_content"] = "No BOM is part of this response."
+        trace["prompt_hash"] = sha256_utf8(trace["prompt_content"])
+        trace["response_hash"] = sha256_utf8(trace["response_content"])
+
+        result, output = self.write(trace)
+
+        self.assertEqual(result.returncode, 0, output)
+        self.assertEqual(self.rows(
+            "SELECT prompt_hash, response_hash FROM routing_decisions"
+        ), [(trace["prompt_hash"], trace["response_hash"])])
+
+    def test_full_content_hash_mismatch_is_rejected_without_replacement(self) -> None:
+        for index, field_name in enumerate(("prompt_hash", "response_hash"), start=1):
+            with self.subTest(field_name=field_name):
+                trace = complete_trace(f"content-hash-mismatch-{index}", "benchmark")
+                trace[field_name] = "0" * 64
+                output = self.assert_invalid(trace)
+                self.assertEqual(output["error"]["path"], f"$.{field_name}")
+
+    def test_ordinary_security_discussion_and_short_placeholders_are_allowed(self) -> None:
+        trace = complete_trace("ordinary-security-prose", "benchmark")
+        trace["prompt_content"] = (
+            "Explain why api_key, password, bearer, and token fields require care. "
+            "The pedagogical placeholder Authorization: Bearer TOKEN is intentionally short."
+        )
+        trace["response_content"] = "Discuss password rotation without including a credential."
+        trace["prompt_hash"] = sha256_utf8(trace["prompt_content"])
+        trace["response_hash"] = sha256_utf8(trace["response_content"])
+
+        result, output = self.write(trace)
+
+        self.assertEqual(result.returncode, 0, output)
+
+    def test_high_confidence_credentials_in_stored_content_are_rejected(self) -> None:
+        synthetic_patterns = (
+            "Authorization: Bearer " + "aB3_" * 12,
+            "Authorization: Basic " + "QWxhZGRpbjpvcGVuIHNlc2FtZQ==" * 2,
+            "-----BEGIN PRIVATE KEY-----\n" + "A" * 96 + "\n-----END PRIVATE KEY-----",
+            "sk-" + "Ab3_" * 12,
+            "AWS_ACCESS_KEY_ID=AKIA" + "A1B2C3D4E5F6G7H8",
+            "AWS_SECRET_ACCESS_KEY=" + "aB3/" * 10,
+            ("a" * 16) + "." + ("b" * 24) + "." + ("c" * 32),
+        )
+        for index, content in enumerate(synthetic_patterns, start=1):
+            with self.subTest(index=index):
+                trace = complete_trace(f"credential-content-{index}", "benchmark")
+                trace["prompt_content"] = content
+                trace["prompt_hash"] = sha256_utf8(content)
+                output = self.assert_invalid(trace, code="forbidden_content")
+                self.assertEqual(output["error"]["path"], "$.prompt_content")
+
     def test_forbidden_secret_or_environment_field_name_is_rejected_anywhere(self) -> None:
         trace = complete_trace()
         trace["candidate_evaluations"][0]["requirements"]["api_key"] = "not-stored"
         output = self.assert_invalid(trace, code="forbidden_field")
         self.assertEqual(output["error"]["path"], "$.candidate_evaluations[0].requirements.api_key")
         self.assertFalse(self.database_path.exists())
+
+    def test_writer_is_decomposed_into_focused_importable_modules(self) -> None:
+        module_names = (
+            "contract_support.py",
+            "candidate_contract.py",
+            "trace_contract.py",
+            "sqlite_schema.py",
+            "sqlite_store.py",
+        )
+        storage_root = STORE_PATH.parent
+        for module_name in module_names:
+            with self.subTest(module_name=module_name):
+                module_path = storage_root / module_name
+                self.assertTrue(module_path.is_file(), module_path)
+                self.assertLessEqual(
+                    len(module_path.read_text(encoding="utf-8").splitlines()),
+                    700,
+                    module_name,
+                )
+
+    def test_two_processes_store_distinct_traces_under_contention(self) -> None:
+        processes = []
+        for trace_id in ("contention-one", "contention-two"):
+            processes.append(subprocess.Popen(
+                [sys.executable, "-B", str(STORE_PATH), "--database", str(self.database_path)],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            ))
+        outputs = []
+        for process, trace_id in zip(processes, ("contention-one", "contention-two")):
+            stdout, stderr = process.communicate(
+                json.dumps(complete_trace(trace_id), separators=(",", ":")),
+                timeout=15,
+            )
+            self.assertEqual(stderr, "")
+            self.assertEqual(process.returncode, 0, stdout)
+            outputs.append(json.loads(stdout))
+        self.assertTrue(all(output["ok"] for output in outputs))
+        self.assertEqual(self.rows(
+            "SELECT trace_id FROM routing_decisions ORDER BY trace_id"
+        ), [("contention-one",), ("contention-two",)])
+
+    def test_held_database_lock_times_out_structurally_and_cleans_up(self) -> None:
+        lock_connection = sqlite3.connect(self.database_path)
+        try:
+            lock_connection.execute("CREATE TABLE lock_holder (id INTEGER)")
+            lock_connection.commit()
+            lock_connection.execute("BEGIN EXCLUSIVE")
+            process = subprocess.run(
+                [sys.executable, "-B", str(STORE_PATH), "--database", str(self.database_path)],
+                input=json.dumps(complete_trace("held-lock"), separators=(",", ":")),
+                text=True,
+                capture_output=True,
+                timeout=12,
+                check=False,
+            )
+        finally:
+            lock_connection.rollback()
+            lock_connection.close()
+        self.assertEqual(process.returncode, 1)
+        self.assertEqual(process.stderr, "")
+        output = json.loads(process.stdout)
+        self.assertEqual(output["ok"], False)
+        self.assertEqual(output["error"]["code"], "storage_error")
 
     def test_idempotent_schema_setup_allows_additional_immutable_traces(self) -> None:
         self.write(complete_trace("trace-one"))

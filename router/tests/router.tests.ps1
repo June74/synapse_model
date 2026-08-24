@@ -84,6 +84,8 @@ if (-not $traceAvailable) {
     exit 1
 }
 . $traceModulePath
+$task7PythonOverride = [Environment]::GetEnvironmentVariable('ROUTER_PYTHON_EXECUTABLE')
+$task7Python = Resolve-RouterPythonExecutable -PythonExecutable $task7PythonOverride
 $task4Assertions = {
 Invoke-Assertion 'Task 4 requirements module is available' {
     Assert-Equal $requirementsAvailable $true
@@ -4642,13 +4644,30 @@ function New-Task7TraceFixture {
     }
 }
 
+function Write-Task7SyntheticPythonHelper {
+    param(
+        [Parameter(Mandatory)][string]$Root,
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][string]$Source
+    )
+
+    $path = Join-Path $Root $Name
+    [IO.File]::WriteAllText($path, $Source, [Text.UTF8Encoding]::new($false))
+    return $path
+}
+
+Invoke-Assertion 'Task 7 Python executable resolves once without a user-specific path' {
+    Assert-Equal ([string]::IsNullOrWhiteSpace($task7Python)) $false
+    $source = Get-Content -LiteralPath $traceModulePath -Raw
+    Assert-Equal ($source -match '(?i)C:\\Users\\') $false
+}
+
 Invoke-Assertion 'Task 7 trace bridge stores one complete trace through standard input' {
-    $python = 'C:\Users\2006i\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe'
     $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('router-trace-' + [guid]::NewGuid().ToString('N'))
     $databasePath = Join-Path $tempRoot 'router.sqlite'
     try {
         $result = Write-RouterTrace -Trace (New-Task7TraceFixture) -DatabasePath $databasePath `
-            -PythonExecutable $python
+            -PythonExecutable $task7Python
 
         Assert-Equal $result.ok $true
         Assert-Equal $result.trace_id 'powershell-trace-0001'
@@ -4662,14 +4681,13 @@ Invoke-Assertion 'Task 7 trace bridge stores one complete trace through standard
 }
 
 Invoke-Assertion 'Task 7 trace bridge surfaces writer validation as a structured object' {
-    $python = 'C:\Users\2006i\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe'
     $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('router-trace-' + [guid]::NewGuid().ToString('N'))
     $databasePath = Join-Path $tempRoot 'router.sqlite'
     try {
         $trace = New-Task7TraceFixture -TraceId 'invalid-normal-content'
         $trace.prompt_content = 'normal mode must reject this content'
         $result = Write-RouterTrace -Trace $trace -DatabasePath $databasePath `
-            -PythonExecutable $python
+            -PythonExecutable $task7Python
 
         Assert-Equal $result.ok $false
         Assert-Equal $result.error.code 'invalid_trace'
@@ -4699,6 +4717,230 @@ Invoke-Assertion 'Task 7 trace bridge keeps trace JSON off the native command li
     Assert-Equal ($source -match 'StandardInput\.Write') $true
     Assert-Equal ($source -match 'ArgumentList\.Add\(\$traceJson') $false
     Assert-Equal ($source -match '(?i)\s-command\s') $false
+}
+
+Invoke-Assertion 'Task 7 trace bridge times out and kills the complete helper process tree' {
+    $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('router-trace-timeout-' + [guid]::NewGuid().ToString('N'))
+    $databasePath = Join-Path $tempRoot 'router.sqlite'
+    $pidPath = $databasePath + '.pids'
+    $null = New-Item -ItemType Directory -Path $tempRoot
+    try {
+        $helper = Write-Task7SyntheticPythonHelper -Root $tempRoot -Name 'hang.py' -Source @'
+import os
+import subprocess
+import sys
+import time
+
+database = sys.argv[sys.argv.index("--database") + 1]
+child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+with open(database + ".pids", "w", encoding="ascii") as stream:
+    stream.write(f"{os.getpid()}\n{child.pid}\n")
+sys.stdin.buffer.read()
+time.sleep(60)
+'@
+        $result = Write-RouterTrace -Trace (New-Task7TraceFixture) -DatabasePath $databasePath `
+            -PythonExecutable $task7Python -StorageHelperPath $helper -TimeoutMilliseconds 500
+
+        Assert-SequenceEqual @($result.PSObject.Properties.Name) @('ok', 'error')
+        Assert-Equal $result.ok $false
+        Assert-SequenceEqual @($result.error.PSObject.Properties.Name) @('code', 'detail', 'path', 'message')
+        Assert-Equal $result.error.code 'storage_timeout'
+        Assert-Equal $result.error.detail 'python_process_timeout'
+        Start-Sleep -Milliseconds 250
+        foreach ($processId in @(Get-Content -LiteralPath $pidPath)) {
+            Assert-Equal ($null -eq (Get-Process -Id ([int]$processId) -ErrorAction SilentlyContinue)) $true
+        }
+    } finally {
+        if (Test-Path -LiteralPath $tempRoot) {
+            [IO.Directory]::Delete($tempRoot, $true)
+        }
+    }
+}
+
+Invoke-Assertion 'Task 7 trace bridge concurrently drains stderr beyond the pipe buffer' {
+    $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('router-trace-stderr-' + [guid]::NewGuid().ToString('N'))
+    $databasePath = Join-Path $tempRoot 'router.sqlite'
+    $null = New-Item -ItemType Directory -Path $tempRoot
+    try {
+        $helper = Write-Task7SyntheticPythonHelper -Root $tempRoot -Name 'fill_stderr.py' -Source @'
+import json
+import sys
+
+sys.stderr.write("x" * 2000000)
+sys.stderr.flush()
+sys.stdin.buffer.read()
+print(json.dumps({"ok": True, "trace_id": "synthetic", "candidate_evaluations_inserted": 1}, separators=(",", ":")))
+'@
+        $largeTrace = [pscustomobject]@{ payload = ('y' * 2000000) }
+        $result = Write-RouterTrace -Trace $largeTrace -DatabasePath $databasePath `
+            -PythonExecutable $task7Python -StorageHelperPath $helper -TimeoutMilliseconds 5000
+
+        Assert-Equal $result.ok $false
+        Assert-Equal $result.error.code 'storage_protocol_error'
+        Assert-Equal $result.error.detail 'writer_diagnostic_channel_used'
+    } finally {
+        if (Test-Path -LiteralPath $tempRoot) {
+            [IO.Directory]::Delete($tempRoot, $true)
+        }
+    }
+}
+
+Invoke-Assertion 'Task 7 trace bridge handles helper exit before a large stdin write completes' {
+    $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('router-trace-early-exit-' + [guid]::NewGuid().ToString('N'))
+    $databasePath = Join-Path $tempRoot 'router.sqlite'
+    $null = New-Item -ItemType Directory -Path $tempRoot
+    try {
+        $helper = Write-Task7SyntheticPythonHelper -Root $tempRoot -Name 'exit_early.py' -Source @'
+import os
+os._exit(7)
+'@
+        $largeTrace = [pscustomobject]@{ payload = ('z' * 8000000) }
+        $result = Write-RouterTrace -Trace $largeTrace -DatabasePath $databasePath `
+            -PythonExecutable $task7Python -StorageHelperPath $helper -TimeoutMilliseconds 5000
+
+        Assert-Equal $result.ok $false
+        Assert-Equal $result.error.code 'storage_process_error'
+        Assert-Equal $result.error.detail 'stdin_write_failed'
+    } finally {
+        if (Test-Path -LiteralPath $tempRoot) {
+            [IO.Directory]::Delete($tempRoot, $true)
+        }
+    }
+}
+
+Invoke-Assertion 'Task 7 trace bridge handles valid large bidirectional streams without deadlock' {
+    $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('router-trace-large-' + [guid]::NewGuid().ToString('N'))
+    $databasePath = Join-Path $tempRoot 'router.sqlite'
+    $null = New-Item -ItemType Directory -Path $tempRoot
+    try {
+        $helper = Write-Task7SyntheticPythonHelper -Root $tempRoot -Name 'large_stream.py' -Source @'
+import json
+import sys
+
+sys.stdout.write(" " * 2000000)
+sys.stdout.flush()
+sys.stdin.buffer.read()
+print(json.dumps({"ok": True, "trace_id": "large-stream", "candidate_evaluations_inserted": 0}, separators=(",", ":")))
+'@
+        $largeTrace = [pscustomobject]@{ payload = ('w' * 2000000) }
+        $result = Write-RouterTrace -Trace $largeTrace -DatabasePath $databasePath `
+            -PythonExecutable $task7Python -StorageHelperPath $helper -TimeoutMilliseconds 5000
+
+        Assert-SequenceEqual @($result.PSObject.Properties.Name) @(
+            'ok', 'trace_id', 'candidate_evaluations_inserted'
+        )
+        Assert-Equal $result.ok $true
+        Assert-Equal $result.trace_id 'large-stream'
+        Assert-Equal $result.candidate_evaluations_inserted 0
+    } finally {
+        if (Test-Path -LiteralPath $tempRoot) {
+            [IO.Directory]::Delete($tempRoot, $true)
+        }
+    }
+}
+
+Invoke-Assertion 'Task 7 trace bridge rejects extra success and malformed error protocol fields' {
+    $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('router-trace-protocol-' + [guid]::NewGuid().ToString('N'))
+    $databasePath = Join-Path $tempRoot 'router.sqlite'
+    $null = New-Item -ItemType Directory -Path $tempRoot
+    try {
+        $successHelper = Write-Task7SyntheticPythonHelper -Root $tempRoot -Name 'extra_success.py' -Source @'
+import sys
+sys.stdin.buffer.read()
+print('{"ok":true,"trace_id":"synthetic","candidate_evaluations_inserted":0,"extra":1}')
+'@
+        $successResult = Write-RouterTrace -Trace ([pscustomobject]@{ value = 1 }) `
+            -DatabasePath $databasePath -PythonExecutable $task7Python `
+            -StorageHelperPath $successHelper -TimeoutMilliseconds 5000
+        Assert-Equal $successResult.ok $false
+        Assert-Equal $successResult.error.detail 'writer_result_shape_invalid'
+
+        $errorHelper = Write-Task7SyntheticPythonHelper -Root $tempRoot -Name 'malformed_error.py' -Source @'
+import sys
+sys.stdin.buffer.read()
+print('{"ok":false,"error":{"code":"invalid_trace","detail":"synthetic","path":"$"}}')
+sys.exit(1)
+'@
+        $errorResult = Write-RouterTrace -Trace ([pscustomobject]@{ value = 1 }) `
+            -DatabasePath $databasePath -PythonExecutable $task7Python `
+            -StorageHelperPath $errorHelper -TimeoutMilliseconds 5000
+        Assert-Equal $errorResult.ok $false
+        Assert-Equal $errorResult.error.code 'storage_protocol_error'
+        Assert-Equal $errorResult.error.detail 'writer_result_shape_invalid'
+    } finally {
+        if (Test-Path -LiteralPath $tempRoot) {
+            [IO.Directory]::Delete($tempRoot, $true)
+        }
+    }
+}
+
+Invoke-Assertion 'Task 7 stores one trace produced by the live deterministic policy' {
+    $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('router-trace-policy-' + [guid]::NewGuid().ToString('N'))
+    $databasePath = Join-Path $tempRoot 'router.sqlite'
+    try {
+        $request = New-MinimalRequest
+        $profiles = @(Get-MinimalPolicyProfiles)
+        $decision = Invoke-TestRouterPolicy -Profiles $profiles -Request $request `
+            -PricingSnapshot (New-TestPolicyPricingSnapshot) `
+            -TokenEstimates (Get-TestPolicyTokenEstimates -Profiles $profiles)
+        $selectedIdentity = Get-CompositeIdentity -Candidate $decision.selected_candidate
+        $winner = @(
+            $decision.candidate_evaluations |
+                Where-Object { $_.candidate_identity -ceq $selectedIdentity }
+        )[0]
+        $trace = [pscustomobject][ordered]@{
+            trace_id = 'policy-produced-trace'
+            created_at = '2026-08-24T04:50:00Z'
+            run_mode = 'normal'
+            request_profile = [pscustomobject][ordered]@{
+                task_type = $request.task_type
+                domain = $request.domain
+                complexity = $request.complexity
+                quality_floor = $request.quality_floor
+                latency = $request.latency
+                privacy_level = $request.privacy_level
+                risk_level = $request.risk_level
+                output_length = $request.output_length
+                language = $request.language
+                additional_capabilities = @($request.additional_capabilities)
+            }
+            selected_candidate = $selectedIdentity
+            output_status = 'completed'
+            reason_code = $null
+            effective_quality = $winner.quality.effective_quality
+            quality_bottleneck = $winner.quality.quality_bottleneck
+            price = [string]$decision.price
+            price_final = $decision.price_final
+            latency_ms = [string]$winner.latency_milliseconds
+            router_policy_version = 'policy-v1'
+            profile_schema_version = 'router-model-profile/v1'
+            model_profile_version = 'deterministic-test-profiles/v1'
+            pricing_snapshot_date = '2026-08-22'
+            quality_snapshot_date = '2026-08-22'
+            calibration_set_version = 'not-run'
+            prompt_hash = ('A' * 64)
+            response_hash = ('B' * 64)
+            prompt_content = $null
+            response_content = $null
+            candidate_evaluations = @($decision.candidate_evaluations)
+        }
+
+        $result = Write-RouterTrace -Trace $trace -DatabasePath $databasePath `
+            -PythonExecutable $task7Python -TimeoutMilliseconds 10000
+
+        if (-not $result.ok) {
+            throw 'Policy-produced trace rejected: {0}/{1} at {2}' -f `
+                $result.error.code, $result.error.detail, $result.error.path
+        }
+        Assert-Equal $result.ok $true
+        Assert-Equal $result.trace_id 'policy-produced-trace'
+        Assert-Equal $result.candidate_evaluations_inserted @($profiles).Count
+        Assert-Equal (Test-Path -LiteralPath $databasePath -PathType Leaf) $true
+    } finally {
+        if (Test-Path -LiteralPath $tempRoot) {
+            [IO.Directory]::Delete($tempRoot, $true)
+        }
+    }
 }
 
 if ($failures.Count -gt 0) {
