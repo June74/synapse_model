@@ -211,60 +211,47 @@ function Test-RouterCatalogQualitySlicePath {
     return $allowedPaths -ccontains $QualityPath
 }
 
-function Import-RouterProfileCatalog {
+function Test-RouterPricingSnapshotObject {
     [CmdletBinding()]
     [OutputType([pscustomobject])]
     param(
-        [Parameter(Mandatory)][string]$ProfilesRoot,
-        [Parameter(Mandatory)][string]$MatrixPath,
-        [Parameter(Mandatory)][string]$ProfileSchemaPath,
-        [Parameter(Mandatory)][string]$PricingSnapshotPath,
-        [Parameter(Mandatory)][string]$QualitySnapshotPath
+        [AllowNull()][object]$PricingSnapshot,
+        [AllowNull()][string]$SourceFile
     )
 
-    $schemaImplementationPath = [IO.Path]::GetFullPath([IO.Path]::Combine($PSScriptRoot, 'schema.ps1'))
-    $schemaModule = Microsoft.PowerShell.Core\New-Module -Name ('RouterSchemaValidation_{0}' -f [guid]::NewGuid().ToString('N')) -ScriptBlock {
-        param($ImplementationPath)
-        . $ImplementationPath
-        Microsoft.PowerShell.Core\Export-ModuleMember -Function @() -Variable @()
-    } -ArgumentList $schemaImplementationPath
-
-    try {
     $errors = [Collections.Generic.List[object]]::new()
-    $loaded = [Collections.Generic.List[object]]::new()
-    $matrixRead = Read-RouterCatalogJson -FilePath $MatrixPath
-    if (-not $matrixRead.valid) {
-        $errors.Add((New-RouterCatalogError -Code 'matrix_json_invalid' -File $MatrixPath -Path $matrixRead.path -Identity $null -Message $matrixRead.message))
-        return [pscustomobject]@{ valid = $false; profiles = @(); errors = @($errors) }
-    }
-
-    $pricingRead = Read-RouterCatalogJson -FilePath $PricingSnapshotPath
-    if (-not $pricingRead.valid) {
-        $errors.Add((New-RouterCatalogError -Code 'pricing_snapshot_json_invalid' -File $PricingSnapshotPath -Path $pricingRead.path -Identity $null -Message $pricingRead.message))
-        return [pscustomobject]@{ valid = $false; profiles = @(); errors = @($errors) }
-    }
-    $pricingSnapshot = $pricingRead.value
+    $pricingByProfileModel = [Collections.Generic.Dictionary[string, object]]::new([StringComparer]::Ordinal)
     $requiredPricingSnapshotFields = @('snapshot_date', 'retrieved_on', 'currency', 'rate_unit', 'policy', 'schedules')
-    $missingPricingSnapshotFields = @($requiredPricingSnapshotFields | Where-Object { $pricingSnapshot.PSObject.Properties.Name -cnotcontains $_ })
-    $snapshotDate = if ($pricingSnapshot.PSObject.Properties.Name -ccontains 'snapshot_date') {
-        ConvertFrom-RouterCatalogIsoDate $pricingSnapshot.snapshot_date
+    $missingPricingSnapshotFields = if ($null -eq $PricingSnapshot) {
+        $requiredPricingSnapshotFields
+    } else {
+        @($requiredPricingSnapshotFields | Where-Object { $PricingSnapshot.PSObject.Properties.Name -cnotcontains $_ })
+    }
+    $snapshotDate = if ($null -ne $PricingSnapshot -and
+        $PricingSnapshot.PSObject.Properties.Name -ccontains 'snapshot_date') {
+        ConvertFrom-RouterCatalogIsoDate $PricingSnapshot.snapshot_date
     } else { $null }
-    $snapshotRetrievedOn = if ($pricingSnapshot.PSObject.Properties.Name -ccontains 'retrieved_on') {
-        ConvertFrom-RouterCatalogIsoDate $pricingSnapshot.retrieved_on
+    $snapshotRetrievedOn = if ($null -ne $PricingSnapshot -and
+        $PricingSnapshot.PSObject.Properties.Name -ccontains 'retrieved_on') {
+        ConvertFrom-RouterCatalogIsoDate $PricingSnapshot.retrieved_on
     } else { $null }
     if ($missingPricingSnapshotFields.Count -gt 0 -or
         $null -eq $snapshotDate -or $null -eq $snapshotRetrievedOn -or
-        $pricingSnapshot.currency -isnot [string] -or [string]::IsNullOrWhiteSpace($pricingSnapshot.currency) -or
-        $pricingSnapshot.rate_unit -isnot [string] -or [string]::IsNullOrWhiteSpace($pricingSnapshot.rate_unit) -or
-        $pricingSnapshot.policy -isnot [string] -or [string]::IsNullOrWhiteSpace($pricingSnapshot.policy) -or
-        $pricingSnapshot.schedules -isnot [Collections.IList]) {
-        $errors.Add((New-RouterCatalogError -Code 'pricing_snapshot_invalid' -File $PricingSnapshotPath -Path '$' -Identity $null -Message 'Pricing snapshot lacks valid required catalog fields.'))
-        return [pscustomobject]@{ valid = $false; profiles = @(); errors = @($errors) }
+        $PricingSnapshot.currency -isnot [string] -or [string]::IsNullOrWhiteSpace($PricingSnapshot.currency) -or
+        $PricingSnapshot.rate_unit -isnot [string] -or [string]::IsNullOrWhiteSpace($PricingSnapshot.rate_unit) -or
+        $PricingSnapshot.policy -isnot [string] -or [string]::IsNullOrWhiteSpace($PricingSnapshot.policy) -or
+        $PricingSnapshot.schedules -isnot [Collections.IList]) {
+        $errors.Add((New-RouterCatalogError -Code 'pricing_snapshot_invalid' -File $SourceFile -Path '$' -Identity $null -Message 'Pricing snapshot lacks valid required catalog fields.'))
+        return [pscustomobject]@{
+            valid = $false
+            errors = @($errors)
+            snapshot_date = $snapshotDate
+            pricing_by_profile_model = $pricingByProfileModel
+        }
     }
 
-    $pricingByProfileModel = [Collections.Generic.Dictionary[string, object]]::new([StringComparer]::Ordinal)
     $scheduleIndex = 0
-    foreach ($schedule in @($pricingSnapshot.schedules)) {
+    foreach ($schedule in @($PricingSnapshot.schedules)) {
         $schedulePath = '$.schedules[{0}]' -f $scheduleIndex
         $scheduleIndex++
         $requiredScheduleFields = @('provider', 'model', 'profile_models', 'cost_comparable', 'source_url', 'retrieved_on', 'rate_periods')
@@ -310,7 +297,7 @@ function Import-RouterProfileCatalog {
             $scheduleValid = if ($schedule.cost_comparable) { $periodCount -gt 0 } else { $periodCount -eq 0 }
         }
         if (-not $scheduleValid) {
-            $errors.Add((New-RouterCatalogError -Code 'pricing_snapshot_invalid' -File $PricingSnapshotPath -Path $schedulePath -Identity $null -Message 'Pricing schedule is incomplete or has invalid field types.'))
+            $errors.Add((New-RouterCatalogError -Code 'pricing_snapshot_invalid' -File $SourceFile -Path $schedulePath -Identity $null -Message 'Pricing schedule is incomplete or has invalid field types.'))
             continue
         }
 
@@ -345,7 +332,7 @@ function Import-RouterProfileCatalog {
                     (Test-RouterCatalogNonnegativeNumber $period.output_usd_per_million_tokens)
             }
             if (-not $periodValid) {
-                $errors.Add((New-RouterCatalogError -Code 'pricing_snapshot_invalid' -File $PricingSnapshotPath -Path $periodPath -Identity $null -Message 'Pricing period has invalid dates, token bounds, or rates.'))
+                $errors.Add((New-RouterCatalogError -Code 'pricing_snapshot_invalid' -File $SourceFile -Path $periodPath -Identity $null -Message 'Pricing period has invalid dates, token bounds, or rates.'))
                 $scheduleValid = $false
                 continue
             }
@@ -379,7 +366,7 @@ function Import-RouterProfileCatalog {
                     }
                 }
                 if (-not $partitionValid) {
-                    $errors.Add((New-RouterCatalogError -Code 'pricing_snapshot_invalid' -File $PricingSnapshotPath -Path ($schedulePath + '.rate_periods') -Identity $null -Message 'Token ranges must form one contiguous non-overlapping partition for each effective-date interval.'))
+                    $errors.Add((New-RouterCatalogError -Code 'pricing_snapshot_invalid' -File $SourceFile -Path ($schedulePath + '.rate_periods') -Identity $null -Message 'Token ranges must form one contiguous non-overlapping partition for each effective-date interval.'))
                     $scheduleValid = $false
                 }
             }
@@ -397,7 +384,7 @@ function Import-RouterProfileCatalog {
                 }
             }
             if (-not $timelineValid) {
-                $errors.Add((New-RouterCatalogError -Code 'pricing_snapshot_invalid' -File $PricingSnapshotPath -Path ($schedulePath + '.rate_periods') -Identity $null -Message 'Effective date intervals must continuously cover time from the snapshot date without gaps, overlaps, or a non-final open interval.'))
+                $errors.Add((New-RouterCatalogError -Code 'pricing_snapshot_invalid' -File $SourceFile -Path ($schedulePath + '.rate_periods') -Identity $null -Message 'Effective date intervals must continuously cover time from the snapshot date without gaps, overlaps, or a non-final open interval.'))
                 $scheduleValid = $false
             }
         }
@@ -405,19 +392,110 @@ function Import-RouterProfileCatalog {
 
         foreach ($profileModel in @($schedule.profile_models)) {
             if ($pricingByProfileModel.ContainsKey($profileModel)) {
-                $errors.Add((New-RouterCatalogError -Code 'pricing_snapshot_duplicate_model' -File $PricingSnapshotPath -Path ($schedulePath + '.profile_models') -Identity $profileModel -Message 'More than one pricing schedule applies to this profile model.'))
+                $errors.Add((New-RouterCatalogError -Code 'pricing_snapshot_duplicate_model' -File $SourceFile -Path ($schedulePath + '.profile_models') -Identity $profileModel -Message 'More than one pricing schedule applies to this profile model.'))
             } else {
                 $pricingByProfileModel.Add($profileModel, $schedule)
             }
         }
     }
-    if ($errors.Count -gt 0) {
-        $sortedSnapshotErrors = @(Sort-RouterCatalogObjectsOrdinal -Values @($errors) -KeySelector {
-            param($error)
-            '{0}|{1}|{2}|{3}' -f $error.code, $error.file, $error.identity, $error.path
-        })
-        return [pscustomobject]@{ valid = $false; profiles = @(); errors = $sortedSnapshotErrors }
+
+    $sortedErrors = @(Sort-RouterCatalogObjectsOrdinal -Values @($errors) -KeySelector {
+        param($error)
+        '{0}|{1}|{2}|{3}' -f $error.code, $error.file, $error.identity, $error.path
+    })
+    return [pscustomobject]@{
+        valid = $sortedErrors.Count -eq 0
+        errors = $sortedErrors
+        snapshot_date = $snapshotDate
+        pricing_by_profile_model = $pricingByProfileModel
     }
+}
+
+function Test-RouterProfilePricingSnapshotMatch {
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [AllowNull()][object]$Profile,
+        [AllowNull()][object]$PricingSnapshot,
+        [AllowNull()][object]$PricingByProfileModel
+    )
+
+    if ($null -eq $Profile -or $null -eq $Profile.pricing -or
+        $null -eq $PricingSnapshot -or $null -eq $PricingByProfileModel -or
+        $Profile.model -isnot [string] -or
+        -not $PricingByProfileModel.ContainsKey([string]$Profile.model)) {
+        return $false
+    }
+
+    $schedule = $PricingByProfileModel[[string]$Profile.model]
+    if ($schedule.provider -cne $Profile.provider -or
+        $Profile.pricing_snapshot_date -cne $PricingSnapshot.snapshot_date -or
+        $Profile.pricing.currency -cne $PricingSnapshot.currency -or
+        $Profile.pricing.rate_unit -cne $PricingSnapshot.rate_unit -or
+        $Profile.pricing.cost_comparable -ne $schedule.cost_comparable) {
+        return $false
+    }
+    if (-not $schedule.cost_comparable) {
+        return @($schedule.rate_periods).Count -eq 0 -and
+            $null -eq $Profile.pricing.input_usd_per_million_tokens -and
+            $null -eq $Profile.pricing.output_usd_per_million_tokens -and
+            $Profile.pricing.effective_from -ceq $PricingSnapshot.snapshot_date -and
+            $null -eq $Profile.pricing.effective_through
+    }
+
+    $matchingPeriods = @(
+        $schedule.rate_periods | Where-Object {
+            $_.input_tokens_min -eq 0 -and
+            $_.effective_from -ceq $Profile.pricing.effective_from -and
+            (($null -eq $_.effective_through -and $null -eq $Profile.pricing.effective_through) -or
+                ($null -ne $_.effective_through -and $_.effective_through -ceq $Profile.pricing.effective_through))
+        }
+    )
+    return $matchingPeriods.Count -eq 1 -and
+        $Profile.pricing.input_usd_per_million_tokens -eq $matchingPeriods[0].input_usd_per_million_tokens -and
+        $Profile.pricing.output_usd_per_million_tokens -eq $matchingPeriods[0].output_usd_per_million_tokens
+}
+
+function Import-RouterProfileCatalog {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory)][string]$ProfilesRoot,
+        [Parameter(Mandatory)][string]$MatrixPath,
+        [Parameter(Mandatory)][string]$ProfileSchemaPath,
+        [Parameter(Mandatory)][string]$PricingSnapshotPath,
+        [Parameter(Mandatory)][string]$QualitySnapshotPath
+    )
+
+    $schemaImplementationPath = [IO.Path]::GetFullPath([IO.Path]::Combine($PSScriptRoot, 'schema.ps1'))
+    $schemaModule = Microsoft.PowerShell.Core\New-Module -Name ('RouterSchemaValidation_{0}' -f [guid]::NewGuid().ToString('N')) -ScriptBlock {
+        param($ImplementationPath)
+        . $ImplementationPath
+        Microsoft.PowerShell.Core\Export-ModuleMember -Function @() -Variable @()
+    } -ArgumentList $schemaImplementationPath
+
+    try {
+    $errors = [Collections.Generic.List[object]]::new()
+    $loaded = [Collections.Generic.List[object]]::new()
+    $matrixRead = Read-RouterCatalogJson -FilePath $MatrixPath
+    if (-not $matrixRead.valid) {
+        $errors.Add((New-RouterCatalogError -Code 'matrix_json_invalid' -File $MatrixPath -Path $matrixRead.path -Identity $null -Message $matrixRead.message))
+        return [pscustomobject]@{ valid = $false; profiles = @(); errors = @($errors) }
+    }
+
+    $pricingRead = Read-RouterCatalogJson -FilePath $PricingSnapshotPath
+    if (-not $pricingRead.valid) {
+        $errors.Add((New-RouterCatalogError -Code 'pricing_snapshot_json_invalid' -File $PricingSnapshotPath -Path $pricingRead.path -Identity $null -Message $pricingRead.message))
+        return [pscustomobject]@{ valid = $false; profiles = @(); errors = @($errors) }
+    }
+    $pricingSnapshot = $pricingRead.value
+    $pricingValidation = Test-RouterPricingSnapshotObject -PricingSnapshot $pricingSnapshot `
+        -SourceFile $PricingSnapshotPath
+    if (-not $pricingValidation.valid) {
+        return [pscustomobject]@{ valid = $false; profiles = @(); errors = @($pricingValidation.errors) }
+    }
+    $snapshotDate = $pricingValidation.snapshot_date
+    $pricingByProfileModel = $pricingValidation.pricing_by_profile_model
 
     $qualityRead = Read-RouterCatalogJson -FilePath $QualitySnapshotPath
     if (-not $qualityRead.valid) {
@@ -669,36 +747,8 @@ function Import-RouterProfileCatalog {
             $errors.Add((New-RouterCatalogError -Code 'profile_pricing_invalid' -File $entry.file -Path '$.pricing' -Identity $entry.identity -Message 'Comparable pricing requires finite nonnegative rates; non-comparable pricing requires two null rates.'))
         }
 
-        $pricingSnapshotValid = $false
-        if ($pricingByProfileModel.ContainsKey([string]$profile.model)) {
-            $schedule = $pricingByProfileModel[[string]$profile.model]
-            if ($schedule.provider -ceq $profile.provider -and
-                $profile.pricing_snapshot_date -ceq $pricingSnapshot.snapshot_date -and
-                $profile.pricing.currency -ceq $pricingSnapshot.currency -and
-                $profile.pricing.rate_unit -ceq $pricingSnapshot.rate_unit -and
-                $profile.pricing.cost_comparable -eq $schedule.cost_comparable) {
-                if (-not $schedule.cost_comparable) {
-                    $pricingSnapshotValid = @($schedule.rate_periods).Count -eq 0 -and
-                        $null -eq $profile.pricing.input_usd_per_million_tokens -and
-                        $null -eq $profile.pricing.output_usd_per_million_tokens -and
-                        $profile.pricing.effective_from -ceq $pricingSnapshot.snapshot_date -and
-                        $null -eq $profile.pricing.effective_through
-                } else {
-                    $matchingPeriods = @(
-                        $schedule.rate_periods | Where-Object {
-                            $_.input_tokens_min -eq 0 -and
-                            $_.effective_from -ceq $profile.pricing.effective_from -and
-                            (($null -eq $_.effective_through -and $null -eq $profile.pricing.effective_through) -or
-                                ($null -ne $_.effective_through -and $_.effective_through -ceq $profile.pricing.effective_through))
-                        }
-                    )
-                    if ($matchingPeriods.Count -eq 1) {
-                        $pricingSnapshotValid = $profile.pricing.input_usd_per_million_tokens -eq $matchingPeriods[0].input_usd_per_million_tokens -and
-                            $profile.pricing.output_usd_per_million_tokens -eq $matchingPeriods[0].output_usd_per_million_tokens
-                    }
-                }
-            }
-        }
+        $pricingSnapshotValid = Test-RouterProfilePricingSnapshotMatch -Profile $profile `
+            -PricingSnapshot $pricingSnapshot -PricingByProfileModel $pricingByProfileModel
         if (-not $pricingSnapshotValid) {
             $errors.Add((New-RouterCatalogError -Code 'profile_pricing_snapshot_mismatch' -File $entry.file -Path '$.pricing' -Identity $entry.identity -Message 'Profile pricing does not exactly match its applicable dated pricing schedule.'))
         }

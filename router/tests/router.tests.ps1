@@ -950,6 +950,16 @@ function Get-MinimalProfiles {
     )
 }
 
+function Get-MinimalPolicyProfiles {
+    $profiles = @(Get-MinimalProfiles | ForEach-Object { Copy-TestObject $_ })
+    $codex = @($profiles | Where-Object { $_.launcher -ceq 'codex' })[0]
+    $codex.model = 'shared-model-openai'
+    foreach ($observation in @($codex.token_consumption_observations)) {
+        $observation.model = 'shared-model-openai'
+    }
+    return $profiles
+}
+
 function Get-CompositeIdentity {
     param([Parameter(Mandatory)][object]$Candidate)
 
@@ -1020,6 +1030,16 @@ function New-TestTokenObservation {
         estimated_reasoning_tokens = $EstimatedReasoningTokens
         observed_on = '2026-08-22'
     }
+}
+
+function Get-TestPolicyTokenEstimates {
+    param([object[]]$Profiles = @(Get-MinimalPolicyProfiles))
+
+    return @(
+        foreach ($profile in $Profiles) {
+            New-TestTokenObservation -Candidate $profile
+        }
+    )
 }
 
 function New-TestPriceRequirements {
@@ -1123,7 +1143,7 @@ function New-TestPolicyPricingSnapshot {
         [pscustomobject]@{
             provider = 'openai'
             model = 'shared-model-openai-schedule'
-            profile_models = @('shared-model')
+            profile_models = @('shared-model-openai')
             cost_comparable = $true
             source_url = 'https://fixtures.invalid/pricing/shared-model-openai'
             retrieved_on = '2026-08-23'
@@ -1168,6 +1188,30 @@ function Invoke-TestRouterPolicy {
         $parameters.RuntimeStates = $RuntimeStates
     }
     return Invoke-RouterPolicy @parameters
+}
+
+function Assert-PolicyPricingSnapshotRejected {
+    param(
+        [Parameter(Mandatory)][object]$PricingSnapshot,
+        [object[]]$Profiles = @(Get-MinimalPolicyProfiles),
+        [string]$ExpectedReasonCode = 'pricing_snapshot_invalid'
+    )
+
+    $observations = @(
+        foreach ($profile in $Profiles) {
+            New-TestTokenObservation -Candidate $profile
+        }
+    )
+    $decision = Invoke-TestRouterPolicy -Profiles $Profiles -PricingSnapshot $PricingSnapshot `
+        -TokenEstimates $observations
+
+    Assert-Equal $decision.selected_candidate $null
+    Assert-Equal $decision.price $null
+    Assert-Equal @($decision.candidate_evaluations).Count @($Profiles).Count
+    foreach ($evaluation in @($decision.candidate_evaluations)) {
+        Assert-Equal $evaluation.rejection_stage 'price'
+        Assert-SequenceEqual @($evaluation.rejection_reason_codes) @($ExpectedReasonCode)
+    }
 }
 
 function New-TestQualitySnapshot {
@@ -3660,10 +3704,8 @@ $promotionBoundaryCases = @(
 )
 foreach ($promotionBoundaryCase in $promotionBoundaryCases) {
     Invoke-Assertion ("dated promotional pricing treats {0} as an inclusive schedule boundary" -f $promotionBoundaryCase.date) {
-        $candidate = Copy-TestObject @(Get-MinimalProfiles)[0]
-        $candidate.provider = 'anthropic'
-        $candidate.model = 'claude-sonnet-5'
-        $candidate.configuration_id = 'claude-sonnet-5__medium'
+        $candidate = Get-Content -LiteralPath (Join-Path $profilesRoot 'claude/claude-sonnet-5__medium.json') `
+            -Raw | ConvertFrom-Json -Depth 30
         $observation = New-TestTokenObservation -Candidate $candidate
         $snapshot = Get-Content -LiteralPath $pricingSnapshotPath -Raw | ConvertFrom-Json -Depth 30
         $estimate = Get-RouterEstimatedPrice -Candidate $candidate -Request (New-MinimalRequest) `
@@ -3682,10 +3724,8 @@ $geminiTierCases = @(
 )
 foreach ($geminiTierCase in $geminiTierCases) {
     Invoke-Assertion ("Gemini 3.1 pricing applies the exact $($geminiTierCase.input_tokens)-token tier") {
-        $candidate = Copy-TestObject @(Get-MinimalProfiles)[0]
-        $candidate.provider = 'google'
-        $candidate.model = 'gemini-3.1-pro-high'
-        $candidate.configuration_id = 'gemini-3.1-pro-high__medium'
+        $candidate = Get-Content -LiteralPath (Join-Path $profilesRoot 'agy/gemini-3.1-pro-high__high.json') `
+            -Raw | ConvertFrom-Json -Depth 30
         $observation = New-TestTokenObservation -Candidate $candidate
         $snapshot = Get-Content -LiteralPath $pricingSnapshotPath -Raw | ConvertFrom-Json -Depth 30
         $estimate = Get-RouterEstimatedPrice -Candidate $candidate -Request (New-MinimalRequest) `
@@ -3729,6 +3769,8 @@ Invoke-Assertion 'a resulting zero price is unavailable because V1 has no free r
     $snapshot = New-TestPricingSnapshot
     $snapshot.schedules[0].rate_periods[0].input_usd_per_million_tokens = 0
     $snapshot.schedules[0].rate_periods[0].output_usd_per_million_tokens = 0
+    $candidate.pricing.input_usd_per_million_tokens = 0
+    $candidate.pricing.output_usd_per_million_tokens = 0
     $estimate = Get-RouterEstimatedPrice -Candidate $candidate -Request (New-MinimalRequest) `
         -Requirements (New-TestPriceRequirements) -PricingSnapshot $snapshot `
         -TokenEstimates (Get-TestTokenEstimates).observations -AsOfDate '2026-08-22'
@@ -3805,6 +3847,8 @@ Invoke-Assertion 'pricing retains full decimal precision for large integer token
     $snapshot = New-TestPricingSnapshot
     $snapshot.schedules[0].rate_periods[0].input_usd_per_million_tokens = [decimal]0.123456789
     $snapshot.schedules[0].rate_periods[0].output_usd_per_million_tokens = [decimal]9.876543211
+    $candidate.pricing.input_usd_per_million_tokens = [decimal]0.123456789
+    $candidate.pricing.output_usd_per_million_tokens = [decimal]9.876543211
     $observation = New-TestTokenObservation -Candidate $candidate `
         -EstimatedVisibleOutputTokens 4000000000 -EstimatedReasoningTokens 3000000000
     $requirements = New-TestPriceRequirements -EstimatedInputTokens 8000000000
@@ -3836,7 +3880,7 @@ Invoke-Assertion 'Task 6 policy module is available' {
 Invoke-Assertion 'request validation rejects every candidate before requirements' {
     $request = New-MinimalRequest
     $request.PSObject.Properties.Remove('request_text')
-    $decision = Invoke-TestRouterPolicy -Request $request -Profiles @(Get-MinimalProfiles)
+    $decision = Invoke-TestRouterPolicy -Request $request -Profiles @(Get-MinimalPolicyProfiles)
 
     Assert-Equal $decision.request_validation.valid $false
     Assert-Equal $decision.selected_candidate $null
@@ -3850,7 +3894,7 @@ Invoke-Assertion 'request validation rejects every candidate before requirements
 }
 
 Invoke-Assertion 'requirements rejection skips quality and price evaluation' {
-    $candidate = Copy-TestObject @(Get-MinimalProfiles)[0]
+    $candidate = Copy-TestObject @(Get-MinimalPolicyProfiles)[0]
     $candidate.enabled = $false
     $candidate.quality.task_types.coding = 'unknown'
     $decision = Invoke-TestRouterPolicy -Profiles @($candidate) -TokenEstimates @()
@@ -3865,7 +3909,7 @@ Invoke-Assertion 'requirements rejection skips quality and price evaluation' {
 }
 
 Invoke-Assertion 'quality rejection skips price evaluation' {
-    $candidate = Copy-TestObject @(Get-MinimalProfiles)[0]
+    $candidate = Copy-TestObject @(Get-MinimalPolicyProfiles)[0]
     $candidate.quality.task_types.coding = 'unknown'
     $decision = Invoke-TestRouterPolicy -Profiles @($candidate) -TokenEstimates @()
     $evaluation = @($decision.candidate_evaluations)[0]
@@ -3879,7 +3923,7 @@ Invoke-Assertion 'quality rejection skips price evaluation' {
 }
 
 Invoke-Assertion 'cheaper frontier beats more expensive strong after both pass the quality floor' {
-    $profiles = @(Get-MinimalProfiles | ForEach-Object { Copy-TestObject $_ })
+    $profiles = @(Get-MinimalPolicyProfiles)
     $agy = @($profiles | Where-Object { $_.launcher -ceq 'agy' })[0]
     $codex = @($profiles | Where-Object { $_.launcher -ceq 'codex' })[0]
     Set-TestRelevantQuality -Candidate $agy -Request (New-MinimalRequest) `
@@ -3888,14 +3932,16 @@ Invoke-Assertion 'cheaper frontier beats more expensive strong after both pass t
         -RequiredCapabilities $qualityCapabilities -Category 'frontier'
     $snapshot = New-TestPolicyPricingSnapshot -AgyInputRate 10 -AgyOutputRate 50 `
         -CodexInputRate 1 -CodexOutputRate 5
+    $agy.pricing.input_usd_per_million_tokens = 10
+    $agy.pricing.output_usd_per_million_tokens = 50
     $decision = Invoke-TestRouterPolicy -Profiles $profiles -PricingSnapshot $snapshot `
-        -TokenEstimates (Get-TestTokenEstimates).observations
+        -TokenEstimates (Get-TestPolicyTokenEstimates -Profiles $profiles)
 
     Assert-Equal (Get-CompositeIdentity $decision.selected_candidate) 'codex|shared-model__medium'
 }
 
 Invoke-Assertion 'model and effort form one jointly ranked candidate' {
-    $base = Copy-TestObject @(Get-MinimalProfiles)[0]
+    $base = Copy-TestObject @(Get-MinimalPolicyProfiles)[0]
     $low = Copy-TestObject $base
     $low.configuration_id = 'shared-model__low'
     $low.effort = 'low'
@@ -3914,15 +3960,17 @@ Invoke-Assertion 'model and effort form one jointly ranked candidate' {
 }
 
 Invoke-Assertion 'price strictly outranks latency' {
-    $profiles = @(Get-MinimalProfiles | ForEach-Object { Copy-TestObject $_ })
+    $profiles = @(Get-MinimalPolicyProfiles)
     $agy = @($profiles | Where-Object { $_.launcher -ceq 'agy' })[0]
     $codex = @($profiles | Where-Object { $_.launcher -ceq 'codex' })[0]
     $agy.latency_observation.milliseconds = 9000
     $codex.latency_observation.milliseconds = 1
     $snapshot = New-TestPolicyPricingSnapshot -AgyInputRate 1 -AgyOutputRate 5 `
         -CodexInputRate 2 -CodexOutputRate 10
+    $codex.pricing.input_usd_per_million_tokens = 2
+    $codex.pricing.output_usd_per_million_tokens = 10
     $decision = Invoke-TestRouterPolicy -Profiles $profiles -PricingSnapshot $snapshot `
-        -TokenEstimates (Get-TestTokenEstimates).observations
+        -TokenEstimates (Get-TestPolicyTokenEstimates -Profiles $profiles)
 
     Assert-Equal (Get-CompositeIdentity $decision.selected_candidate) 'agy|shared-model__medium'
 }
@@ -3931,19 +3979,19 @@ foreach ($latencyMode in @('fast', 'normal')) {
     Invoke-Assertion ("lower available latency breaks an equal-price tie for $latencyMode requests") {
         $request = New-MinimalRequest
         $request.latency = $latencyMode
-        $profiles = @(Get-MinimalProfiles | ForEach-Object { Copy-TestObject $_ })
+        $profiles = @(Get-MinimalPolicyProfiles)
         @($profiles | Where-Object { $_.launcher -ceq 'agy' })[0].latency_observation.milliseconds = 1000
         @($profiles | Where-Object { $_.launcher -ceq 'codex' })[0].latency_observation.milliseconds = 100
         $decision = Invoke-TestRouterPolicy -Request $request -Profiles $profiles `
             -PricingSnapshot (New-TestPolicyPricingSnapshot) `
-            -TokenEstimates (Get-TestTokenEstimates).observations
+            -TokenEstimates (Get-TestPolicyTokenEstimates -Profiles $profiles)
 
         Assert-Equal (Get-CompositeIdentity $decision.selected_candidate) 'codex|shared-model__medium'
     }
 }
 
 Invoke-Assertion 'available latency sorts before unavailable latency on an equal-price normal request' {
-    $profiles = @(Get-MinimalProfiles | ForEach-Object { Copy-TestObject $_ })
+    $profiles = @(Get-MinimalPolicyProfiles)
     $agy = @($profiles | Where-Object { $_.launcher -ceq 'agy' })[0]
     $agy.latency_observation.available = $false
     $agy.latency_observation.metric = $null
@@ -3952,13 +4000,13 @@ Invoke-Assertion 'available latency sorts before unavailable latency on an equal
     $agy.latency_observation.observed_on = $null
     $decision = Invoke-TestRouterPolicy -Profiles $profiles `
         -PricingSnapshot (New-TestPolicyPricingSnapshot) `
-        -TokenEstimates (Get-TestTokenEstimates).observations
+        -TokenEstimates (Get-TestPolicyTokenEstimates -Profiles $profiles)
 
     Assert-Equal (Get-CompositeIdentity $decision.selected_candidate) 'codex|shared-model__medium'
 }
 
 Invoke-Assertion 'only measured end-to-end latency can break an equal-price tie' {
-    $profiles = @(Get-MinimalProfiles | ForEach-Object { Copy-TestObject $_ })
+    $profiles = @(Get-MinimalPolicyProfiles)
     $agy = @($profiles | Where-Object { $_.launcher -ceq 'agy' })[0]
     $codex = @($profiles | Where-Object { $_.launcher -ceq 'codex' })[0]
     $agy.latency_observation.milliseconds = 1000
@@ -3966,7 +4014,7 @@ Invoke-Assertion 'only measured end-to-end latency can break an equal-price tie'
     $codex.latency_observation.milliseconds = 1
     $decision = Invoke-TestRouterPolicy -Profiles $profiles `
         -PricingSnapshot (New-TestPolicyPricingSnapshot) `
-        -TokenEstimates (Get-TestTokenEstimates).observations
+        -TokenEstimates (Get-TestPolicyTokenEstimates -Profiles $profiles)
 
     Assert-Equal (Get-CompositeIdentity $decision.selected_candidate) 'agy|shared-model__medium'
 }
@@ -3974,22 +4022,28 @@ Invoke-Assertion 'only measured end-to-end latency can break an equal-price tie'
 Invoke-Assertion 'relaxed latency skips measurements and proceeds to stable identity' {
     $request = New-MinimalRequest
     $request.latency = 'relaxed'
-    $profiles = @(Get-MinimalProfiles | ForEach-Object { Copy-TestObject $_ })
+    $profiles = @(Get-MinimalPolicyProfiles)
     @($profiles | Where-Object { $_.launcher -ceq 'agy' })[0].latency_observation.milliseconds = 9000
     @($profiles | Where-Object { $_.launcher -ceq 'codex' })[0].latency_observation.milliseconds = 1
     $decision = Invoke-TestRouterPolicy -Request $request -Profiles $profiles `
         -PricingSnapshot (New-TestPolicyPricingSnapshot) `
-        -TokenEstimates (Get-TestTokenEstimates).observations
+        -TokenEstimates (Get-TestPolicyTokenEstimates -Profiles $profiles)
 
     Assert-Equal (Get-CompositeIdentity $decision.selected_candidate) 'agy|shared-model__medium'
 }
 
 Invoke-Assertion 'raw decimal price selects the winner even when response-boundary values round equally' {
-    $profiles = @(Get-MinimalProfiles | ForEach-Object { Copy-TestObject $_ })
+    $profiles = @(Get-MinimalPolicyProfiles)
     $snapshot = New-TestPolicyPricingSnapshot -AgyInputRate ([decimal]0.10001) -AgyOutputRate 0 `
         -CodexInputRate ([decimal]0.10002) -CodexOutputRate 0
+    $agy = @($profiles | Where-Object { $_.launcher -ceq 'agy' })[0]
+    $codex = @($profiles | Where-Object { $_.launcher -ceq 'codex' })[0]
+    $agy.pricing.input_usd_per_million_tokens = [decimal]0.10001
+    $agy.pricing.output_usd_per_million_tokens = 0
+    $codex.pricing.input_usd_per_million_tokens = [decimal]0.10002
+    $codex.pricing.output_usd_per_million_tokens = 0
     $decision = Invoke-TestRouterPolicy -Profiles $profiles -PricingSnapshot $snapshot `
-        -TokenEstimates (Get-TestTokenEstimates).observations
+        -TokenEstimates (Get-TestPolicyTokenEstimates -Profiles $profiles)
     $prices = @($decision.candidate_evaluations | ForEach-Object { $_.price.price })
 
     Assert-Equal (Get-CompositeIdentity $decision.selected_candidate) 'agy|shared-model__medium'
@@ -3999,11 +4053,14 @@ Invoke-Assertion 'raw decimal price selects the winner even when response-bounda
 }
 
 Invoke-Assertion 'a zero-price candidate is unavailable and cannot win policy selection' {
-    $profiles = @(Get-MinimalProfiles | ForEach-Object { Copy-TestObject $_ })
+    $profiles = @(Get-MinimalPolicyProfiles)
     $snapshot = New-TestPolicyPricingSnapshot -AgyInputRate 0 -AgyOutputRate 0 `
         -CodexInputRate 1 -CodexOutputRate 5
+    $agy = @($profiles | Where-Object { $_.launcher -ceq 'agy' })[0]
+    $agy.pricing.input_usd_per_million_tokens = 0
+    $agy.pricing.output_usd_per_million_tokens = 0
     $decision = Invoke-TestRouterPolicy -Profiles $profiles -PricingSnapshot $snapshot `
-        -TokenEstimates (Get-TestTokenEstimates).observations
+        -TokenEstimates (Get-TestPolicyTokenEstimates -Profiles $profiles)
     $agyEvaluation = @($decision.candidate_evaluations | Where-Object { $_.launcher -ceq 'agy' })[0]
 
     Assert-Equal (Get-CompositeIdentity $decision.selected_candidate) 'codex|shared-model__medium'
@@ -4012,8 +4069,9 @@ Invoke-Assertion 'a zero-price candidate is unavailable and cannot win policy se
 }
 
 Invoke-Assertion 'policy fails closed with no winner when the pricing snapshot is omitted' {
-    $decision = Invoke-TestRouterPolicy -Profiles (Get-MinimalProfiles) `
-        -TokenEstimates (Get-TestTokenEstimates).observations
+    $profiles = @(Get-MinimalPolicyProfiles)
+    $decision = Invoke-TestRouterPolicy -Profiles $profiles `
+        -TokenEstimates (Get-TestPolicyTokenEstimates -Profiles $profiles)
 
     Assert-Equal $decision.selected_candidate $null
     Assert-Equal $decision.price $null
@@ -4025,8 +4083,9 @@ Invoke-Assertion 'policy fails closed with no winner when the pricing snapshot i
 }
 
 Invoke-Assertion 'policy fails closed with no winner when the pricing snapshot is explicitly null' {
-    $decision = Invoke-TestRouterPolicy -Profiles (Get-MinimalProfiles) -PricingSnapshot $null `
-        -TokenEstimates (Get-TestTokenEstimates).observations
+    $profiles = @(Get-MinimalPolicyProfiles)
+    $decision = Invoke-TestRouterPolicy -Profiles $profiles -PricingSnapshot $null `
+        -TokenEstimates (Get-TestPolicyTokenEstimates -Profiles $profiles)
 
     Assert-Equal $decision.selected_candidate $null
     Assert-Equal $decision.price $null
@@ -4034,6 +4093,88 @@ Invoke-Assertion 'policy fails closed with no winner when the pricing snapshot i
         Assert-Equal $evaluation.rejection_stage 'price'
         Assert-SequenceEqual @($evaluation.rejection_reason_codes) @('pricing_snapshot_unavailable')
     }
+}
+
+$incompletePolicySnapshotCases = @(
+    [pscustomobject]@{ name = 'missing top-level policy metadata'; property = 'policy' }
+    [pscustomobject]@{ name = 'missing top-level retrieval metadata'; property = 'retrieved_on' }
+)
+foreach ($incompletePolicySnapshotCase in $incompletePolicySnapshotCases) {
+    Invoke-Assertion ("policy rejects {0} before ranking" -f $incompletePolicySnapshotCase.name) {
+        $snapshot = New-TestPolicyPricingSnapshot
+        $snapshot.PSObject.Properties.Remove($incompletePolicySnapshotCase.property)
+
+        Assert-PolicyPricingSnapshotRejected -PricingSnapshot $snapshot
+    }
+}
+
+Invoke-Assertion 'policy rejects scalar rate periods before ranking' {
+    $snapshot = New-TestPolicyPricingSnapshot
+    $snapshot.schedules[0].rate_periods = $snapshot.schedules[0].rate_periods[0]
+
+    Assert-PolicyPricingSnapshotRejected -PricingSnapshot $snapshot
+}
+
+$missingPolicyScheduleFieldCases = @('source_url', 'model', 'retrieved_on')
+foreach ($missingPolicyScheduleField in $missingPolicyScheduleFieldCases) {
+    Invoke-Assertion ("policy rejects a schedule missing {0} before ranking" -f $missingPolicyScheduleField) {
+        $snapshot = New-TestPolicyPricingSnapshot
+        $snapshot.schedules[0].PSObject.Properties.Remove($missingPolicyScheduleField)
+
+        Assert-PolicyPricingSnapshotRejected -PricingSnapshot $snapshot
+    }
+}
+
+$invalidPolicyPartitionCases = @(
+    [pscustomobject]@{ name = 'token partition gap'; kind = 'token'; successor = 102 }
+    [pscustomobject]@{ name = 'token partition overlap'; kind = 'token'; successor = 100 }
+    [pscustomobject]@{ name = 'effective-date gap'; kind = 'date'; successor = '2026-08-25' }
+    [pscustomobject]@{ name = 'effective-date overlap'; kind = 'date'; successor = '2026-08-23' }
+)
+foreach ($invalidPolicyPartitionCase in $invalidPolicyPartitionCases) {
+    Invoke-Assertion ("policy rejects a pricing schedule with a {0}" -f $invalidPolicyPartitionCase.name) {
+        $snapshot = New-TestPolicyPricingSnapshot
+        $first = $snapshot.schedules[0].rate_periods[0]
+        $second = Copy-TestObject $first
+        if ($invalidPolicyPartitionCase.kind -ceq 'token') {
+            $first.input_tokens_max = 100
+            $second.input_tokens_min = $invalidPolicyPartitionCase.successor
+            $second.input_tokens_max = $null
+        } else {
+            $first.effective_through = '2026-08-23'
+            $second.effective_from = $invalidPolicyPartitionCase.successor
+            $second.effective_through = $null
+        }
+        $snapshot.schedules[0].rate_periods = @($first, $second)
+
+        Assert-PolicyPricingSnapshotRejected -PricingSnapshot $snapshot
+    }
+}
+
+Invoke-Assertion 'policy rejects duplicate applicable schedules before ranking' {
+    $snapshot = New-TestPolicyPricingSnapshot
+    $duplicate = Copy-TestObject $snapshot.schedules[0]
+    $duplicate.model = 'duplicate-google-schedule'
+    $snapshot.schedules = @($snapshot.schedules + $duplicate)
+
+    Assert-PolicyPricingSnapshotRejected -PricingSnapshot $snapshot
+}
+
+Invoke-Assertion 'policy rejects duplicate applicable pricing periods before ranking' {
+    $snapshot = New-TestPolicyPricingSnapshot
+    $duplicate = Copy-TestObject $snapshot.schedules[0].rate_periods[0]
+    $snapshot.schedules[0].rate_periods = @($snapshot.schedules[0].rate_periods[0], $duplicate)
+
+    Assert-PolicyPricingSnapshotRejected -PricingSnapshot $snapshot
+}
+
+Invoke-Assertion 'policy rejects profile rates that do not match the applicable snapshot period' {
+    $candidate = Copy-TestObject @(Get-MinimalProfiles)[0]
+    $candidate.pricing.input_usd_per_million_tokens = 99
+    $candidate.pricing.output_usd_per_million_tokens = 99
+
+    Assert-PolicyPricingSnapshotRejected -PricingSnapshot (New-TestPricingSnapshot) `
+        -Profiles @($candidate) -ExpectedReasonCode 'pricing_snapshot_mismatch'
 }
 
 Invoke-Assertion 'all failed candidates receive deterministic evaluations and no candidate is selected' {
@@ -4056,10 +4197,10 @@ Invoke-Assertion 'all failed candidates receive deterministic evaluations and no
 }
 
 Invoke-Assertion 'duplicate explicit runtime states fail conservatively without arbitrary matching' {
-    $profiles = @(Get-MinimalProfiles)
+    $profiles = @(Get-MinimalPolicyProfiles)
     $agyRuntime = New-MinimalRuntimeState
     $codexRuntime = [pscustomobject]@{
-        launcher = 'codex'; model = 'shared-model'; effort = 'medium'; available = $true
+        launcher = 'codex'; model = 'shared-model-openai'; effort = 'medium'; available = $true
         authenticated = $true; working = $true; quota_exhausted = $false
     }
     $decision = Invoke-TestRouterPolicy -Profiles $profiles -RuntimeStates @(
@@ -4067,7 +4208,7 @@ Invoke-Assertion 'duplicate explicit runtime states fail conservatively without 
         (Copy-TestObject $agyRuntime)
         $codexRuntime
     ) -PricingSnapshot (New-TestPolicyPricingSnapshot) `
-        -TokenEstimates (Get-TestTokenEstimates).observations
+        -TokenEstimates (Get-TestPolicyTokenEstimates -Profiles $profiles)
     $agyEvaluation = @($decision.candidate_evaluations | Where-Object { $_.launcher -ceq 'agy' })[0]
 
     Assert-Equal $agyEvaluation.rejection_stage 'requirements'
@@ -4107,9 +4248,10 @@ Invoke-Assertion 'stable identity is ascending ordinal launcher|configuration_id
     }
 
 Invoke-Assertion 'policy preserves exact composite identity' {
-        $decision = Invoke-TestRouterPolicy -Profiles (Get-MinimalProfiles) `
+        $profiles = @(Get-MinimalPolicyProfiles)
+        $decision = Invoke-TestRouterPolicy -Profiles $profiles `
             -PricingSnapshot (New-TestPolicyPricingSnapshot) `
-            -TokenEstimates (Get-TestTokenEstimates).observations
+            -TokenEstimates (Get-TestPolicyTokenEstimates -Profiles $profiles)
         $identities = @(
             $decision.candidate_evaluations |
                 ForEach-Object { Get-CompositeIdentity $_ }
@@ -4121,16 +4263,17 @@ Invoke-Assertion 'policy preserves exact composite identity' {
     }
 
 Invoke-Assertion 'policy selects exactly one candidate' {
-        $decision = Invoke-TestRouterPolicy -Profiles (Get-MinimalProfiles) `
+        $profiles = @(Get-MinimalPolicyProfiles)
+        $decision = Invoke-TestRouterPolicy -Profiles $profiles `
             -PricingSnapshot (New-TestPolicyPricingSnapshot) `
-            -TokenEstimates (Get-TestTokenEstimates).observations
+            -TokenEstimates (Get-TestPolicyTokenEstimates -Profiles $profiles)
 
         Assert-Equal (@($decision.selected_candidate).Count) 1
         Assert-Equal (Get-CompositeIdentity $decision.selected_candidate) 'agy|shared-model__medium'
     }
 
 Invoke-Assertion 'policy selection is invariant to forward and reverse tied input order' {
-        $forwardProfiles = @(Get-MinimalProfiles)
+        $forwardProfiles = @(Get-MinimalPolicyProfiles)
         $reverseProfiles = [object[]]$forwardProfiles.Clone()
         [array]::Reverse($reverseProfiles)
         Assert-SequenceEqual @($forwardProfiles | ForEach-Object { Get-CompositeIdentity $_ }) @(
@@ -4150,7 +4293,7 @@ Invoke-Assertion 'policy selection is invariant to forward and reverse tied inpu
                 1..25 | ForEach-Object {
                     $decision = Invoke-TestRouterPolicy -Profiles $inputOrder.profiles `
                         -PricingSnapshot (New-TestPolicyPricingSnapshot) `
-                        -TokenEstimates (Get-TestTokenEstimates).observations
+                        -TokenEstimates (Get-TestPolicyTokenEstimates -Profiles $inputOrder.profiles)
                     $selectedIdentity = Get-CompositeIdentity $decision.selected_candidate
                     if ($selectedIdentity -cne 'agy|shared-model__medium') {
                         throw "The $($inputOrder.name) tied input selected '$selectedIdentity'."

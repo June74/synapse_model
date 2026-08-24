@@ -1,3 +1,5 @@
+. (Join-Path $PSScriptRoot 'profiles.ps1')
+
 function Get-RouterPricingExactProperty {
     param(
         [AllowNull()][object]$Object,
@@ -110,10 +112,20 @@ function Get-RouterEstimatedPrice {
         return New-RouterUnavailablePrice -CandidateIdentity $candidateIdentity `
             -ReasonCode 'request_profile_group_invalid' -RequestProfileGroup $null
     }
-    if (-not $useInjectedPricingSnapshot -or $null -eq $PricingSnapshot -or
-        $PricingSnapshot.schedules -isnot [Collections.IList]) {
+    if (-not $useInjectedPricingSnapshot -or $null -eq $PricingSnapshot) {
         return New-RouterUnavailablePrice -CandidateIdentity $candidateIdentity `
             -ReasonCode 'pricing_snapshot_unavailable' -RequestProfileGroup $requestProfileGroup
+    }
+    $snapshotValidation = Test-RouterPricingSnapshotObject -PricingSnapshot $PricingSnapshot
+    if (-not $snapshotValidation.valid) {
+        return New-RouterUnavailablePrice -CandidateIdentity $candidateIdentity `
+            -ReasonCode 'pricing_snapshot_invalid' -RequestProfileGroup $requestProfileGroup
+    }
+    if (-not (Test-RouterProfilePricingSnapshotMatch -Profile $Candidate `
+        -PricingSnapshot $PricingSnapshot `
+        -PricingByProfileModel $snapshotValidation.pricing_by_profile_model)) {
+        return New-RouterUnavailablePrice -CandidateIdentity $candidateIdentity `
+            -ReasonCode 'pricing_snapshot_mismatch' -RequestProfileGroup $requestProfileGroup
     }
 
     $effectiveAsOfDate = $AsOfDate
@@ -189,25 +201,7 @@ function Get-RouterEstimatedPrice {
             -ReasonCode 'token_estimate_invalid' -RequestProfileGroup $requestProfileGroup
     }
 
-    $candidatePricing = Get-RouterPricingExactProperty -Object $Candidate -Name 'pricing'
-    if ($null -eq $candidatePricing -or
-        $Candidate.pricing_snapshot_date -cne $PricingSnapshot.snapshot_date -or
-        $candidatePricing.Value.currency -cne $PricingSnapshot.currency -or
-        $candidatePricing.Value.rate_unit -cne $PricingSnapshot.rate_unit) {
-        return New-RouterUnavailablePrice -CandidateIdentity $candidateIdentity `
-            -ReasonCode 'pricing_snapshot_mismatch' -RequestProfileGroup $requestProfileGroup
-    }
-    $matchingSchedules = @(
-        foreach ($schedule in @($PricingSnapshot.schedules)) {
-            if ($null -eq $schedule -or $schedule.provider -cne $Candidate.provider -or
-                $schedule.profile_models -isnot [Collections.IList]) {
-                continue
-            }
-            if (@($schedule.profile_models | Where-Object { $_ -ceq $Candidate.model }).Count -eq 1) {
-                $schedule
-            }
-        }
-    )
+    $matchingSchedules = @($snapshotValidation.pricing_by_profile_model[[string]$Candidate.model])
     if ($matchingSchedules.Count -ne 1 -or
         $matchingSchedules[0].cost_comparable -isnot [bool] -or
         -not $matchingSchedules[0].cost_comparable) {
