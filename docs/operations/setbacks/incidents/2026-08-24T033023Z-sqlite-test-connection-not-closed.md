@@ -52,3 +52,12 @@ The corrected `python -m unittest router.storage.test_sqlite_store` run complete
 ## Recurrence history
 
 - 2026-08-24T03:30:23.302123Z: First observed.
+
+## Recurrence: 2026-08-24, direct writer acceptance
+
+- **Symptom:** Same-process schema acceptance printed the correct database contents but exited with WinError 32 when deleting `acceptance.sqlite`.
+- **Confirmed cause:** Production `write_trace()` also used the SQLite transaction context manager without an explicit connection close. CLI tests masked the leak because each helper subprocess exits immediately.
+- **Impact:** The CLI contract remained functional, but direct library use retained a Windows file handle until garbage collection; acceptance could not pass.
+- **Correction:** Added a direct-writer regression test and made `write_trace()` close its owned connection in a `finally` block.
+- **Prevention:** Connection-owning functions must close their own SQLite handles even when transaction contexts are also used.
+- **Verification:** The regression test and full 15-test storage suite pass. Same-process schema acceptance exits 0 and deletes its temporary database cleanly.
