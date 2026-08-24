@@ -3698,7 +3698,33 @@ foreach ($geminiTierCase in $geminiTierCases) {
     }
 }
 
-Invoke-Assertion 'explicit zero rates are comparable and produce an exact zero price' {
+Invoke-Assertion 'omitting the pricing snapshot fails closed for a Gemini request above 200K input tokens' {
+    $candidate = Get-Content -LiteralPath (Join-Path $profilesRoot 'agy/gemini-3.1-pro-high__high.json') `
+        -Raw | ConvertFrom-Json -Depth 30
+    $observation = New-TestTokenObservation -Candidate $candidate
+    $estimate = Get-RouterEstimatedPrice -Candidate $candidate -Request (New-MinimalRequest) `
+        -Requirements (New-TestPriceRequirements -EstimatedInputTokens 200001) `
+        -TokenEstimates @($observation) -AsOfDate '2026-08-22'
+
+    Assert-Equal $estimate.available $false
+    Assert-Equal $estimate.reason_code 'pricing_snapshot_unavailable'
+    Assert-Equal $estimate.price $null
+}
+
+Invoke-Assertion 'omitting the pricing snapshot cannot accept a provider and profile pricing mismatch' {
+    $candidate = Copy-TestObject @(Get-MinimalProfiles)[0]
+    $candidate.provider = 'openai'
+    $observation = New-TestTokenObservation -Candidate $candidate
+    $estimate = Get-RouterEstimatedPrice -Candidate $candidate -Request (New-MinimalRequest) `
+        -Requirements (New-TestPriceRequirements) -TokenEstimates @($observation) `
+        -AsOfDate '2026-08-22'
+
+    Assert-Equal $estimate.available $false
+    Assert-Equal $estimate.reason_code 'pricing_snapshot_unavailable'
+    Assert-Equal $estimate.price $null
+}
+
+Invoke-Assertion 'a resulting zero price is unavailable because V1 has no free routes' {
     $candidate = Copy-TestObject @(Get-MinimalProfiles)[0]
     $snapshot = New-TestPricingSnapshot
     $snapshot.schedules[0].rate_periods[0].input_usd_per_million_tokens = 0
@@ -3707,8 +3733,10 @@ Invoke-Assertion 'explicit zero rates are comparable and produce an exact zero p
         -Requirements (New-TestPriceRequirements) -PricingSnapshot $snapshot `
         -TokenEstimates (Get-TestTokenEstimates).observations -AsOfDate '2026-08-22'
 
-    Assert-Equal $estimate.available $true
-    Assert-Equal $estimate.price ([decimal]0)
+    Assert-Equal $estimate.available $false
+    Assert-Equal $estimate.reason_code 'free_route_disallowed'
+    Assert-Equal $estimate.price $null
+    Assert-Equal $estimate.price_final $false
 }
 
 Invoke-Assertion 'an explicitly injected null pricing snapshot is unavailable instead of using profile rates' {
@@ -3718,6 +3746,7 @@ Invoke-Assertion 'an explicitly injected null pricing snapshot is unavailable in
         -TokenEstimates (Get-TestTokenEstimates).observations -AsOfDate '2026-08-22'
 
     Assert-Equal $estimate.available $false
+    Assert-Equal $estimate.reason_code 'pricing_snapshot_unavailable'
     Assert-Equal $estimate.price $null
     Assert-Equal $estimate.price_final $false
 }
@@ -3969,6 +3998,44 @@ Invoke-Assertion 'raw decimal price selects the winner even when response-bounda
         (ConvertTo-RouterResponsePrice $prices[1] -DecimalPlaces 4)
 }
 
+Invoke-Assertion 'a zero-price candidate is unavailable and cannot win policy selection' {
+    $profiles = @(Get-MinimalProfiles | ForEach-Object { Copy-TestObject $_ })
+    $snapshot = New-TestPolicyPricingSnapshot -AgyInputRate 0 -AgyOutputRate 0 `
+        -CodexInputRate 1 -CodexOutputRate 5
+    $decision = Invoke-TestRouterPolicy -Profiles $profiles -PricingSnapshot $snapshot `
+        -TokenEstimates (Get-TestTokenEstimates).observations
+    $agyEvaluation = @($decision.candidate_evaluations | Where-Object { $_.launcher -ceq 'agy' })[0]
+
+    Assert-Equal (Get-CompositeIdentity $decision.selected_candidate) 'codex|shared-model__medium'
+    Assert-Equal $agyEvaluation.rejection_stage 'price'
+    Assert-SequenceEqual @($agyEvaluation.rejection_reason_codes) @('free_route_disallowed')
+}
+
+Invoke-Assertion 'policy fails closed with no winner when the pricing snapshot is omitted' {
+    $decision = Invoke-TestRouterPolicy -Profiles (Get-MinimalProfiles) `
+        -TokenEstimates (Get-TestTokenEstimates).observations
+
+    Assert-Equal $decision.selected_candidate $null
+    Assert-Equal $decision.price $null
+    Assert-Equal @($decision.candidate_evaluations).Count 2
+    foreach ($evaluation in @($decision.candidate_evaluations)) {
+        Assert-Equal $evaluation.rejection_stage 'price'
+        Assert-SequenceEqual @($evaluation.rejection_reason_codes) @('pricing_snapshot_unavailable')
+    }
+}
+
+Invoke-Assertion 'policy fails closed with no winner when the pricing snapshot is explicitly null' {
+    $decision = Invoke-TestRouterPolicy -Profiles (Get-MinimalProfiles) -PricingSnapshot $null `
+        -TokenEstimates (Get-TestTokenEstimates).observations
+
+    Assert-Equal $decision.selected_candidate $null
+    Assert-Equal $decision.price $null
+    foreach ($evaluation in @($decision.candidate_evaluations)) {
+        Assert-Equal $evaluation.rejection_stage 'price'
+        Assert-SequenceEqual @($evaluation.rejection_reason_codes) @('pricing_snapshot_unavailable')
+    }
+}
+
 Invoke-Assertion 'all failed candidates receive deterministic evaluations and no candidate is selected' {
     $profiles = @(Get-MinimalProfiles | ForEach-Object { Copy-TestObject $_ })
     foreach ($profile in $profiles) {
@@ -3999,7 +4066,8 @@ Invoke-Assertion 'duplicate explicit runtime states fail conservatively without 
         $agyRuntime
         (Copy-TestObject $agyRuntime)
         $codexRuntime
-    )
+    ) -PricingSnapshot (New-TestPolicyPricingSnapshot) `
+        -TokenEstimates (Get-TestTokenEstimates).observations
     $agyEvaluation = @($decision.candidate_evaluations | Where-Object { $_.launcher -ceq 'agy' })[0]
 
     Assert-Equal $agyEvaluation.rejection_stage 'requirements'
@@ -4023,7 +4091,7 @@ Invoke-Assertion 'stable identity sorting is ordinal under a non-default culture
     try {
         [Globalization.CultureInfo]::CurrentCulture = [Globalization.CultureInfo]::GetCultureInfo('tr-TR')
         $decision = Invoke-TestRouterPolicy -Request $request -Profiles @($unicode, $ascii) `
-            -TokenEstimates $observations
+            -PricingSnapshot (New-TestPolicyPricingSnapshot) -TokenEstimates $observations
     } finally {
         [Globalization.CultureInfo]::CurrentCulture = $originalCulture
     }
@@ -4039,7 +4107,9 @@ Invoke-Assertion 'stable identity is ascending ordinal launcher|configuration_id
     }
 
 Invoke-Assertion 'policy preserves exact composite identity' {
-        $decision = Invoke-RouterPolicy -Request (New-MinimalRequest) -Profiles (Get-MinimalProfiles)
+        $decision = Invoke-TestRouterPolicy -Profiles (Get-MinimalProfiles) `
+            -PricingSnapshot (New-TestPolicyPricingSnapshot) `
+            -TokenEstimates (Get-TestTokenEstimates).observations
         $identities = @(
             $decision.candidate_evaluations |
                 ForEach-Object { Get-CompositeIdentity $_ }
@@ -4051,7 +4121,9 @@ Invoke-Assertion 'policy preserves exact composite identity' {
     }
 
 Invoke-Assertion 'policy selects exactly one candidate' {
-        $decision = Invoke-RouterPolicy -Request (New-MinimalRequest) -Profiles (Get-MinimalProfiles)
+        $decision = Invoke-TestRouterPolicy -Profiles (Get-MinimalProfiles) `
+            -PricingSnapshot (New-TestPolicyPricingSnapshot) `
+            -TokenEstimates (Get-TestTokenEstimates).observations
 
         Assert-Equal (@($decision.selected_candidate).Count) 1
         Assert-Equal (Get-CompositeIdentity $decision.selected_candidate) 'agy|shared-model__medium'
@@ -4076,7 +4148,9 @@ Invoke-Assertion 'policy selection is invariant to forward and reverse tied inpu
         $selectedIdentities = @(
             foreach ($inputOrder in $inputOrders) {
                 1..25 | ForEach-Object {
-                    $decision = Invoke-RouterPolicy -Request (New-MinimalRequest) -Profiles $inputOrder.profiles
+                    $decision = Invoke-TestRouterPolicy -Profiles $inputOrder.profiles `
+                        -PricingSnapshot (New-TestPolicyPricingSnapshot) `
+                        -TokenEstimates (Get-TestTokenEstimates).observations
                     $selectedIdentity = Get-CompositeIdentity $decision.selected_candidate
                     if ($selectedIdentity -cne 'agy|shared-model__medium') {
                         throw "The $($inputOrder.name) tied input selected '$selectedIdentity'."

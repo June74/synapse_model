@@ -110,14 +110,15 @@ function Get-RouterEstimatedPrice {
         return New-RouterUnavailablePrice -CandidateIdentity $candidateIdentity `
             -ReasonCode 'request_profile_group_invalid' -RequestProfileGroup $null
     }
+    if (-not $useInjectedPricingSnapshot -or $null -eq $PricingSnapshot -or
+        $PricingSnapshot.schedules -isnot [Collections.IList]) {
+        return New-RouterUnavailablePrice -CandidateIdentity $candidateIdentity `
+            -ReasonCode 'pricing_snapshot_unavailable' -RequestProfileGroup $requestProfileGroup
+    }
 
     $effectiveAsOfDate = $AsOfDate
     if ([string]::IsNullOrWhiteSpace($effectiveAsOfDate)) {
-        $effectiveAsOfDate = if ($null -ne $PricingSnapshot) {
-            [string]$PricingSnapshot.snapshot_date
-        } else {
-            [string]$Candidate.pricing_snapshot_date
-        }
+        $effectiveAsOfDate = [string]$PricingSnapshot.snapshot_date
     }
     $asOf = ConvertFrom-RouterPricingIsoDate -Value $effectiveAsOfDate
     if ($null -eq $asOf) {
@@ -188,49 +189,25 @@ function Get-RouterEstimatedPrice {
             -ReasonCode 'token_estimate_invalid' -RequestProfileGroup $requestProfileGroup
     }
 
-    $matchingSchedules = @()
-    if ($useInjectedPricingSnapshot) {
-        if ($null -eq $PricingSnapshot -or $PricingSnapshot.schedules -isnot [Collections.IList]) {
-            return New-RouterUnavailablePrice -CandidateIdentity $candidateIdentity `
-                -ReasonCode 'pricing_snapshot_unavailable' -RequestProfileGroup $requestProfileGroup
-        }
-        $candidatePricing = Get-RouterPricingExactProperty -Object $Candidate -Name 'pricing'
-        if ($null -eq $candidatePricing -or
-            $Candidate.pricing_snapshot_date -cne $PricingSnapshot.snapshot_date -or
-            $candidatePricing.Value.currency -cne $PricingSnapshot.currency -or
-            $candidatePricing.Value.rate_unit -cne $PricingSnapshot.rate_unit) {
-            return New-RouterUnavailablePrice -CandidateIdentity $candidateIdentity `
-                -ReasonCode 'pricing_snapshot_mismatch' -RequestProfileGroup $requestProfileGroup
-        }
-        $matchingSchedules = @(
-            foreach ($schedule in @($PricingSnapshot.schedules)) {
-                if ($null -eq $schedule -or $schedule.provider -cne $Candidate.provider -or
-                    $schedule.profile_models -isnot [Collections.IList]) {
-                    continue
-                }
-                if (@($schedule.profile_models | Where-Object { $_ -ceq $Candidate.model }).Count -eq 1) {
-                    $schedule
-                }
-            }
-        )
-    } else {
-        $pricing = Get-RouterPricingExactProperty -Object $Candidate -Name 'pricing'
-        if ($null -ne $pricing) {
-            $matchingSchedules = @([pscustomobject]@{
-                provider = $Candidate.provider
-                profile_models = @($Candidate.model)
-                cost_comparable = $pricing.Value.cost_comparable
-                rate_periods = @([pscustomobject]@{
-                    effective_from = $pricing.Value.effective_from
-                    effective_through = $pricing.Value.effective_through
-                    input_tokens_min = 0
-                    input_tokens_max = $null
-                    input_usd_per_million_tokens = $pricing.Value.input_usd_per_million_tokens
-                    output_usd_per_million_tokens = $pricing.Value.output_usd_per_million_tokens
-                })
-            })
-        }
+    $candidatePricing = Get-RouterPricingExactProperty -Object $Candidate -Name 'pricing'
+    if ($null -eq $candidatePricing -or
+        $Candidate.pricing_snapshot_date -cne $PricingSnapshot.snapshot_date -or
+        $candidatePricing.Value.currency -cne $PricingSnapshot.currency -or
+        $candidatePricing.Value.rate_unit -cne $PricingSnapshot.rate_unit) {
+        return New-RouterUnavailablePrice -CandidateIdentity $candidateIdentity `
+            -ReasonCode 'pricing_snapshot_mismatch' -RequestProfileGroup $requestProfileGroup
     }
+    $matchingSchedules = @(
+        foreach ($schedule in @($PricingSnapshot.schedules)) {
+            if ($null -eq $schedule -or $schedule.provider -cne $Candidate.provider -or
+                $schedule.profile_models -isnot [Collections.IList]) {
+                continue
+            }
+            if (@($schedule.profile_models | Where-Object { $_ -ceq $Candidate.model }).Count -eq 1) {
+                $schedule
+            }
+        }
+    )
     if ($matchingSchedules.Count -ne 1 -or
         $matchingSchedules[0].cost_comparable -isnot [bool] -or
         -not $matchingSchedules[0].cost_comparable) {
@@ -284,6 +261,10 @@ function Get-RouterEstimatedPrice {
     } catch {
         return New-RouterUnavailablePrice -CandidateIdentity $candidateIdentity `
             -ReasonCode 'price_calculation_unavailable' -RequestProfileGroup $requestProfileGroup
+    }
+    if ($price -le 0) {
+        return New-RouterUnavailablePrice -CandidateIdentity $candidateIdentity `
+            -ReasonCode 'free_route_disallowed' -RequestProfileGroup $requestProfileGroup
     }
 
     return [pscustomobject][ordered]@{
