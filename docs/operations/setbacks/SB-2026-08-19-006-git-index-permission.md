@@ -106,3 +106,13 @@
 - **Correction:** Retry only the bounded staging and commit operations through approved Git-metadata access.
 - **Prevention:** Continue treating this worktree's staging and commit operations as requiring approved Git-metadata access.
 - **Related verification:** Calibration, pilot runner, and router offline suites all exited 0 before the staging attempt; `git diff --check` also passed.
+
+## Recurrence: 2026-08-24, Task 9 final acceptance record
+
+- **Phase/task:** Deterministic router V1 Task 9, final acceptance setback documentation commit.
+- **Symptom:** Scoped staging and commit of the acceptance incident could not create `.git/worktrees/deterministic-router-v1/index.lock`; Git returned permission denied.
+- **Confirmed cause:** The worktree remains writable while its shared Git index metadata is outside the managed write boundary.
+- **Impact:** No file was staged and no commit was created. Product code and verified acceptance results are unchanged.
+- **Correction:** Retry only the bounded documentation staging and commit through approved Git-metadata access.
+- **Prevention:** Continue treating this worktree's staging and commit operations as requiring approved Git-metadata access.
+- **Related verification:** Corrected route-only acceptance exited 0 with 24 routes and zero provider calls; both temporary acceptance directories were removed.

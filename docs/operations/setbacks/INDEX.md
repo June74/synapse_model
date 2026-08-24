@@ -21,6 +21,7 @@
 | [SB-20260824-160012-task8-sqlite-inspection-column](incidents/2026-08-24T160012Z-task8-sqlite-inspection-column.md) | Acceptance query assumed token columns instead of price JSON | closed | 2026-08-24 | 2026-08-24 |
 | [SB-20260824-160247-task8-unsupported-trace-short-circuit](incidents/2026-08-24T160247Z-task8-unsupported-trace-short-circuit.md) | Unsupported boundary request bypassed trace persistence | closed | 2026-08-24 | 2026-08-24 |
 | [SB-20260824-181040-task8-prompt-boundary-regression](incidents/2026-08-24T181040Z-task8-prompt-boundary-regression.md) | Pilot prompt failure escaped the per-candidate boundary | closed | 2026-08-24 | 2026-08-24 |
+| [SB-20260824-232519-acceptance-artifact-shape](incidents/2026-08-24T232519Z-acceptance-artifact-shape.md) | closed | 2026-08-24T23:25:19.859408Z | Task 9 final integrated verification | Acceptance assertion expected response-only artifact fields |
 | SB-2026-08-19-001 | PowerShell DOCX paragraph extraction syntax error | closed | 2026-08-19 | 2026-08-19 |
 | SB-2026-08-19-002 | Current DOCX locked during full-document scan | closed | 2026-08-19 | 2026-08-19 |
 | SB-2026-08-19-003 | Skill path lookup mismatch | closed | 2026-08-19 | 2026-08-23 |
