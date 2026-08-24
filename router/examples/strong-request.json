@@ -1,0 +1,13 @@
+{
+  "request_text": "Explain how binary search narrows a sorted list, and identify the condition that ends the loop.",
+  "task_type": "coding",
+  "domain": "computer_science",
+  "complexity": "medium",
+  "quality_floor": "strong",
+  "latency": "normal",
+  "privacy_level": "standard",
+  "risk_level": "standard",
+  "output_length": "normal",
+  "language": "english",
+  "additional_capabilities": []
+}

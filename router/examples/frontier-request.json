@@ -1,0 +1,15 @@
+{
+  "request_text": "Design a deterministic test strategy for a bounded work queue, covering ordering, saturation, cancellation, and shutdown invariants.",
+  "task_type": "coding",
+  "domain": "computer_science",
+  "complexity": "high",
+  "quality_floor": "frontier",
+  "latency": "relaxed",
+  "privacy_level": "standard",
+  "risk_level": "standard",
+  "output_length": "detailed",
+  "language": "english",
+  "additional_capabilities": [
+    "structured_output"
+  ]
+}
