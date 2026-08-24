@@ -1289,6 +1289,25 @@ function ConvertTo-RunnerCredentialRedactedText {
     return $result
 }
 
+function Test-PilotTransportSuccess {
+    param([AllowNull()][object]$ProcessResult)
+
+    if ($null -eq $ProcessResult) { return $false }
+    $exitCodeProperty = $ProcessResult.PSObject.Properties |
+        Where-Object { $_.Name -ceq 'exit_code' } |
+        Select-Object -First 1
+    if ($null -eq $exitCodeProperty -or $null -eq $exitCodeProperty.Value -or
+        $exitCodeProperty.Value -ne 0) { return $false }
+    if ([bool]$ProcessResult.timed_out -or [bool]$ProcessResult.cleanup_failed) { return $false }
+    $processExitedProperty = $ProcessResult.PSObject.Properties |
+        Where-Object { $_.Name -ceq 'process_exited' } |
+        Select-Object -First 1
+    if ($null -ne $processExitedProperty -and
+        $processExitedProperty.Value -is [bool] -and
+        -not $processExitedProperty.Value) { return $false }
+    return $true
+}
+
 function New-ResultRecord {
     param(
         [Parameter(Mandatory)][object]$Candidate,
@@ -1301,10 +1320,7 @@ function New-ResultRecord {
         [AllowNull()][object]$CliReportedCostUsd
     )
 
-    $transportSuccess = $null -ne $ProcessResult -and
-        $ProcessResult.exit_code -eq 0 -and
-        (-not [bool]$ProcessResult.timed_out) -and
-        (-not [bool]$ProcessResult.cleanup_failed)
+    $transportSuccess = Test-PilotTransportSuccess -ProcessResult $ProcessResult
     $contractCompliant = $transportSuccess -and $null -ne $Canonical -and (Test-CanonicalResponse $Canonical).valid
     $safeDiagnosticCodes = @('completed', 'provider-declared failure', 'transport failure', 'parse failure', 'contract failure', 'execution failure')
     $safeNote = if ($safeDiagnosticCodes -contains $DiagnosticNote) { $DiagnosticNote } else { 'execution failure' }
@@ -1351,7 +1367,7 @@ function ConvertTo-PilotUsageMetadata {
     if ($null -eq $usageProperty -or $null -eq $usageProperty.Value) { return $null }
 
     $usage = $usageProperty.Value
-    $numericTypes = @([byte], [sbyte], [int16], [uint16], [int32], [uint32], [int64], [uint64], [decimal])
+    $integerTypes = @([byte], [sbyte], [int16], [uint16], [int32], [uint32], [int64], [uint64], [Numerics.BigInteger])
     $values = [ordered]@{}
     $allTokensValid = $true
     foreach ($name in @('actual_input_tokens', 'visible_output_tokens', 'reasoning_tokens')) {
@@ -1359,7 +1375,9 @@ function ConvertTo-PilotUsageMetadata {
             Where-Object { $_.Name -ceq $name } |
             Select-Object -First 1
         $valid = $null -ne $property -and $null -ne $property.Value -and
-            $property.Value.GetType() -in $numericTypes -and [decimal]$property.Value -ge 0
+            (($property.Value.GetType() -in $integerTypes) -or
+                ($property.Value -is [decimal] -and $property.Value -eq [decimal]::Truncate($property.Value))) -and
+            [decimal]$property.Value -ge 0
         $values[$name] = if ($valid) { [decimal]$property.Value } else { $null }
         if (-not $valid) { $allTokensValid = $false }
     }
@@ -1375,6 +1393,75 @@ function ConvertTo-PilotUsageMetadata {
         reasoning_tokens = $values.reasoning_tokens
         complete = [bool]$complete
     }
+}
+
+function New-PilotExtractedUsage {
+    param(
+        [AllowNull()][object]$InputTokens,
+        [AllowNull()][object]$VisibleOutputTokens,
+        [AllowNull()][object]$ReasoningTokens
+    )
+
+    $wrapper = [pscustomobject]@{
+        usage = [pscustomobject][ordered]@{
+            actual_input_tokens = $InputTokens
+            visible_output_tokens = $VisibleOutputTokens
+            reasoning_tokens = $ReasoningTokens
+            complete = $true
+        }
+    }
+    return ConvertTo-PilotUsageMetadata -ProcessResult $wrapper
+}
+
+function Get-PilotProviderUsage {
+    param(
+        [Parameter(Mandatory)][object]$Candidate,
+        [Parameter(Mandatory)][string]$Text
+    )
+
+    try {
+        switch ($Candidate.tool) {
+            'codex' {
+                $finalUsage = $null
+                foreach ($line in ($Text -split "`r?`n")) {
+                    if ([string]::IsNullOrWhiteSpace($line)) { continue }
+                    $event = $line | ConvertFrom-Json -Depth 30 -ErrorAction Stop
+                    if ($event.type -ceq 'turn.completed' -and
+                        $event.PSObject.Properties.Name -ccontains 'usage') {
+                        $finalUsage = $event.usage
+                    }
+                }
+                if ($null -eq $finalUsage) { return $null }
+                return New-PilotExtractedUsage -InputTokens $finalUsage.input_tokens `
+                    -VisibleOutputTokens $finalUsage.visible_output_tokens `
+                    -ReasoningTokens $finalUsage.reasoning_tokens
+            }
+            'claude' {
+                $envelope = $Text | ConvertFrom-Json -Depth 30 -ErrorAction Stop
+                if ($envelope.PSObject.Properties.Name -cnotcontains 'modelUsage' -or
+                    $null -eq $envelope.modelUsage) { return $null }
+                $modelProperty = $envelope.modelUsage.PSObject.Properties |
+                    Where-Object { $_.Name -ceq [string]$Candidate.model } |
+                    Select-Object -First 1
+                if ($null -eq $modelProperty -or $null -eq $modelProperty.Value) { return $null }
+                $usage = $modelProperty.Value
+                return New-PilotExtractedUsage -InputTokens $usage.inputTokens `
+                    -VisibleOutputTokens $usage.outputTokens -ReasoningTokens $usage.reasoningTokens
+            }
+            'agy' {
+                $objects = @(Get-AgyJsonObjects -Text $Text)
+                if ($objects.Count -ne 1 -or
+                    $objects[0].PSObject.Properties.Name -cnotcontains 'usageMetadata') { return $null }
+                $usage = $objects[0].usageMetadata
+                return New-PilotExtractedUsage -InputTokens $usage.promptTokenCount `
+                    -VisibleOutputTokens $usage.candidatesTokenCount `
+                    -ReasoningTokens $usage.thoughtsTokenCount
+            }
+        }
+    } catch {
+        return $null
+    }
+    return $null
 }
 
 function Invoke-PilotCandidate {
@@ -1414,7 +1501,7 @@ function Invoke-PilotCandidate {
             Invoke-NativeCandidate -Command $command -TimeoutSeconds $nativeTimeoutSeconds -PreserveRawOutput
         }
         $reportedCost = Get-PilotReportedCost -ProcessResult $processResult
-        if ($processResult.exit_code -ne 0) {
+        if (-not (Test-PilotTransportSuccess -ProcessResult $processResult)) {
             $note = 'transport failure'
             $failure = $note
         } else {
@@ -1461,6 +1548,15 @@ function Invoke-PilotCandidate {
         -CliReportedCostUsd $reportedCost
     if ($record.diagnostic_note -cne 'completed') { $failure = [string]$record.diagnostic_note }
 
+    $usage = ConvertTo-PilotUsageMetadata -ProcessResult $processResult
+    if ($null -eq $usage -and $null -ne $processResult -and
+        (Test-PilotTransportSuccess -ProcessResult $processResult)) {
+        $providerOutput = if ($processResult.PSObject.Properties.Name -contains 'raw_stdout') {
+            $processResult.raw_stdout
+        } else { $processResult.stdout }
+        $usage = Get-PilotProviderUsage -Candidate $Candidate -Text ([string]$providerOutput)
+    }
+
     return [pscustomobject][ordered]@{
         run_id = $RunId
         candidate = $Candidate
@@ -1469,7 +1565,7 @@ function Invoke-PilotCandidate {
         failure = $failure
         diagnostic_note = [string]$record.diagnostic_note
         latency_ms = if ($null -ne $safeProcess) { [int64]$safeProcess.duration_ms } else { [int64]0 }
-        usage = ConvertTo-PilotUsageMetadata -ProcessResult $processResult
+        usage = $usage
         cli_reported_cost_usd = ConvertTo-PilotSafeCost -Value $reportedCost
         record = $record
     }

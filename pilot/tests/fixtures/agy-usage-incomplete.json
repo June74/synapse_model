@@ -1,0 +1,12 @@
+{
+  "status": "SUCCESS",
+  "structured_output": {
+    "status": "success",
+    "answer": "4",
+    "error": null
+  },
+  "usageMetadata": {
+    "promptTokenCount": 160,
+    "candidatesTokenCount": 44
+  }
+}

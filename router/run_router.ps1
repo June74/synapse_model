@@ -1,5 +1,8 @@
 [CmdletBinding()]
-param([AllowNull()][string]$RequestFile)
+param(
+    [AllowNull()][string]$RequestFile,
+    [Alias('RequestSchemaPath')][AllowNull()][string]$CliRequestSchemaPath
+)
 
 $ErrorActionPreference = 'Stop'
 
@@ -14,14 +17,84 @@ function New-RouterInternalResult {
     param(
         [Parameter(Mandatory)][object]$Response,
         [AllowNull()][object]$Trace,
-        [AllowNull()][object]$StorageError
+        [AllowNull()][object]$StorageError,
+        [AllowNull()][object]$StartupError
     )
 
     return [pscustomobject][ordered]@{
         response = $Response
         trace = $Trace
         storage_error = $StorageError
+        startup_error = $StartupError
     }
+}
+
+function New-RouterStartupFailureResult {
+    return New-RouterInternalResult `
+        -Response (New-RouterFailureResponse -Status 'no_eligible_configuration' -ReasonCode 'all_routes_unavailable') `
+        -Trace $null -StorageError $null -StartupError ([pscustomobject][ordered]@{
+            code = 'router_startup_failed'
+            detail = 'resource_validation_failed'
+            message = 'Router resources are unavailable.'
+        })
+}
+
+function Test-RouterSchemaResource {
+    param([Parameter(Mandatory)][string]$SchemaPath)
+
+    $context = Get-RouterSchemaContext -SchemaPath $SchemaPath
+    if ($null -ne $context.error_code) { return $false }
+    try {
+        $schema = $context.schema_text | ConvertFrom-Json -Depth 100 -ErrorAction Stop
+        return $null -ne $schema -and
+            $schema.GetType() -eq [Management.Automation.PSCustomObject] -and
+            @(Get-RouterSchemaStructureErrors -Schema $schema).Count -eq 0
+    } catch {
+        return $false
+    }
+}
+
+function Test-RouterStartupCatalog {
+    param([AllowNull()][object]$Catalog)
+
+    if ($null -eq $Catalog -or
+        $Catalog.PSObject.Properties.Name -cnotcontains 'valid' -or
+        $Catalog.valid -isnot [bool] -or -not $Catalog.valid -or
+        $Catalog.PSObject.Properties.Name -cnotcontains 'profiles' -or
+        $Catalog.profiles -isnot [Collections.IList] -or
+        $Catalog.PSObject.Properties.Name -cnotcontains 'errors' -or
+        $Catalog.errors -isnot [Collections.IList]) { return $false }
+    foreach ($profile in @($Catalog.profiles)) {
+        if ($null -eq $profile) { return $false }
+    }
+    return $true
+}
+
+function Test-RouterStartupResources {
+    param(
+        [AllowNull()][object]$Catalog,
+        [AllowNull()][object]$Matrix,
+        [AllowNull()][object]$PricingSnapshot,
+        [AllowNull()][object]$QualitySnapshot,
+        [AllowNull()][object]$TokenEstimates,
+        [Parameter(Mandatory)][string]$RequestSchemaPath,
+        [Parameter(Mandatory)][string]$ProfileSchemaPath,
+        [Parameter(Mandatory)][string]$ResponseSchemaPath
+    )
+
+    if (-not (Test-RouterSchemaResource $RequestSchemaPath) -or
+        -not (Test-RouterSchemaResource $ProfileSchemaPath) -or
+        -not (Test-RouterSchemaResource $ResponseSchemaPath) -or
+        -not (Test-RouterStartupCatalog $Catalog) -or
+        $null -eq $Matrix -or
+        $Matrix.PSObject.Properties.Name -cnotcontains 'candidates' -or
+        $Matrix.candidates -isnot [Collections.IList]) { return $false }
+    $pricingValidation = Test-RouterPricingSnapshotObject -PricingSnapshot $PricingSnapshot
+    if (-not $pricingValidation.valid) { return $false }
+    if ($null -eq $QualitySnapshot -or
+        $QualitySnapshot.PSObject.Properties.Name -cnotcontains 'snapshot_date' -or
+        $null -eq (ConvertFrom-RouterCatalogIsoDate $QualitySnapshot.snapshot_date)) { return $false }
+    return (Test-RouterTokenEstimatesDocument -TokenEstimates $TokenEstimates).valid
 }
 
 function Test-RouterBoundaryOnlyValidationFailure {
@@ -281,6 +354,7 @@ function Invoke-RouterRun {
         [string]$MatrixPath = (Join-Path $script:RouterProjectRoot 'pilot/model_matrix.json'),
         [string]$ProfileSchemaPath = (Join-Path $PSScriptRoot 'schemas/model-profile.schema.json'),
         [string]$RequestSchemaPath = (Join-Path $PSScriptRoot 'schemas/request-profile.schema.json'),
+        [string]$ResponseSchemaPath = (Join-Path $PSScriptRoot 'schemas/router-response.schema.json'),
         [string]$PricingSnapshotPath = (Join-Path $PSScriptRoot 'data/pricing-snapshot-2026-08-22.json'),
         [string]$QualitySnapshotPath = (Join-Path $PSScriptRoot 'data/quality-snapshot-2026-08-22.json'),
         [string]$DatabasePath = (Join-Path $script:RouterProjectRoot 'data/router.sqlite'),
@@ -304,6 +378,38 @@ function Invoke-RouterRun {
         }
     }
 
+    try {
+        if (-not $PSBoundParameters.ContainsKey('Matrix')) {
+            $Matrix = Get-Content -Raw -LiteralPath $MatrixPath -ErrorAction Stop |
+                ConvertFrom-Json -Depth 100 -ErrorAction Stop
+        }
+        if (-not $PSBoundParameters.ContainsKey('PricingSnapshot')) {
+            $PricingSnapshot = Get-Content -Raw -LiteralPath $PricingSnapshotPath -ErrorAction Stop |
+                ConvertFrom-Json -Depth 100 -ErrorAction Stop
+        }
+        if (-not $PSBoundParameters.ContainsKey('QualitySnapshot')) {
+            $QualitySnapshot = Get-Content -Raw -LiteralPath $QualitySnapshotPath -ErrorAction Stop |
+                ConvertFrom-Json -Depth 100 -ErrorAction Stop
+        }
+        if (-not $PSBoundParameters.ContainsKey('Catalog')) {
+            $Catalog = Import-RouterProfileCatalog -ProfilesRoot $ProfilesRoot -MatrixPath $MatrixPath `
+                -ProfileSchemaPath $ProfileSchemaPath -PricingSnapshotPath $PricingSnapshotPath `
+                -QualitySnapshotPath $QualitySnapshotPath
+        }
+        [object[]]$profiles = @($Catalog.profiles)
+        if (-not $PSBoundParameters.ContainsKey('TokenEstimates')) {
+            $TokenEstimates = New-RouterTokenEstimateDocument -Profiles $profiles
+        }
+    } catch {
+        return New-RouterStartupFailureResult
+    }
+    if (-not (Test-RouterStartupResources -Catalog $Catalog -Matrix $Matrix `
+        -PricingSnapshot $PricingSnapshot -QualitySnapshot $QualitySnapshot `
+        -TokenEstimates $TokenEstimates -RequestSchemaPath $RequestSchemaPath `
+        -ProfileSchemaPath $ProfileSchemaPath -ResponseSchemaPath $ResponseSchemaPath)) {
+        return New-RouterStartupFailureResult
+    }
+
     $requestValidation = Test-RouterSchema -Value $Request -SchemaPath $RequestSchemaPath
     $boundaryOnlyFailure = -not $requestValidation.valid -and
         (Test-RouterBoundaryOnlyValidationFailure -ValidationErrors @($requestValidation.errors))
@@ -313,29 +419,10 @@ function Invoke-RouterRun {
             -Trace $null -StorageError $null
     }
     $normalizedRequest = ConvertTo-RouterNormalizedRequest -Request $Request
-
-    if (-not $PSBoundParameters.ContainsKey('Matrix')) {
-        $Matrix = Get-Content -Raw -LiteralPath $MatrixPath | ConvertFrom-Json -Depth 100
-    }
-    if (-not $PSBoundParameters.ContainsKey('PricingSnapshot')) {
-        $PricingSnapshot = Get-Content -Raw -LiteralPath $PricingSnapshotPath | ConvertFrom-Json -Depth 100
-    }
-    if (-not $PSBoundParameters.ContainsKey('QualitySnapshot')) {
-        $QualitySnapshot = Get-Content -Raw -LiteralPath $QualitySnapshotPath | ConvertFrom-Json -Depth 100
-    }
-    if (-not $PSBoundParameters.ContainsKey('Catalog')) {
-        $Catalog = Import-RouterProfileCatalog -ProfilesRoot $ProfilesRoot -MatrixPath $MatrixPath `
-            -ProfileSchemaPath $ProfileSchemaPath -PricingSnapshotPath $PricingSnapshotPath `
-            -QualitySnapshotPath $QualitySnapshotPath
-    }
-    $profiles = if ($null -ne $Catalog -and $Catalog.valid) { @($Catalog.profiles) } else { @() }
-    if (-not $PSBoundParameters.ContainsKey('TokenEstimates')) {
-        $TokenEstimates = New-RouterTokenEstimateDocument -Profiles $profiles
-    }
     if ([string]::IsNullOrWhiteSpace($AsOfDate)) { $AsOfDate = [string]$PricingSnapshot.snapshot_date }
 
     $policyParameters = @{
-        Request = $normalizedRequest
+        Request = if ($boundaryOnlyFailure) { $Request } else { $normalizedRequest }
         Profiles = $profiles
         RequestSchemaPath = $RequestSchemaPath
         ProjectInstructions = $ProjectInstructions
@@ -424,7 +511,10 @@ function Invoke-RouterRun {
 }
 
 function Invoke-RouterCli {
-    param([AllowNull()][string]$InputFile)
+    param(
+        [AllowNull()][string]$InputFile,
+        [AllowNull()][hashtable]$RunParameters
+    )
 
     $stdinJson = if ([Console]::IsInputRedirected) { [Console]::In.ReadToEnd() } else { '' }
     $hasFile = -not [string]::IsNullOrWhiteSpace($InputFile)
@@ -445,10 +535,32 @@ function Invoke-RouterCli {
     } else {
         $requestJson = $stdinJson
     }
-    return Invoke-RouterRun -RequestJson $requestJson
+    $parameters = if ($null -eq $RunParameters) { @{} } else { @{} + $RunParameters }
+    $parameters.RequestJson = $requestJson
+    return Invoke-RouterRun @parameters
+}
+
+function Get-RouterCliExitCode {
+    param([Parameter(Mandatory)][object]$InternalResult)
+
+    if ($null -ne $InternalResult.startup_error) { return 5 }
+    if ($null -ne $InternalResult.storage_error) { return 4 }
+    switch ([string]$InternalResult.response.status) {
+        'completed' { return 0 }
+        'execution_failed' { return 3 }
+        'invalid_request' { return 2 }
+        'unsupported_request' { return 2 }
+        'no_eligible_configuration' { return 2 }
+        default { return 5 }
+    }
 }
 
 if ($MyInvocation.InvocationName -cne '.') {
-    $cliResult = Invoke-RouterCli -InputFile $RequestFile
+    $runParameters = @{}
+    if ($PSBoundParameters.ContainsKey('CliRequestSchemaPath')) {
+        $runParameters.RequestSchemaPath = $CliRequestSchemaPath
+    }
+    $cliResult = Invoke-RouterCli -InputFile $RequestFile -RunParameters $runParameters
     [Console]::Out.WriteLine(($cliResult.response | ConvertTo-Json -Depth 100 -Compress))
+    exit (Get-RouterCliExitCode -InternalResult $cliResult)
 }

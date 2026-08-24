@@ -5353,25 +5353,163 @@ Invoke-Assertion 'CLI accepts request-file and stdin JSON and emits exactly one 
         Set-Content -LiteralPath $requestPath -Value $requestJson -Encoding utf8NoBOM
 
         $fileOutput = @(& pwsh -NoProfile -File $routerRunPath -RequestFile $requestPath)
-        Assert-Equal $LASTEXITCODE 0
+        Assert-Equal $LASTEXITCODE 2
         Assert-Equal $fileOutput.Count 1
         $fileResponse = $fileOutput[0] | ConvertFrom-Json -Depth 20
         Assert-Equal $fileResponse.status 'invalid_request'
         Assert-Equal $fileResponse.decision_trace_id $null
 
         $stdinOutput = @($requestJson | & pwsh -NoProfile -File $routerRunPath)
-        Assert-Equal $LASTEXITCODE 0
+        Assert-Equal $LASTEXITCODE 2
         Assert-Equal $stdinOutput.Count 1
         $stdinResponse = $stdinOutput[0] | ConvertFrom-Json -Depth 20
         Assert-Equal $stdinResponse.status 'invalid_request'
         Assert-Equal $stdinResponse.decision_trace_id $null
 
         $bothOutput = @($requestJson | & pwsh -NoProfile -File $routerRunPath -RequestFile $requestPath)
-        Assert-Equal $LASTEXITCODE 0
+        Assert-Equal $LASTEXITCODE 2
         Assert-Equal $bothOutput.Count 1
         $bothResponse = $bothOutput[0] | ConvertFrom-Json -Depth 20
         Assert-Equal $bothResponse.status 'invalid_request'
         Assert-Equal $bothResponse.reason_code 'request_validation_failed'
+    } finally {
+        if (Test-Path -LiteralPath $tempRoot) { [IO.Directory]::Delete($tempRoot, $true) }
+    }
+}
+
+Invoke-Assertion 'eligible catalogs preserve unsupported modality boundaries before normalization' {
+    foreach ($boundaryCase in @(
+        [pscustomobject]@{ name = 'modality'; add = { param($request) Add-Member -InputObject $request -NotePropertyName modality -NotePropertyValue 'image' } }
+        [pscustomobject]@{ name = 'input modalities'; add = { param($request) Add-Member -InputObject $request -NotePropertyName input_modalities -NotePropertyValue @('text', 'image') } }
+    )) {
+        $script:task8ModalityExecutions = 0
+        $script:task8ModalityStores = 0
+        $script:task8ModalityTrace = $null
+        $request = New-MinimalRequest
+        & $boundaryCase.add $request
+        $parameters = New-Task8RouterParameters -Request $request -Executor {
+            $script:task8ModalityExecutions++
+            throw 'unsupported modality must not execute'
+        } -StorageInvoker {
+            param($Trace)
+            $script:task8ModalityStores++
+            $script:task8ModalityTrace = $Trace
+            [pscustomobject]@{ ok = $true; trace_id = $Trace.trace_id; candidate_evaluations_inserted = @($Trace.candidate_evaluations).Count }
+        }
+        $result = Invoke-RouterRun @parameters
+        Assert-Equal $script:task8ModalityExecutions 0
+        Assert-Equal $script:task8ModalityStores 1
+        Assert-Equal $result.response.status 'unsupported_request'
+        Assert-Equal $result.response.reason_code 'unsupported_modality'
+        Assert-Equal $result.response.decision_trace_id 'task8-trace-0001'
+        Assert-Equal $script:task8ModalityTrace.output_status 'unsupported_request'
+        Assert-Equal $script:task8ModalityTrace.reason_code 'unsupported_modality'
+        Assert-Equal ($script:task8ModalityTrace.request_profile.PSObject.Properties.Name -contains 'modality') $false
+        Assert-Equal ($script:task8ModalityTrace.request_profile.PSObject.Properties.Name -contains 'input_modalities') $false
+    }
+}
+
+Invoke-Assertion 'router treats every failed selected transport state as one execution failure without fallback' {
+    $nativeMatrix = Get-Content -Raw -LiteralPath $matrixPath | ConvertFrom-Json
+    $nativeCandidate = @($nativeMatrix.candidates | Where-Object { $_.tool -ceq 'codex' } | Select-Object -First 1)[0]
+    $validOutput = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'pilot/tests/fixtures/codex-success.jsonl')
+    foreach ($transportCase in @(
+        [pscustomobject]@{ exit_code = 0; timed_out = $false; cleanup_failed = $true; process_exited = $true }
+        [pscustomobject]@{ exit_code = 0; timed_out = $true; cleanup_failed = $false; process_exited = $true }
+        [pscustomobject]@{ exit_code = 0; timed_out = $false; cleanup_failed = $false; process_exited = $false }
+        [pscustomobject]@{ exit_code = $null; timed_out = $false; cleanup_failed = $false; process_exited = $true }
+    )) {
+        $script:task8TransportExecutions = 0
+        $executor = {
+            param($Candidate, $Prompt, $RunId)
+            $script:task8TransportExecutions++
+            $nativeTransport = [pscustomobject]@{
+                exit_code = $transportCase.exit_code; stdout = $validOutput; stderr = ''; duration_ms = 12
+                timed_out = $transportCase.timed_out; cleanup_failed = $transportCase.cleanup_failed
+                cleanup_status = 'test'; process_exited = $transportCase.process_exited
+            }
+            Invoke-PilotCandidate -Candidate $nativeCandidate -Prompt $Prompt -RunId $RunId `
+                -NativeInvoker { $nativeTransport }
+        }
+        $storage = { param($Trace) [pscustomobject]@{ ok = $true; trace_id = $Trace.trace_id; candidate_evaluations_inserted = @($Trace.candidate_evaluations).Count } }
+        $parameters = New-Task8RouterParameters -Executor $executor -StorageInvoker $storage
+        $result = Invoke-RouterRun @parameters
+        Assert-Equal $script:task8TransportExecutions 1
+        Assert-Equal $result.response.status 'execution_failed'
+        Assert-Equal $result.response.reason_code 'launcher_execution_failed'
+    }
+}
+
+Invoke-Assertion 'invalid startup catalog snapshot matrix and schema fail safely before execution or storage' {
+    $script:task8StartupExecutions = 0
+    $script:task8StartupStores = 0
+    $base = New-Task8RouterParameters -Executor { $script:task8StartupExecutions++; throw 'must not execute' } `
+        -StorageInvoker { $script:task8StartupStores++; throw 'must not store' }
+    $cases = @(
+        [pscustomobject]@{ name = 'catalog'; mutate = { param($p) $p.Catalog = [pscustomobject]@{ valid = $false; profiles = @(); errors = @() } } }
+        [pscustomobject]@{ name = 'matrix'; mutate = { param($p) $p.Matrix = [pscustomobject]@{ candidates = 'invalid' } } }
+        [pscustomobject]@{ name = 'pricing snapshot'; mutate = { param($p) $p.PricingSnapshot = [pscustomobject]@{ snapshot_date = 'invalid' } } }
+        [pscustomobject]@{ name = 'request schema'; mutate = { param($p) $p.RequestSchemaPath = (Join-Path ([IO.Path]::GetTempPath()) 'missing-router-request-schema.json') } }
+    )
+    foreach ($case in $cases) {
+        $parameters = @{} + $base
+        & $case.mutate $parameters
+        $result = Invoke-RouterRun @parameters
+        Assert-Equal $result.response.status 'no_eligible_configuration'
+        Assert-Equal $result.response.reason_code 'all_routes_unavailable'
+        Assert-Equal $result.response.decision_trace_id $null
+        Assert-Equal ($null -ne $result.startup_error) $true
+        $serialized = $result | ConvertTo-Json -Depth 50 -Compress
+        Assert-Equal $serialized.Contains('missing-router-request-schema') $false
+        Assert-ValidationSuccess (Test-RouterSchema -Value $result.response -SchemaPath $responseSchemaPath)
+    }
+    Assert-Equal $script:task8StartupExecutions 0
+    Assert-Equal $script:task8StartupStores 0
+}
+
+Invoke-Assertion 'CLI exit mapping covers every routing storage and startup result class' {
+    $results = @(
+        [pscustomobject]@{ expected = 0; result = [pscustomobject]@{ response = [pscustomobject]@{ status = 'completed' }; storage_error = $null; startup_error = $null } }
+        [pscustomobject]@{ expected = 2; result = [pscustomobject]@{ response = [pscustomobject]@{ status = 'invalid_request' }; storage_error = $null; startup_error = $null } }
+        [pscustomobject]@{ expected = 2; result = [pscustomobject]@{ response = [pscustomobject]@{ status = 'unsupported_request' }; storage_error = $null; startup_error = $null } }
+        [pscustomobject]@{ expected = 2; result = [pscustomobject]@{ response = [pscustomobject]@{ status = 'no_eligible_configuration' }; storage_error = $null; startup_error = $null } }
+        [pscustomobject]@{ expected = 3; result = [pscustomobject]@{ response = [pscustomobject]@{ status = 'execution_failed' }; storage_error = $null; startup_error = $null } }
+        [pscustomobject]@{ expected = 4; result = [pscustomobject]@{ response = [pscustomobject]@{ status = 'completed' }; storage_error = [pscustomobject]@{ code = 'test' }; startup_error = $null } }
+        [pscustomobject]@{ expected = 5; result = [pscustomobject]@{ response = [pscustomobject]@{ status = 'no_eligible_configuration' }; storage_error = $null; startup_error = [pscustomobject]@{ code = 'test' } } }
+    )
+    foreach ($case in $results) {
+        Assert-Equal (Get-RouterCliExitCode -InternalResult $case.result) $case.expected
+    }
+}
+
+Invoke-Assertion 'CLI file and stdin startup failures emit one safe response on stdout and nothing on stderr' {
+    $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('router-cli-startup-' + [guid]::NewGuid().ToString('N'))
+    try {
+        $null = New-Item -ItemType Directory -Path $tempRoot
+        $requestJson = New-MinimalRequest | ConvertTo-Json -Depth 20 -Compress
+        $requestPath = Join-Path $tempRoot 'request.json'
+        $missingSchema = Join-Path $tempRoot 'private-missing-schema.json'
+        Set-Content -LiteralPath $requestPath -Value $requestJson -Encoding utf8NoBOM
+        foreach ($source in @('file', 'stdin')) {
+            $stdoutPath = Join-Path $tempRoot ($source + '-stdout.txt')
+            $stderrPath = Join-Path $tempRoot ($source + '-stderr.txt')
+            if ($source -ceq 'file') {
+                & pwsh -NoProfile -File $routerRunPath -RequestFile $requestPath `
+                    -RequestSchemaPath $missingSchema 1> $stdoutPath 2> $stderrPath
+            } else {
+                $requestJson | & pwsh -NoProfile -File $routerRunPath `
+                    -RequestSchemaPath $missingSchema 1> $stdoutPath 2> $stderrPath
+            }
+            Assert-Equal $LASTEXITCODE 5
+            $stdout = @(Get-Content -LiteralPath $stdoutPath)
+            Assert-Equal $stdout.Count 1
+            $response = $stdout[0] | ConvertFrom-Json -Depth 20
+            Assert-Equal $response.status 'no_eligible_configuration'
+            Assert-Equal $response.reason_code 'all_routes_unavailable'
+            Assert-Equal $response.decision_trace_id $null
+            Assert-Equal (Get-Item -LiteralPath $stderrPath).Length 0
+            Assert-Equal ((Get-Content -Raw -LiteralPath $stdoutPath).Contains('private-missing-schema')) $false
+        }
     } finally {
         if (Test-Path -LiteralPath $tempRoot) { [IO.Directory]::Delete($tempRoot, $true) }
     }

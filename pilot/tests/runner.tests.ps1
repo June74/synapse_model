@@ -1624,6 +1624,83 @@ Invoke-Assertion 'Invoke-PilotCandidate preserves provider-declared and parse fa
     Assert-True (-not $serialized.Contains('sensitive raw stderr'))
 }
 
+Invoke-Assertion 'Invoke-PilotCandidate rejects every unsuccessful transport state before parsing' {
+    $matrix = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'pilot/model_matrix.json') | ConvertFrom-Json
+    $candidate = @($matrix.candidates | Where-Object { $_.tool -eq 'codex' } | Select-Object -First 1)[0]
+    $validOutput = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'pilot/tests/fixtures/codex-success.jsonl')
+    $cases = @(
+        [pscustomobject]@{ name = 'cleanup failed'; exit_code = 0; timed_out = $false; cleanup_failed = $true; process_exited = $true }
+        [pscustomobject]@{ name = 'timed out'; exit_code = 0; timed_out = $true; cleanup_failed = $false; process_exited = $true }
+        [pscustomobject]@{ name = 'process not exited'; exit_code = 0; timed_out = $false; cleanup_failed = $false; process_exited = $false }
+        [pscustomobject]@{ name = 'null exit code'; exit_code = $null; timed_out = $false; cleanup_failed = $false; process_exited = $true }
+    )
+    foreach ($case in $cases) {
+        $nativeTransportResult = [pscustomobject]@{
+            exit_code = $case.exit_code
+            stdout = $validOutput
+            stderr = ''
+            duration_ms = 9
+            timed_out = $case.timed_out
+            cleanup_failed = $case.cleanup_failed
+            cleanup_status = if ($case.cleanup_failed) { 'timeout_cleanup_failed' } else { 'not_required' }
+            process_exited = $case.process_exited
+        }
+        $execution = Invoke-PilotCandidate -Candidate $candidate -Prompt ('transport case ' + $case.name) `
+            -NativeInvoker { $nativeTransportResult }
+        Assert-Equal $execution.failure 'transport failure'
+        Assert-Equal $execution.diagnostic_note 'transport failure'
+        Assert-Equal $execution.canonical $null
+        Assert-True (-not $execution.record.transport_success)
+        Assert-True (-not $execution.record.contract_compliant)
+    }
+}
+
+$usageCases = @(
+    [pscustomobject]@{
+        tool = 'codex'; model = $null; complete = 'codex-usage-complete.jsonl'; incomplete = 'codex-usage-incomplete.jsonl'
+        input = 120; visible = 34; reasoning = 11
+    }
+    [pscustomobject]@{
+        tool = 'claude'; model = 'claude-sonnet-5'; complete = 'claude-usage-complete.json'; incomplete = 'claude-usage-incomplete.json'
+        input = 140; visible = 40; reasoning = 12
+    }
+    [pscustomobject]@{
+        tool = 'agy'; model = $null; complete = 'agy-usage-complete.json'; incomplete = 'agy-usage-incomplete.json'
+        input = 160; visible = 44; reasoning = 13
+    }
+)
+foreach ($usageCase in $usageCases) {
+    Invoke-Assertion ("Invoke-PilotCandidate extracts trustworthy final {0} usage without changing canonical parsing" -f $usageCase.tool) {
+        $matrix = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'pilot/model_matrix.json') | ConvertFrom-Json
+        $candidate = @($matrix.candidates | Where-Object {
+            $_.tool -ceq $usageCase.tool -and
+            ($null -eq $usageCase.model -or $_.model -ceq $usageCase.model)
+        } | Select-Object -First 1)[0]
+        $completeText = Get-Content -Raw -LiteralPath (Join-Path $projectRoot ('pilot/tests/fixtures/' + $usageCase.complete))
+        $complete = Invoke-PilotCandidate -Candidate $candidate -Prompt ('complete ' + $usageCase.tool) -NativeInvoker {
+            [pscustomobject]@{
+                exit_code = 0; stdout = $completeText; stderr = ''; duration_ms = 10
+                timed_out = $false; cleanup_failed = $false; cleanup_status = 'not_required'; process_exited = $true
+            }
+        }
+        Assert-Equal $complete.canonical.answer '4'
+        Assert-True $complete.usage.complete
+        Assert-Equal $complete.usage.actual_input_tokens $usageCase.input
+        Assert-Equal $complete.usage.visible_output_tokens $usageCase.visible
+        Assert-Equal $complete.usage.reasoning_tokens $usageCase.reasoning
+
+        $incompleteText = Get-Content -Raw -LiteralPath (Join-Path $projectRoot ('pilot/tests/fixtures/' + $usageCase.incomplete))
+        $incomplete = Invoke-PilotCandidate -Candidate $candidate -Prompt ('incomplete ' + $usageCase.tool) -NativeInvoker {
+            [pscustomobject]@{
+                exit_code = 0; stdout = $incompleteText; stderr = ''; duration_ms = 11
+                timed_out = $false; cleanup_failed = $false; cleanup_status = 'not_required'; process_exited = $true
+            }
+        }
+        Assert-Equal $incomplete.canonical.answer '4'
+        Assert-True (-not $incomplete.usage.complete)
+    }
+}
+
 if ($failures.Count -gt 0) {
     $failures | ForEach-Object { Write-Error $_ -ErrorAction Continue }
     exit 1
