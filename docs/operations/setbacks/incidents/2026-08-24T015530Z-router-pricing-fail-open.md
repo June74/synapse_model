@@ -2,7 +2,7 @@
 
 - **Status:** closed
 - **First observed:** 2026-08-24T01:55:30Z
-- **Last observed:** 2026-08-24T02:38:57Z
+- **Last observed:** 2026-08-24T03:08:33Z
 - **Phase/task:** Deterministic router V1 Task 6 specification-review fix
 - **Environment:** Windows PowerShell 7 in the deterministic-router-v1 worktree
 - **Version/commit:** 50f1813229b354c18ae5a152f99d61fccced5517
@@ -20,6 +20,7 @@ A Gemini 3.1 request above 200,000 input tokens could use the lower profile rate
 - **Confirmed cause:** `Get-RouterEstimatedPrice` implemented a profile-rate fallback when `PricingSnapshot` was omitted and did not reject a calculated price less than or equal to zero.
 - **Recurrence cause:** Runtime pricing checked only for a schedule list and independently reimplemented partial schedule/profile matching instead of calling the catalog's complete validation rules.
 - **Adversarial recurrence cause:** The shared validator incremented a maximum token bound while checking contiguity and keyed duplicate schedules only by profile-model aliases, leaving decimal overflow and disjoint-alias provider/model duplicates fail-open.
+- **Code-quality recurrence cause:** Native floating-point values lost sign/nonzero identity during decimal conversion, runtime pricing accepted bare observation arrays instead of the checked-in versioned document, and snapshot validation omitted exact top-level/period allowlists plus fixed currency/rate-unit values.
 - **Contributing test gap:** Selection tests preserved the old two-argument policy call, and the zero-rate test asserted the opposite of the V1 no-free-route invariant.
 - **Known exclusions:** Requirements and quality ordering, dated/tiered snapshot matching when explicitly injected, provider execution, calibration, Task 7 storage, pushes, PRs, and merges are not involved.
 
@@ -28,9 +29,11 @@ A Gemini 3.1 request above 200,000 input tokens could use the lower profile rate
 - **Correction:** Added failing regressions for omitted/null snapshots, Gemini tier exposure, provider mismatch, and zero-price selection; removed the fallback and rejected non-positive calculated prices.
 - **Recurrence correction:** Extracted pure object-level snapshot and profile-pricing validators from catalog import, reused them in both catalog and runtime pricing, and required global snapshot validity before any candidate can calculate price.
 - **Adversarial recurrence correction:** Required decimal-representable numeric values, replaced increment-based token contiguity with an overflow-safe difference check that rejects a non-final decimal `MaxValue`, and added an ordinal provider/canonical-model schedule identity set without removing profile-alias duplicate checks.
+- **Code-quality recurrence correction:** Centralized exact decimal conversion, required the complete `router-token-estimates/v1` document and exact records before matching, removed candidate-observation runtime fallback, and enforced the production snapshot's exact structural/value contract.
 - **Prevention:** Every policy test that expects a winner must inject an explicit valid pricing snapshot, and pricing regressions must include missing-snapshot and non-positive-price fail-closed cases.
 - **Recurrence prevention:** Policy tests now cover incomplete metadata, malformed schedules, token/date gaps and overlaps, duplicate mappings/periods, and exact profile-rate mismatch using provider-distinct model mappings.
 - **Adversarial recurrence prevention:** Direct-validator and policy tests now cover both a non-final decimal `MaxValue` partition and duplicate provider/canonical-model schedules with disjoint aliases.
+- **Code-quality recurrence prevention:** Tests now cover double/single underflow, all token fields, malformed and duplicate versioned observations, legacy arrays, malformed unmatched records, exact snapshot allowlists, and fixed pricing units.
 - **Owner:** Codex.
 - **Next diagnostic step:** None.
 
@@ -47,6 +50,9 @@ A Gemini 3.1 request above 200,000 input tokens could use the lower profile rate
 - Adversarial RED run: exit 1 with 296 passes and four expected failures: direct and policy overflow exceptions plus direct and policy duplicate provider/model fail-open behavior.
 - Adversarial GREEN run: `pwsh -NoProfile -File .\router\tests\router.tests.ps1` exited 0 with 300 passes and 0 failures.
 - Adversarial product correction: `98a3f11d70f54c41b3b90a8cb4f3ba1facec9918` (`fix: harden router pricing snapshot validation`).
+- Code-quality RED evidence: item 1 exited 1 with 300 passes and 8 failures; item 2 exited 1 with 308 passes and 4 failures; item 3 exited 1 with 314 passes and 8 failures while 2 existing schedule-allowlist controls passed.
+- Code-quality GREEN verification: `pwsh -NoProfile -File .\router\tests\router.tests.ps1` exited 0 with 324 passes and 0 failures; `git diff --check` exited 0.
+- Code-quality product correction: `eebe559b3b5722cd8c015b40d5d64bcaee0f533f` (`fix: harden router pricing input contracts`).
 
 ## Recurrence history
 
@@ -59,3 +65,7 @@ A Gemini 3.1 request above 200,000 input tokens could use the lower profile rate
 - 2026-08-24T02:35:09Z: Reopened after final adversarial review found two fail-closed gaps in the centralized validator: a non-final token range ending at decimal `MaxValue` can overflow during contiguity checking, and schedules with the same ordinal provider/canonical-model identity can evade duplicate detection by using disjoint profile-model aliases. No provider/model call, Task 7 work, persistent routing result, push, PR, or merge occurred. The findings are contained pending direct-validator and policy-level RED regressions plus the minimum shared-validator correction.
 - The first product commit attempt was blocked before staging because the sandbox could not create the shared worktree Git `index.lock`. No staging or file state changed. The legacy Git-index setback index row has no linked incident file; a guessed incident-path lookup also failed without changing repository state. The authorized commit will be retried with the required shared-Git-metadata permission.
 - 2026-08-24T02:38:57Z: Closed after all 300 router assertions and whitespace verification passed, the centralized validator correction was committed, and the existing profile-model alias duplicate regression remained green.
+- 2026-08-24T02:54:48Z: Reopened after code-quality review found three remaining fail-closed gaps: native floating-point underflow can erase sign/nonzero identity, runtime pricing accepts unversioned and incomplete token-observation arrays despite the checked-in document contract, and pricing snapshot validation does not enforce exact top-level/period fields or fixed currency/rate-unit values. No provider/model call, Task 7 work, persistent routing result, push, PR, or merge occurred. The recurrence is contained pending three sequential RED/GREEN corrections.
+- Item 1 RED produced eight expected failures. The first GREEN attempt reached 306 passes and two failures: shared conversion fixed snapshot, visible-output, and reasoning underflow, but an invalid explicitly present current-request input estimate fell back to the observation input estimate. This rejected the hypothesis that conversion order was the only input path; the remaining correction must fail closed instead of replacing malformed current-request input.
+- The first final verification run exited 0 with 324 PASS lines and no test-error output, but its reporting wrapper counted 19 passing names containing the word `fail` as failures. No repository or test state changed; the exact counter must match only lines beginning with `FAIL `.
+- 2026-08-24T03:08:33Z: Closed after the corrected exact counter reported 324 passes and 0 failures, whitespace verification passed, and the four product/test files were committed separately from this recurrence record.
