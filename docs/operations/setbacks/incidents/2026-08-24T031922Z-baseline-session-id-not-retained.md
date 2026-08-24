@@ -2,7 +2,7 @@
 
 - **Status:** closed
 - **First observed:** 2026-08-24T03:19:22.527505Z
-- **Last observed:** 2026-08-24T03:19:22.527505Z
+- **Last observed:** 2026-08-24T04:42:50Z
 - **Phase/task:** Task 7 pre-implementation baseline
 - **Environment:** Windows PowerShell, Codex desktop managed workspace
 - **Version/commit:** `12481f6`
@@ -52,3 +52,13 @@ Run the full router PowerShell suite through an execution wrapper with a 30-seco
 ## Recurrence history
 
 - 2026-08-24T03:19:22.527505Z: First observed.
+- 2026-08-24T04:42:50Z: Project-owner-reported Task 7 handoff serialization recurrence; repository status and test state were re-established before work resumed.
+
+## Recurrence: Task 7 handoff serialization
+
+- **Symptom:** A Task 7 quality-review handoff serialization did not preserve a usable continuation record, requiring the active repository and verification state to be reconstructed.
+- **Impact:** Reporting and continuation were delayed; no product mutation, provider call, private payload, or credential exposure resulted.
+- **Confirmed cause:** The handoff serialization boundary failed to retain the continuation state supplied to the next execution context.
+- **Correction:** Re-established the exact worktree, branch, HEAD, clean baseline, live bridge path, and test counts from repository evidence before adding RED tests.
+- **Prevention:** Keep continuation state concise, preserve command session identifiers explicitly, and verify repository state rather than relying on a serialized handoff alone.
+- **Verification:** Baseline Python completed 42/42 and the full PowerShell suite completed with exit code 0 before Task 7 quality-review tests were added.
