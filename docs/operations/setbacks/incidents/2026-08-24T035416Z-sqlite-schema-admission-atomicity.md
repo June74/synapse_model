@@ -62,3 +62,4 @@ The bundled-Python suite passed all 29 tests. The full router PowerShell suite e
 - **Correction:** Pending exact zero-row V0 admission, complete nested-result/rejection consistency, and a status-specific trace matrix.
 - **Prevention:** Retain direct internal-catalog, nonselected-eligible, canonical-reason, and all-status regression fixtures.
 - **Next diagnostic step:** Implement the minimum validator changes and rerun all Task 7 acceptance gates.
+- **Attempt outcome:** The first GREEN attempt ran 42 tests but stopped with 12 failures and 6 errors because the newly exercised nonselected eligible fixture encoded a price one decimal quantum above the exact estimate derived from its token and rate fields. This was a fixture inconsistency, not a writer/schema regression; correct the fixture to the producer's exact `0.0096` result before evaluating the remaining implementation.
