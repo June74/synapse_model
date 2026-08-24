@@ -53,6 +53,7 @@ Run the full router PowerShell suite through an execution wrapper with a 30-seco
 
 - 2026-08-24T03:19:22.527505Z: First observed.
 - 2026-08-24T04:42:50Z: Project-owner-reported Task 7 handoff serialization recurrence; repository status and test state were re-established before work resumed.
+- 2026-08-24T05:14:03Z: Task 8 baseline wrapper again printed partial output without retaining the returned session identifier.
 
 ## Recurrence: Task 7 handoff serialization
 
@@ -62,3 +63,12 @@ Run the full router PowerShell suite through an execution wrapper with a 30-seco
 - **Correction:** Re-established the exact worktree, branch, HEAD, clean baseline, live bridge path, and test counts from repository evidence before adding RED tests.
 - **Prevention:** Keep continuation state concise, preserve command session identifiers explicitly, and verify repository state rather than relying on a serialized handoff alone.
 - **Verification:** Baseline Python completed 42/42 and the full PowerShell suite completed with exit code 0 before Task 7 quality-review tests were added.
+
+## Recurrence: Task 8 baseline wrapper
+
+- **Symptom:** The first Task 8 router baseline exceeded the 30-second yield and the parallel wrapper printed only output, exit code, and elapsed time, losing the continuation session identifier.
+- **Impact:** That partial PASS stream was discarded as evidence; no product file changed and no provider was invoked.
+- **Confirmed cause:** The wrapper repeated the documented mistake of selecting fields before preserving the full execution result.
+- **Correction:** Reran the suite in a dedicated call, retained session `73876`, and polled it to exit code 0.
+- **Prevention:** Long-running test commands must run in dedicated calls that print or persist the full result object before any projection.
+- **Verification:** The corrected full router baseline completed with exit code 0.
