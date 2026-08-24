@@ -9,7 +9,7 @@
 | [SB-20260824-031922-baseline-session-id-not-retained](incidents/2026-08-24T031922Z-baseline-session-id-not-retained.md) | Baseline test session identifier was not retained | closed | 2026-08-24 | 2026-08-24 |
 | [SB-20260824-033023-sqlite-test-connection-not-closed](incidents/2026-08-24T033023Z-sqlite-test-connection-not-closed.md) | SQLite test reader left Windows file handles open | closed | 2026-08-24 | 2026-08-24 |
 | [SB-20260824-035416-sqlite-schema-admission-atomicity](incidents/2026-08-24T035416Z-sqlite-schema-admission-atomicity.md) | SQLite schema admission was not exact or atomic | closed | 2026-08-24 | 2026-08-24 |
-| [SB-20260824-044250-sqlite-trace-quality-review](incidents/2026-08-24T044250Z-sqlite-trace-quality-review.md) | SQLite trace admission and bridge durability gaps | open | 2026-08-24 | 2026-08-24 |
+| [SB-20260824-044250-sqlite-trace-quality-review](incidents/2026-08-24T044250Z-sqlite-trace-quality-review.md) | SQLite trace admission and bridge durability gaps | closed | 2026-08-24 | 2026-08-24 |
 | SB-2026-08-19-001 | PowerShell DOCX paragraph extraction syntax error | closed | 2026-08-19 | 2026-08-19 |
 | SB-2026-08-19-002 | Current DOCX locked during full-document scan | closed | 2026-08-19 | 2026-08-19 |
 | SB-2026-08-19-003 | Skill path lookup mismatch | closed | 2026-08-19 | 2026-08-23 |

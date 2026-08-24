@@ -1,8 +1,8 @@
 # SB-20260824-044250-sqlite-trace-quality-review: SQLite trace admission and bridge durability gaps
 
-- **Status:** open
+- **Status:** closed
 - **First observed:** 2026-08-24T04:42:50Z
-- **Last observed:** 2026-08-24T04:42:50Z
+- **Last observed:** 2026-08-24T05:02:06Z
 - **Phase/task:** Task 7 quality review
 - **Environment:** Windows PowerShell; bundled CPython standard library SQLite
 - **Version/commit:** `16f3d51b004cb447f4f550ffcac6af21626c071e`
@@ -30,6 +30,9 @@ Use synthetic local Python helpers that hang, fill stderr before reading a large
 1. Confirmed the live test path: `router.tests.ps1` -> `Write-RouterTrace` -> direct `sqlite_store.py` process.
 2. Added bounded synthetic-helper tests before production edits; the old bridge fails at parameter admission rather than risking an unbounded test hang.
 3. Added content, calculation-boundary, decomposition, and contention controls before production edits; the distinct-trace and held-lock controls already pass.
+4. The first post-split GREEN attempt passed 50 of 51 Python tests; one synthetic AWS secret form ending in a non-word Base64 character bypassed an incorrect terminal word boundary in the new admission expression.
+5. The first bridge GREEN attempt passed the stderr-drain, early-exit, and malformed-protocol probes but returned multiple PowerShell pipeline objects for timeout and valid large-stream paths; investigation is isolating the unintended output source before correction.
+6. The first focused output-contamination diagnostic used an invalid nested PowerShell string and stopped at parser admission before creating or running a helper; it was replaced with a literal here-string invocation.
 
 ## Cause classification
 
@@ -40,15 +43,21 @@ Use synthetic local Python helpers that hang, fill stderr before reading a large
 
 ## Correction and prevention
 
-- **Correction:** Pending bounded concurrent process I/O, exact content/hash binding, narrow high-confidence content admission, focused standard-library modules, and a live-policy differential storage fixture.
+- **Correction:** Product commit `0e1d98b` adds bounded concurrent process I/O and tree cleanup, exact UTF-8 content/hash binding, narrow high-confidence content admission, focused standard-library modules, an independently pinned V1 schema fixture, and a no-provider live-policy differential storage test.
 - **Prevention:** Retain synthetic pipe-pressure, timeout/process-tree, content admission, module-size, direct-entrypoint, contention, and differential fixtures.
 - **Owner:** Codex and project owner.
-- **Next diagnostic step:** Implement the minimum product changes and rerun every focused and full acceptance gate.
+- **Next diagnostic step:** None; the incident is closed and the regression fixtures remain in the normal suites.
 
 ## Verification and related work
 
-Pending product correction and final acceptance.
+- Python: 52 tests passed with the bundled interpreter.
+- PowerShell: 335 assertions passed, including timeout/tree cleanup, pipe-pressure, early-exit, large-stream, exact protocol, and live-policy differential storage probes.
+- Disposable schema acceptance observed V1, two approved tables, five approved indexes, one foreign key, one decision, and four candidate rows.
+- `git diff --check` passed; no runtime SQLite file was present, staged, or tracked; generated storage bytecode cache was removed.
 
 ## Recurrence history
 
 - 2026-08-24T04:42:50Z: First observed during Task 7 quality review.
+- 2026-08-24: A read-only inline Python schema-diff diagnostic failed before execution because nested PowerShell/Python quoting left an unclosed parenthesis. No database or product file was touched; a literal here-string retry succeeded.
+- 2026-08-24: Product staging was blocked before mutation because the managed sandbox denied creation of the shared worktree `index.lock`; no file was staged. A permission-scoped Git retry succeeded.
+- 2026-08-24T05:02:06Z: Closed after product commit `0e1d98b` and full acceptance.
