@@ -32,18 +32,7 @@ function ConvertFrom-RouterPricingIsoDate {
 function ConvertTo-RouterPricingDecimal {
     param([AllowNull()][object]$Value)
 
-    if ($null -eq $Value -or $Value -is [bool] -or $Value -is [string]) { return $null }
-    if ($Value -is [double] -and ([double]::IsNaN($Value) -or [double]::IsInfinity($Value))) {
-        return $null
-    }
-    if ($Value -is [single] -and ([single]::IsNaN($Value) -or [single]::IsInfinity($Value))) {
-        return $null
-    }
-    try {
-        return [decimal]$Value
-    } catch {
-        return $null
-    }
+    return ConvertTo-RouterCatalogExactDecimal -Value $Value
 }
 
 function Test-RouterPricingNonnegativeInteger {
@@ -52,6 +41,56 @@ function Test-RouterPricingNonnegativeInteger {
     $number = ConvertTo-RouterPricingDecimal -Value $Value
     if ($null -eq $number -or $number -lt 0) { return $false }
     return [decimal]::Truncate($number) -eq $number
+}
+
+function Test-RouterTokenEstimatesDocument {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param([AllowNull()][object]$TokenEstimates)
+
+    $topLevelFields = @('version', 'observations')
+    if (-not (Test-RouterCatalogExactProperties -Value $TokenEstimates -ExpectedNames $topLevelFields) -or
+        $TokenEstimates.version -isnot [string] -or
+        $TokenEstimates.version -cne 'router-token-estimates/v1' -or
+        $TokenEstimates.observations -isnot [Collections.IList]) {
+        return [pscustomobject]@{ valid = $false; observations = @() }
+    }
+
+    $recordFields = @(
+        'launcher', 'configuration_id', 'model', 'effort', 'request_profile_group',
+        'estimated_input_tokens', 'estimated_visible_output_tokens',
+        'estimated_reasoning_tokens', 'observed_on'
+    )
+    $identities = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($observation in @($TokenEstimates.observations)) {
+        if (-not (Test-RouterCatalogExactProperties -Value $observation -ExpectedNames $recordFields)) {
+            return [pscustomobject]@{ valid = $false; observations = @() }
+        }
+        foreach ($identityField in @('launcher', 'configuration_id', 'model', 'effort', 'request_profile_group')) {
+            $identityValue = $observation.$identityField
+            if ($identityValue -isnot [string] -or [string]::IsNullOrWhiteSpace($identityValue)) {
+                return [pscustomobject]@{ valid = $false; observations = @() }
+            }
+        }
+        foreach ($tokenField in @(
+            'estimated_input_tokens', 'estimated_visible_output_tokens', 'estimated_reasoning_tokens'
+        )) {
+            if (-not (Test-RouterPricingNonnegativeInteger -Value $observation.$tokenField)) {
+                return [pscustomobject]@{ valid = $false; observations = @() }
+            }
+        }
+        if ($null -eq (ConvertFrom-RouterPricingIsoDate -Value $observation.observed_on)) {
+            return [pscustomobject]@{ valid = $false; observations = @() }
+        }
+        $identity = '{0}|{1}|{2}|{3}|{4}' -f
+            $observation.launcher, $observation.configuration_id, $observation.model,
+            $observation.effort, $observation.request_profile_group
+        if (-not $identities.Add($identity)) {
+            return [pscustomobject]@{ valid = $false; observations = @() }
+        }
+    }
+
+    return [pscustomobject]@{ valid = $true; observations = @($TokenEstimates.observations) }
 }
 
 function Get-RouterRequestProfileGroup {
@@ -101,7 +140,7 @@ function Get-RouterEstimatedPrice {
         [Parameter(Mandatory)][object]$Request,
         [Parameter(Mandatory)][object]$Requirements,
         [AllowNull()][object]$PricingSnapshot,
-        [AllowNull()][object[]]$TokenEstimates,
+        [AllowNull()][object]$TokenEstimates,
         [AllowNull()][string]$AsOfDate
     )
 
@@ -138,35 +177,23 @@ function Get-RouterEstimatedPrice {
             -ReasonCode 'pricing_date_invalid' -RequestProfileGroup $requestProfileGroup
     }
 
-    $useInjectedEstimates = $PSBoundParameters.ContainsKey('TokenEstimates')
-    $observationSource = if ($useInjectedEstimates) {
-        @($TokenEstimates)
-    } else {
-        @($Candidate.token_consumption_observations)
+    if (-not $PSBoundParameters.ContainsKey('TokenEstimates') -or $null -eq $TokenEstimates) {
+        return New-RouterUnavailablePrice -CandidateIdentity $candidateIdentity `
+            -ReasonCode 'token_estimate_unavailable' -RequestProfileGroup $requestProfileGroup
     }
+    $tokenEstimateValidation = Test-RouterTokenEstimatesDocument -TokenEstimates $TokenEstimates
+    if (-not $tokenEstimateValidation.valid) {
+        return New-RouterUnavailablePrice -CandidateIdentity $candidateIdentity `
+            -ReasonCode 'token_estimate_invalid' -RequestProfileGroup $requestProfileGroup
+    }
+    $observationSource = @($tokenEstimateValidation.observations)
     $matchingObservations = @(
         foreach ($observation in $observationSource) {
-            if ($null -eq $observation) { continue }
-            if ($useInjectedEstimates) {
-                $launcher = Get-RouterPricingExactProperty -Object $observation -Name 'launcher'
-                $configurationId = Get-RouterPricingExactProperty -Object $observation -Name 'configuration_id'
-                if ($null -eq $launcher -or $null -eq $configurationId -or
-                    $launcher.Value -isnot [string] -or
-                    $configurationId.Value -isnot [string] -or
-                    $launcher.Value -cne $Candidate.launcher -or
-                    $configurationId.Value -cne $Candidate.configuration_id) {
-                    continue
-                }
-            }
-            $model = Get-RouterPricingExactProperty -Object $observation -Name 'model'
-            $effort = Get-RouterPricingExactProperty -Object $observation -Name 'effort'
-            $group = Get-RouterPricingExactProperty -Object $observation -Name 'request_profile_group'
-            if ($null -ne $model -and $null -ne $effort -and $null -ne $group -and
-                $model.Value -is [string] -and $effort.Value -is [string] -and
-                $group.Value -is [string] -and
-                $model.Value -ceq $Candidate.model -and
-                $effort.Value -ceq $Candidate.effort -and
-                $group.Value -ceq $requestProfileGroup) {
+            if ($observation.launcher -ceq $Candidate.launcher -and
+                $observation.configuration_id -ceq $Candidate.configuration_id -and
+                $observation.model -ceq $Candidate.model -and
+                $observation.effort -ceq $Candidate.effort -and
+                $observation.request_profile_group -ceq $requestProfileGroup) {
                 $observation
             }
         }
@@ -178,9 +205,12 @@ function Get-RouterEstimatedPrice {
     $observation = $matchingObservations[0]
 
     $currentInputProperty = Get-RouterPricingExactProperty -Object $Requirements -Name 'estimated_input_tokens'
-    $estimatedInputTokens = if ($null -ne $currentInputProperty -and
-        (Test-RouterPricingNonnegativeInteger -Value $currentInputProperty.Value)) {
-        [decimal]$currentInputProperty.Value
+    $estimatedInputTokens = if ($null -ne $currentInputProperty) {
+        if (Test-RouterPricingNonnegativeInteger -Value $currentInputProperty.Value) {
+            [decimal]$currentInputProperty.Value
+        } else {
+            $null
+        }
     } elseif (Test-RouterPricingNonnegativeInteger -Value $observation.estimated_input_tokens) {
         [decimal]$observation.estimated_input_tokens
     } else {

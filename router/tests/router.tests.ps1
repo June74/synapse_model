@@ -1032,14 +1032,24 @@ function New-TestTokenObservation {
     }
 }
 
+function New-TestTokenEstimatesDocument {
+    param([object[]]$Observations)
+
+    return [pscustomobject][ordered]@{
+        version = 'router-token-estimates/v1'
+        observations = @($Observations)
+    }
+}
+
 function Get-TestPolicyTokenEstimates {
     param([object[]]$Profiles = @(Get-MinimalPolicyProfiles))
 
-    return @(
+    $observations = @(
         foreach ($profile in $Profiles) {
             New-TestTokenObservation -Candidate $profile
         }
     )
+    return New-TestTokenEstimatesDocument -Observations $observations
 }
 
 function New-TestPriceRequirements {
@@ -1165,7 +1175,7 @@ function Invoke-TestRouterPolicy {
         [Parameter(Mandatory)][object[]]$Profiles,
         [object]$Request = (New-MinimalRequest),
         [AllowNull()][object]$PricingSnapshot,
-        [AllowNull()][object[]]$TokenEstimates,
+        [AllowNull()][object]$TokenEstimates,
         [AllowNull()][object[]]$RuntimeStates
     )
 
@@ -1203,7 +1213,7 @@ function Assert-PolicyPricingSnapshotRejected {
         }
     )
     $decision = Invoke-TestRouterPolicy -Profiles $Profiles -PricingSnapshot $PricingSnapshot `
-        -TokenEstimates $observations
+        -TokenEstimates (New-TestTokenEstimatesDocument -Observations $observations)
 
     Assert-Equal $decision.selected_candidate $null
     Assert-Equal $decision.price $null
@@ -1523,6 +1533,24 @@ Invoke-Assertion 'pricing snapshot validates rates in every tier including Gemin
     }
 }
 
+$underflowSnapshotRateCases = @(
+    [pscustomobject]@{ name = 'negative double'; value = [double]-1e-100 }
+    [pscustomobject]@{ name = 'positive double'; value = [double]1e-100 }
+    [pscustomobject]@{ name = 'negative single'; value = [single]-1e-40 }
+    [pscustomobject]@{ name = 'positive single'; value = [single]1e-40 }
+)
+foreach ($underflowSnapshotRateCase in $underflowSnapshotRateCases) {
+    Invoke-Assertion ("pricing snapshot rejects {0} nonzero floating-point rate underflow" -f $underflowSnapshotRateCase.name) {
+        $snapshot = New-TestPricingSnapshot
+        $snapshot.schedules[0].rate_periods[0].input_usd_per_million_tokens = $underflowSnapshotRateCase.value
+
+        $validation = Test-RouterPricingSnapshotObject -PricingSnapshot $snapshot
+
+        Assert-Equal $validation.valid $false
+        Assert-CatalogError -Catalog $validation -Code 'pricing_snapshot_invalid'
+    }
+}
+
 Invoke-Assertion 'pricing snapshot rejects numeric fields encoded as strings' {
     Assert-PricingSnapshotMutationRejected -Mutation {
         param($snapshot)
@@ -1689,6 +1717,40 @@ Invoke-Assertion 'pricing snapshot corroborating sources are strict HTTP URL arr
     Assert-PricingSnapshotMutationRejected -Mutation {
         param($snapshot)
         $snapshot.schedules[0] | Add-Member -NotePropertyName source_urll -NotePropertyValue 'https://fixtures.invalid/typo'
+    }
+}
+
+$exactPricingSnapshotContractCases = @(
+    [pscustomobject]@{
+        name = 'unknown top-level field'
+        mutate = { param($snapshot) $snapshot | Add-Member -NotePropertyName snapshot_dtae -NotePropertyValue '2026-08-22' }
+    }
+    [pscustomobject]@{
+        name = 'non-USD currency'
+        mutate = { param($snapshot) $snapshot.currency = 'EUR' }
+    }
+    [pscustomobject]@{
+        name = 'nonstandard rate unit'
+        mutate = { param($snapshot) $snapshot.rate_unit = 'per_thousand_tokens' }
+    }
+    [pscustomobject]@{
+        name = 'unknown schedule field'
+        mutate = { param($snapshot) $snapshot.schedules[0] | Add-Member -NotePropertyName source_urll -NotePropertyValue 'https://fixtures.invalid/typo' }
+    }
+    [pscustomobject]@{
+        name = 'unknown period field'
+        mutate = { param($snapshot) $snapshot.schedules[0].rate_periods[0] | Add-Member -NotePropertyName input_token_min -NotePropertyValue 0 }
+    }
+)
+foreach ($exactPricingSnapshotContractCase in $exactPricingSnapshotContractCases) {
+    Invoke-Assertion ("direct pricing snapshot validation rejects {0}" -f $exactPricingSnapshotContractCase.name) {
+        $snapshot = New-TestPricingSnapshot
+        & $exactPricingSnapshotContractCase.mutate $snapshot
+
+        $validation = Test-RouterPricingSnapshotObject -PricingSnapshot $snapshot
+
+        Assert-Equal $validation.valid $false
+        Assert-CatalogError -Catalog $validation -Code 'pricing_snapshot_invalid'
     }
 }
 
@@ -3698,6 +3760,92 @@ Invoke-Assertion 'Task 6 token fixture uses exact profile model effort and reque
     )
 }
 
+Invoke-Assertion 'token estimate document validator enforces the exact versioned document and record contract' {
+    $fixture = Get-TestTokenEstimates
+    Assert-Equal (Test-RouterTokenEstimatesDocument -TokenEstimates $fixture).valid $true
+
+    $invalidDocuments = [Collections.Generic.List[object]]::new()
+    $bareObservations = @($fixture.observations)
+    $invalidDocuments.Add($bareObservations)
+    $wrongVersion = Copy-TestObject $fixture
+    $wrongVersion.version = 'router-token-estimates/v0'
+    $invalidDocuments.Add($wrongVersion)
+    $missingVersion = Copy-TestObject $fixture
+    $missingVersion.PSObject.Properties.Remove('version')
+    $invalidDocuments.Add($missingVersion)
+    $unknownTopLevel = Copy-TestObject $fixture
+    $unknownTopLevel | Add-Member -NotePropertyName typo -NotePropertyValue $true
+    $invalidDocuments.Add($unknownTopLevel)
+    $scalarObservations = Copy-TestObject $fixture
+    $scalarObservations.observations = $scalarObservations.observations[0]
+    $invalidDocuments.Add($scalarObservations)
+    foreach ($recordProperty in @(
+        'launcher', 'configuration_id', 'model', 'effort', 'request_profile_group',
+        'estimated_input_tokens', 'estimated_visible_output_tokens',
+        'estimated_reasoning_tokens', 'observed_on'
+    )) {
+        $missingRecordProperty = Copy-TestObject $fixture
+        $missingRecordProperty.observations[0].PSObject.Properties.Remove($recordProperty)
+        $invalidDocuments.Add($missingRecordProperty)
+    }
+    $unknownRecordProperty = Copy-TestObject $fixture
+    $unknownRecordProperty.observations[0] | Add-Member -NotePropertyName typo -NotePropertyValue $true
+    $invalidDocuments.Add($unknownRecordProperty)
+    foreach ($identityProperty in @('launcher', 'configuration_id', 'model', 'effort', 'request_profile_group')) {
+        $blankIdentity = Copy-TestObject $fixture
+        $blankIdentity.observations[0].$identityProperty = ''
+        $invalidDocuments.Add($blankIdentity)
+    }
+    foreach ($tokenProperty in @('estimated_input_tokens', 'estimated_visible_output_tokens', 'estimated_reasoning_tokens')) {
+        foreach ($invalidTokenValue in @(-1, 1.5, [double]1e-100)) {
+            $invalidTokenDocument = Copy-TestObject $fixture
+            $invalidTokenDocument.observations[0].$tokenProperty = $invalidTokenValue
+            $invalidDocuments.Add($invalidTokenDocument)
+        }
+    }
+    $invalidDate = Copy-TestObject $fixture
+    $invalidDate.observations[0].observed_on = '2026-8-22'
+    $invalidDocuments.Add($invalidDate)
+    $duplicate = Copy-TestObject $fixture
+    $duplicate.observations = @($duplicate.observations + (Copy-TestObject $duplicate.observations[0]))
+    $invalidDocuments.Add($duplicate)
+
+    foreach ($invalidDocument in $invalidDocuments) {
+        Assert-Equal (Test-RouterTokenEstimatesDocument -TokenEstimates $invalidDocument).valid $false
+    }
+}
+
+Invoke-Assertion 'price consumes the complete versioned token estimate document' {
+    $candidate = Copy-TestObject @(Get-MinimalProfiles)[0]
+    $estimate = Get-RouterEstimatedPrice -Candidate $candidate -Request (New-MinimalRequest) `
+        -Requirements (New-TestPriceRequirements) -PricingSnapshot (New-TestPricingSnapshot) `
+        -TokenEstimates (Get-TestTokenEstimates) -AsOfDate '2026-08-22'
+
+    Assert-Equal $estimate.available $true
+}
+
+Invoke-Assertion 'price rejects a legacy bare token observation array' {
+    $candidate = Copy-TestObject @(Get-MinimalProfiles)[0]
+    $estimate = Get-RouterEstimatedPrice -Candidate $candidate -Request (New-MinimalRequest) `
+        -Requirements (New-TestPriceRequirements) -PricingSnapshot (New-TestPricingSnapshot) `
+        -TokenEstimates @((New-TestTokenObservation -Candidate $candidate)) -AsOfDate '2026-08-22'
+
+    Assert-Equal $estimate.available $false
+    Assert-Equal $estimate.reason_code 'token_estimate_invalid'
+}
+
+Invoke-Assertion 'malformed unmatched token records invalidate the complete document before matching' {
+    $candidate = Copy-TestObject @(Get-MinimalProfiles)[0]
+    $document = Get-TestTokenEstimates
+    $document.observations[1].observed_on = 'invalid-date'
+    $estimate = Get-RouterEstimatedPrice -Candidate $candidate -Request (New-MinimalRequest) `
+        -Requirements (New-TestPriceRequirements) -PricingSnapshot (New-TestPricingSnapshot) `
+        -TokenEstimates $document -AsOfDate '2026-08-22'
+
+    Assert-Equal $estimate.available $false
+    Assert-Equal $estimate.reason_code 'token_estimate_invalid'
+}
+
 Invoke-Assertion 'Task 6 pricing module is available' {
     Assert-Equal $pricingAvailable $true
 }
@@ -3709,7 +3857,7 @@ Invoke-Assertion 'price uses current request input and separate visible plus rea
     $snapshot = New-TestPricingSnapshot
     $estimate = Get-RouterEstimatedPrice -Candidate $candidate -Request $request `
         -Requirements (New-TestPriceRequirements -EstimatedInputTokens 2000) `
-        -PricingSnapshot $snapshot -TokenEstimates $fixture.observations -AsOfDate '2026-08-22'
+        -PricingSnapshot $snapshot -TokenEstimates $fixture -AsOfDate '2026-08-22'
 
     Assert-Equal $estimate.available $true
     Assert-Equal $estimate.request_profile_group 'coding|computer_science|medium|normal'
@@ -3737,7 +3885,7 @@ foreach ($promotionBoundaryCase in $promotionBoundaryCases) {
         $snapshot = Get-Content -LiteralPath $pricingSnapshotPath -Raw | ConvertFrom-Json -Depth 30
         $estimate = Get-RouterEstimatedPrice -Candidate $candidate -Request (New-MinimalRequest) `
             -Requirements (New-TestPriceRequirements) -PricingSnapshot $snapshot `
-            -TokenEstimates @($observation) -AsOfDate $promotionBoundaryCase.date
+            -TokenEstimates (New-TestTokenEstimatesDocument -Observations @($observation)) -AsOfDate $promotionBoundaryCase.date
 
         Assert-Equal $estimate.available $promotionBoundaryCase.available
         Assert-Equal $estimate.input_usd_per_million_tokens $promotionBoundaryCase.input_rate
@@ -3757,7 +3905,7 @@ foreach ($geminiTierCase in $geminiTierCases) {
         $snapshot = Get-Content -LiteralPath $pricingSnapshotPath -Raw | ConvertFrom-Json -Depth 30
         $estimate = Get-RouterEstimatedPrice -Candidate $candidate -Request (New-MinimalRequest) `
             -Requirements (New-TestPriceRequirements -EstimatedInputTokens $geminiTierCase.input_tokens) `
-            -PricingSnapshot $snapshot -TokenEstimates @($observation) -AsOfDate '2026-08-22'
+            -PricingSnapshot $snapshot -TokenEstimates (New-TestTokenEstimatesDocument -Observations @($observation)) -AsOfDate '2026-08-22'
 
         Assert-Equal $estimate.available $true
         Assert-Equal $estimate.input_usd_per_million_tokens $geminiTierCase.input_rate
@@ -3771,7 +3919,7 @@ Invoke-Assertion 'omitting the pricing snapshot fails closed for a Gemini reques
     $observation = New-TestTokenObservation -Candidate $candidate
     $estimate = Get-RouterEstimatedPrice -Candidate $candidate -Request (New-MinimalRequest) `
         -Requirements (New-TestPriceRequirements -EstimatedInputTokens 200001) `
-        -TokenEstimates @($observation) -AsOfDate '2026-08-22'
+        -TokenEstimates (New-TestTokenEstimatesDocument -Observations @($observation)) -AsOfDate '2026-08-22'
 
     Assert-Equal $estimate.available $false
     Assert-Equal $estimate.reason_code 'pricing_snapshot_unavailable'
@@ -3783,7 +3931,7 @@ Invoke-Assertion 'omitting the pricing snapshot cannot accept a provider and pro
     $candidate.provider = 'openai'
     $observation = New-TestTokenObservation -Candidate $candidate
     $estimate = Get-RouterEstimatedPrice -Candidate $candidate -Request (New-MinimalRequest) `
-        -Requirements (New-TestPriceRequirements) -TokenEstimates @($observation) `
+        -Requirements (New-TestPriceRequirements) -TokenEstimates (New-TestTokenEstimatesDocument -Observations @($observation)) `
         -AsOfDate '2026-08-22'
 
     Assert-Equal $estimate.available $false
@@ -3800,7 +3948,7 @@ Invoke-Assertion 'a resulting zero price is unavailable because V1 has no free r
     $candidate.pricing.output_usd_per_million_tokens = 0
     $estimate = Get-RouterEstimatedPrice -Candidate $candidate -Request (New-MinimalRequest) `
         -Requirements (New-TestPriceRequirements) -PricingSnapshot $snapshot `
-        -TokenEstimates (Get-TestTokenEstimates).observations -AsOfDate '2026-08-22'
+        -TokenEstimates (Get-TestTokenEstimates) -AsOfDate '2026-08-22'
 
     Assert-Equal $estimate.available $false
     Assert-Equal $estimate.reason_code 'free_route_disallowed'
@@ -3808,11 +3956,39 @@ Invoke-Assertion 'a resulting zero price is unavailable because V1 has no free r
     Assert-Equal $estimate.price_final $false
 }
 
+$underflowTokenCases = @(
+    [pscustomobject]@{ name = 'input'; property = 'estimated_input_tokens'; source = 'requirements' }
+    [pscustomobject]@{ name = 'visible output'; property = 'estimated_visible_output_tokens'; source = 'observation' }
+    [pscustomobject]@{ name = 'reasoning'; property = 'estimated_reasoning_tokens'; source = 'observation' }
+)
+foreach ($underflowTokenCase in $underflowTokenCases) {
+    foreach ($underflowTokenValue in @([double]-1e-100, [double]1e-100)) {
+        $underflowTokenSign = if ($underflowTokenValue -lt 0) { 'negative' } else { 'positive' }
+        Invoke-Assertion ("price rejects {0} nonzero floating-point underflow in {1} tokens" -f $underflowTokenSign, $underflowTokenCase.name) {
+            $candidate = Copy-TestObject @(Get-MinimalProfiles)[0]
+            $requirements = New-TestPriceRequirements
+            $observation = New-TestTokenObservation -Candidate $candidate
+            if ($underflowTokenCase.source -ceq 'requirements') {
+                $requirements.estimated_input_tokens = $underflowTokenValue
+            } else {
+                $observation.($underflowTokenCase.property) = $underflowTokenValue
+            }
+            $estimate = Get-RouterEstimatedPrice -Candidate $candidate -Request (New-MinimalRequest) `
+                -Requirements $requirements -PricingSnapshot (New-TestPricingSnapshot) `
+                -TokenEstimates (New-TestTokenEstimatesDocument -Observations @($observation)) -AsOfDate '2026-08-22'
+
+            Assert-Equal $estimate.available $false
+            Assert-Equal $estimate.reason_code 'token_estimate_invalid'
+            Assert-Equal $estimate.price $null
+        }
+    }
+}
+
 Invoke-Assertion 'an explicitly injected null pricing snapshot is unavailable instead of using profile rates' {
     $candidate = Copy-TestObject @(Get-MinimalProfiles)[0]
     $estimate = Get-RouterEstimatedPrice -Candidate $candidate -Request (New-MinimalRequest) `
         -Requirements (New-TestPriceRequirements) -PricingSnapshot $null `
-        -TokenEstimates (Get-TestTokenEstimates).observations -AsOfDate '2026-08-22'
+        -TokenEstimates (Get-TestTokenEstimates) -AsOfDate '2026-08-22'
 
     Assert-Equal $estimate.available $false
     Assert-Equal $estimate.reason_code 'pricing_snapshot_unavailable'
@@ -3861,7 +4037,7 @@ foreach ($unavailablePriceCase in $unavailablePriceCases) {
         & $unavailablePriceCase.mutate $candidate $snapshot $observations
         $estimate = Get-RouterEstimatedPrice -Candidate $candidate -Request (New-MinimalRequest) `
             -Requirements (New-TestPriceRequirements) -PricingSnapshot $snapshot `
-            -TokenEstimates @($observations) -AsOfDate '2026-08-22'
+            -TokenEstimates (New-TestTokenEstimatesDocument -Observations @($observations)) -AsOfDate '2026-08-22'
 
         Assert-Equal $estimate.available $false
         Assert-Equal $estimate.price $null
@@ -3881,7 +4057,7 @@ Invoke-Assertion 'pricing retains full decimal precision for large integer token
     $requirements = New-TestPriceRequirements -EstimatedInputTokens 8000000000
     $estimate = Get-RouterEstimatedPrice -Candidate $candidate -Request (New-MinimalRequest) `
         -Requirements $requirements -PricingSnapshot $snapshot `
-        -TokenEstimates @($observation) -AsOfDate '2026-08-22'
+        -TokenEstimates (New-TestTokenEstimatesDocument -Observations @($observation)) -AsOfDate '2026-08-22'
     [decimal]$expected = (
         ([decimal]8000000000 * [decimal]0.123456789) +
         ([decimal]7000000000 * [decimal]9.876543211)
@@ -3924,7 +4100,8 @@ Invoke-Assertion 'requirements rejection skips quality and price evaluation' {
     $candidate = Copy-TestObject @(Get-MinimalPolicyProfiles)[0]
     $candidate.enabled = $false
     $candidate.quality.task_types.coding = 'unknown'
-    $decision = Invoke-TestRouterPolicy -Profiles @($candidate) -TokenEstimates @()
+    $decision = Invoke-TestRouterPolicy -Profiles @($candidate) `
+        -TokenEstimates (New-TestTokenEstimatesDocument -Observations @())
     $evaluation = @($decision.candidate_evaluations)[0]
 
     Assert-Equal $decision.selected_candidate $null
@@ -3938,7 +4115,8 @@ Invoke-Assertion 'requirements rejection skips quality and price evaluation' {
 Invoke-Assertion 'quality rejection skips price evaluation' {
     $candidate = Copy-TestObject @(Get-MinimalPolicyProfiles)[0]
     $candidate.quality.task_types.coding = 'unknown'
-    $decision = Invoke-TestRouterPolicy -Profiles @($candidate) -TokenEstimates @()
+    $decision = Invoke-TestRouterPolicy -Profiles @($candidate) `
+        -TokenEstimates (New-TestTokenEstimatesDocument -Observations @())
     $evaluation = @($decision.candidate_evaluations)[0]
 
     Assert-Equal $decision.selected_candidate $null
@@ -3980,7 +4158,8 @@ Invoke-Assertion 'model and effort form one jointly ranked candidate' {
         (New-TestTokenObservation -Candidate $high -EstimatedVisibleOutputTokens 100 -EstimatedReasoningTokens 100)
     )
     $decision = Invoke-TestRouterPolicy -Profiles @($low, $high) `
-        -PricingSnapshot (New-TestPricingSnapshot) -TokenEstimates $observations
+        -PricingSnapshot (New-TestPricingSnapshot) `
+        -TokenEstimates (New-TestTokenEstimatesDocument -Observations $observations)
 
     Assert-Equal (Get-CompositeIdentity $decision.selected_candidate) 'agy|shared-model__high'
     Assert-Equal @($decision.candidate_evaluations | Where-Object { $_.selected }).Count 1
@@ -4152,6 +4331,15 @@ foreach ($missingPolicyScheduleField in $missingPolicyScheduleFieldCases) {
     }
 }
 
+foreach ($exactPricingSnapshotContractCase in $exactPricingSnapshotContractCases) {
+    Invoke-Assertion ("policy rejects pricing snapshot {0} before ranking" -f $exactPricingSnapshotContractCase.name) {
+        $snapshot = New-TestPolicyPricingSnapshot
+        & $exactPricingSnapshotContractCase.mutate $snapshot
+
+        Assert-PolicyPricingSnapshotRejected -PricingSnapshot $snapshot
+    }
+}
+
 $invalidPolicyPartitionCases = @(
     [pscustomobject]@{ name = 'token partition gap'; kind = 'token'; successor = 102 }
     [pscustomobject]@{ name = 'token partition overlap'; kind = 'token'; successor = 100 }
@@ -4280,7 +4468,8 @@ Invoke-Assertion 'stable identity sorting is ordinal under a non-default culture
     try {
         [Globalization.CultureInfo]::CurrentCulture = [Globalization.CultureInfo]::GetCultureInfo('tr-TR')
         $decision = Invoke-TestRouterPolicy -Request $request -Profiles @($unicode, $ascii) `
-            -PricingSnapshot (New-TestPolicyPricingSnapshot) -TokenEstimates $observations
+            -PricingSnapshot (New-TestPolicyPricingSnapshot) `
+            -TokenEstimates (New-TestTokenEstimatesDocument -Observations $observations)
     } finally {
         [Globalization.CultureInfo]::CurrentCulture = $originalCulture
     }

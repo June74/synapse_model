@@ -107,7 +107,7 @@ function Invoke-RouterPolicy {
         [long]$OutputReserveTokens = 512,
         [long]$LongContextThresholdTokens = 100000,
         [AllowNull()][object]$PricingSnapshot,
-        [AllowNull()][object[]]$TokenEstimates,
+        [AllowNull()][object]$TokenEstimates,
         [AllowNull()][string]$AsOfDate,
         [AllowNull()][object[]]$RuntimeStates
     )

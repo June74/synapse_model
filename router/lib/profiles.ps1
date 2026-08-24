@@ -81,24 +81,34 @@ function Read-RouterCatalogJson {
     }
 }
 
-function Test-RouterCatalogNonnegativeNumber {
+function ConvertTo-RouterCatalogExactDecimal {
     param([AllowNull()][object]$Value)
 
-    if ($null -eq $Value -or $Value -is [bool]) { return $false }
+    if ($null -eq $Value -or $Value -is [bool]) { return $null }
     if ($Value -isnot [byte] -and $Value -isnot [sbyte] -and
         $Value -isnot [int16] -and $Value -isnot [uint16] -and
         $Value -isnot [int32] -and $Value -isnot [uint32] -and
         $Value -isnot [int64] -and $Value -isnot [uint64] -and
         $Value -isnot [single] -and $Value -isnot [double] -and
-        $Value -isnot [decimal] -and $Value -isnot [Numerics.BigInteger]) { return $false }
-    if ($Value -is [double] -and ([double]::IsNaN($Value) -or [double]::IsInfinity($Value))) { return $false }
-    if ($Value -is [single] -and ([single]::IsNaN($Value) -or [single]::IsInfinity($Value))) { return $false }
+        $Value -isnot [decimal] -and $Value -isnot [Numerics.BigInteger]) { return $null }
+    if ($Value -is [double] -and
+        ([double]::IsNaN($Value) -or [double]::IsInfinity($Value) -or $Value -lt 0)) { return $null }
+    if ($Value -is [single] -and
+        ([single]::IsNaN($Value) -or [single]::IsInfinity($Value) -or $Value -lt 0)) { return $null }
     try {
         [decimal]$decimalValue = $Value
-        return $decimalValue -ge 0
+        if ($Value -ne 0 -and $decimalValue -eq 0) { return $null }
+        return $decimalValue
     } catch {
-        return $false
+        return $null
     }
+}
+
+function Test-RouterCatalogNonnegativeNumber {
+    param([AllowNull()][object]$Value)
+
+    $decimalValue = ConvertTo-RouterCatalogExactDecimal -Value $Value
+    return $null -ne $decimalValue -and $decimalValue -ge 0
 }
 
 function Test-RouterCatalogPositiveInteger {
@@ -228,11 +238,6 @@ function Test-RouterPricingSnapshotObject {
     $pricingByProfileModel = [Collections.Generic.Dictionary[string, object]]::new([StringComparer]::Ordinal)
     $pricingScheduleIdentities = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
     $requiredPricingSnapshotFields = @('snapshot_date', 'retrieved_on', 'currency', 'rate_unit', 'policy', 'schedules')
-    $missingPricingSnapshotFields = if ($null -eq $PricingSnapshot) {
-        $requiredPricingSnapshotFields
-    } else {
-        @($requiredPricingSnapshotFields | Where-Object { $PricingSnapshot.PSObject.Properties.Name -cnotcontains $_ })
-    }
     $snapshotDate = if ($null -ne $PricingSnapshot -and
         $PricingSnapshot.PSObject.Properties.Name -ccontains 'snapshot_date') {
         ConvertFrom-RouterCatalogIsoDate $PricingSnapshot.snapshot_date
@@ -241,10 +246,10 @@ function Test-RouterPricingSnapshotObject {
         $PricingSnapshot.PSObject.Properties.Name -ccontains 'retrieved_on') {
         ConvertFrom-RouterCatalogIsoDate $PricingSnapshot.retrieved_on
     } else { $null }
-    if ($missingPricingSnapshotFields.Count -gt 0 -or
+    if (-not (Test-RouterCatalogExactProperties -Value $PricingSnapshot -ExpectedNames $requiredPricingSnapshotFields) -or
         $null -eq $snapshotDate -or $null -eq $snapshotRetrievedOn -or
-        $PricingSnapshot.currency -isnot [string] -or [string]::IsNullOrWhiteSpace($PricingSnapshot.currency) -or
-        $PricingSnapshot.rate_unit -isnot [string] -or [string]::IsNullOrWhiteSpace($PricingSnapshot.rate_unit) -or
+        $PricingSnapshot.currency -isnot [string] -or $PricingSnapshot.currency -cne 'USD' -or
+        $PricingSnapshot.rate_unit -isnot [string] -or $PricingSnapshot.rate_unit -cne 'per_million_tokens' -or
         $PricingSnapshot.policy -isnot [string] -or [string]::IsNullOrWhiteSpace($PricingSnapshot.policy) -or
         $PricingSnapshot.schedules -isnot [Collections.IList]) {
         $errors.Add((New-RouterCatalogError -Code 'pricing_snapshot_invalid' -File $SourceFile -Path '$' -Identity $null -Message 'Pricing snapshot lacks valid required catalog fields.'))
@@ -322,10 +327,14 @@ function Test-RouterPricingSnapshotObject {
                 'effective_from', 'effective_through', 'input_tokens_min', 'input_tokens_max',
                 'input_usd_per_million_tokens', 'output_usd_per_million_tokens'
             )
+            $allowedPeriodFields = @($requiredPeriodFields) + @('note')
             $missingPeriodFields = if ($null -eq $period) { $requiredPeriodFields } else {
                 @($requiredPeriodFields | Where-Object { $period.PSObject.Properties.Name -cnotcontains $_ })
             }
-            $periodValid = $missingPeriodFields.Count -eq 0
+            $unknownPeriodFields = if ($null -eq $period) { @() } else {
+                @($period.PSObject.Properties.Name | Where-Object { $allowedPeriodFields -cnotcontains $_ })
+            }
+            $periodValid = $missingPeriodFields.Count -eq 0 -and $unknownPeriodFields.Count -eq 0
             $effectiveFrom = $null
             $effectiveThrough = $null
             if ($periodValid) {
