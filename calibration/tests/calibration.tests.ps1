@@ -202,6 +202,18 @@ if (Test-Path -LiteralPath $implementationPath -PathType Leaf) {
         $bothPass = Get-CalibrationCategoryProposal -ExternalCategory 'strong' -JudgeDecisions @('pass', 'pass')
         Assert-Equal $bothPass.proposed_category 'strong'
         Assert-Equal $bothPass.outcome 'retained'
+        $deterministicPass = [pscustomobject]@{ outcome = 'pass'; checks = @() }
+        $deterministicFail = [pscustomobject]@{ outcome = 'fail'; checks = @() }
+        $deterministicUnavailable = [pscustomobject]@{ outcome = 'review_required'; reason_code = 'python_unavailable'; checks = @() }
+        $confirmed = Get-CalibrationCategoryProposal -ExternalCategory 'strong' `
+            -JudgeDecisions @('pass', 'pass') -DeterministicResult $deterministicPass
+        Assert-Equal $confirmed.proposed_category 'strong'
+        foreach ($deterministicResult in @($deterministicFail, $deterministicUnavailable)) {
+            $proposal = Get-CalibrationCategoryProposal -ExternalCategory 'frontier' `
+                -JudgeDecisions @('pass', 'pass') -DeterministicResult $deterministicResult
+            Assert-Equal $proposal.proposed_category 'unknown'
+            Assert-Equal $proposal.outcome 'review_required'
+        }
         foreach ($decisions in @(@('fail', 'fail'), @('pass', 'fail'), @('fail', 'pass'))) {
             $proposal = Get-CalibrationCategoryProposal -ExternalCategory 'frontier' -JudgeDecisions $decisions
             Assert-Equal $proposal.proposed_category 'unknown'
@@ -212,6 +224,209 @@ if (Test-Path -LiteralPath $implementationPath -PathType Leaf) {
         $threw = $false
         try { Get-CalibrationCategoryProposal -ExternalCategory 'unsupported' -JudgeDecisions @('pass', 'pass') | Out-Null } catch { $threw = $true }
         Assert-True $threw 'Calibration must never produce or retain unsupported.'
+    }
+
+    Invoke-Assertion 'exact-fields grader accepts one exact JSON value and rejects ambiguity shape drift and malformed output' {
+        $prompt = @((Import-CalibrationSet -Path $setPath -RubricsRoot $rubricsRoot).set.prompts |
+            Where-Object { $_.id -ceq 'extraction-low-general-v1' })[0]
+        $exact = '{"event":"Robotics club demo","date":"2026-09-14","room":"Room B12"}'
+        $pass = Invoke-CalibrationDeterministicGrader -Prompt $prompt -ResponseText $exact
+        Assert-Equal $pass.outcome 'pass'
+        Assert-Equal @($pass.checks | Where-Object { -not $_.passed }).Count 0
+
+        $fenced = Invoke-CalibrationDeterministicGrader -Prompt $prompt -ResponseText @'
+```json
+{"event":"Robotics club demo","date":"2026-09-14","room":"Room B12"}
+```
+'@
+        Assert-Equal $fenced.outcome 'pass'
+
+        $extra = Invoke-CalibrationDeterministicGrader -Prompt $prompt `
+            -ResponseText '{"event":"Robotics club demo","date":"2026-09-14","room":"Room B12","extra":true}'
+        Assert-Equal $extra.outcome 'fail'
+        Assert-True @($extra.checks | Where-Object { $_.id -ceq 'schema' -and -not $_.passed }).Count
+
+        $ambiguous = Invoke-CalibrationDeterministicGrader -Prompt $prompt -ResponseText @'
+```json
+{"event":"Robotics club demo","date":"2026-09-14","room":"Room B12"}
+```
+and
+```json
+{"event":"Robotics club demo","date":"2026-09-14","room":"Room B12"}
+```
+'@
+        Assert-Equal $ambiguous.outcome 'review_required'
+        Assert-Equal $ambiguous.reason_code 'malformed_output'
+    }
+
+    Invoke-Assertion 'verified-answer and summary graders normalize evidence and record every check' {
+        $set = (Import-CalibrationSet -Path $setPath -RubricsRoot $rubricsRoot).set
+        $mathPrompt = @($set.prompts | Where-Object { $_.id -ceq 'math-low-mathematics-v1' })[0]
+        $mathPass = Invoke-CalibrationDeterministicGrader -Prompt $mathPrompt `
+            -ResponseText 'Subtract 5 from both sides, divide by 3, therefore X = 5.'
+        Assert-Equal $mathPass.outcome 'pass'
+        Assert-Equal @($mathPass.checks).Count 3
+        $mathFail = Invoke-CalibrationDeterministicGrader -Prompt $mathPrompt -ResponseText 'x = 5.'
+        Assert-Equal $mathFail.outcome 'fail'
+        Assert-Equal @($mathFail.checks | Where-Object { -not $_.passed }).Count 2
+
+        $summaryPrompt = @($set.prompts | Where-Object { $_.id -ceq 'summarization-medium-medicine-v1' })[0]
+        $summaryPass = Invoke-CalibrationDeterministicGrader -Prompt $summaryPrompt -ResponseText @'
+- Tuesday at 9 a.m. in Room 4.
+- Covers room labels and record filing.
+- Attendance questions go to the training coordinator.
+'@
+        Assert-Equal $summaryPass.outcome 'pass'
+        Assert-Equal @($summaryPass.checks | Where-Object { -not $_.passed }).Count 0
+        $summaryFail = Invoke-CalibrationDeterministicGrader -Prompt $summaryPrompt -ResponseText @'
+Tuesday at 9 a.m. in Room 4 covers room labels and record filing. Ask the training coordinator about attendance and clinical advice for patient treatment.
+'@
+        Assert-Equal $summaryFail.outcome 'fail'
+        Assert-True @($summaryFail.checks | Where-Object { $_.kind -in @('forbidden_claim_absent', 'required_omission_absent') -and -not $_.passed }).Count
+    }
+
+    Invoke-Assertion 'executable grader handles pass fail malformed timeout and unavailable runtime without provider calls' {
+        $prompt = @((Import-CalibrationSet -Path $setPath -RubricsRoot $rubricsRoot).set.prompts |
+            Where-Object { $_.id -ceq 'coding-low-computer-science-v1' })[0]
+        $code = @'
+```python
+def sum_even(values):
+    return sum(value for value in values if value % 2 == 0)
+```
+'@
+        $script:PythonExecutions = 0
+        $passingExecutor = {
+            param($ExtractedCode, $Grader, $PythonExecutable, $TimeoutMilliseconds)
+            $script:PythonExecutions++
+            [pscustomobject]@{
+                status = 'completed'
+                checks = @(
+                    [pscustomobject]@{ id = 'test[0]'; passed = $true; detail = 'matched' }
+                    [pscustomobject]@{ id = 'test[1]'; passed = $true; detail = 'matched' }
+                    [pscustomobject]@{ id = 'test[2]'; passed = $true; detail = 'matched' }
+                )
+            }
+        }
+        $pass = Invoke-CalibrationDeterministicGrader -Prompt $prompt -ResponseText $code `
+            -PythonExecutor $passingExecutor
+        Assert-Equal $pass.outcome 'pass'
+        Assert-Equal $script:PythonExecutions 1
+
+        $failingExecutor = {
+            param($ExtractedCode, $Grader, $PythonExecutable, $TimeoutMilliseconds)
+            [pscustomobject]@{
+                status = 'completed'
+                checks = @(
+                    [pscustomobject]@{ id = 'test[0]'; passed = $false; detail = 'mismatch' }
+                    [pscustomobject]@{ id = 'test[1]'; passed = $true; detail = 'matched' }
+                    [pscustomobject]@{ id = 'test[2]'; passed = $true; detail = 'matched' }
+                )
+            }
+        }
+        $failed = Invoke-CalibrationDeterministicGrader -Prompt $prompt -ResponseText $code `
+            -PythonExecutor $failingExecutor
+        Assert-Equal $failed.outcome 'fail'
+
+        $timeoutExecutor = {
+            param($ExtractedCode, $Grader, $PythonExecutable, $TimeoutMilliseconds)
+            [pscustomobject]@{ status = 'timeout'; checks = @() }
+        }
+        $timedOut = Invoke-CalibrationDeterministicGrader -Prompt $prompt -ResponseText $code `
+            -PythonExecutor $timeoutExecutor
+        Assert-Equal $timedOut.outcome 'review_required'
+        Assert-Equal $timedOut.reason_code 'timeout'
+
+        $beforeMalformed = $script:PythonExecutions
+        $malformed = Invoke-CalibrationDeterministicGrader -Prompt $prompt -ResponseText @'
+```python
+def sum_even(values): return 0
+```
+text
+```python
+def other(): return 1
+```
+'@ `
+            -PythonExecutor $passingExecutor
+        Assert-Equal $malformed.outcome 'review_required'
+        Assert-Equal $malformed.reason_code 'malformed_output'
+        Assert-Equal $script:PythonExecutions $beforeMalformed
+
+        $unavailable = Invoke-CalibrationDeterministicGrader -Prompt $prompt -ResponseText $code `
+            -PythonExecutable 'definitely-missing-python-runtime'
+        Assert-Equal $unavailable.outcome 'review_required'
+        Assert-Equal $unavailable.reason_code 'python_unavailable'
+    }
+
+    Invoke-Assertion 'default executable grader runs fixed tests in an isolated temporary directory when Python exists' {
+        $prompt = @((Import-CalibrationSet -Path $setPath -RubricsRoot $rubricsRoot).set.prompts |
+            Where-Object { $_.id -ceq 'coding-low-computer-science-v1' })[0]
+        $resolvedPython = Resolve-RouterPythonExecutable
+        $result = Invoke-CalibrationDeterministicGrader -Prompt $prompt -ResponseText @'
+```python
+def sum_even(values):
+    return sum(value for value in values if value % 2 == 0)
+```
+'@
+        if ($null -eq $resolvedPython) {
+            Assert-Equal $result.outcome 'review_required'
+            Assert-Equal $result.reason_code 'python_unavailable'
+        } else {
+            Assert-Equal $result.outcome 'pass'
+            Assert-Equal @($result.checks).Count 3
+        }
+    }
+
+    Invoke-Assertion 'route-only selects all routes without candidate or judge execution and writes one bounded artifact' {
+        $runId = 'route-test-{0}' -f [guid]::NewGuid().ToString('N')
+        $resultsRoot = Join-Path $calibrationRoot 'results'
+        $temporary = Join-Path $resultsRoot $runId
+        try {
+            $script:RouteCalls = 0
+            $script:RouteCandidateCalls = 0
+            $script:RouteJudgeCalls = 0
+            $routeInvoker = {
+                param($Request, $PromptDefinition)
+                $script:RouteCalls++
+                [pscustomobject]@{
+                    status = 'selected'
+                    selected_route = [pscustomobject]@{
+                        configuration_id = 'gpt-5.6-sol__max'; provider = 'openai'; launcher = 'codex'
+                        model = 'gpt-5.6-sol'; effort = 'max'
+                    }
+                }
+            }
+            $candidateSpy = { $script:RouteCandidateCalls++; throw 'route-only executed a candidate' }
+            $judgeSpy = { $script:RouteJudgeCalls++; throw 'route-only executed a judge' }
+            $result = Invoke-Calibration -Route -RunId $runId -ResultsRoot $resultsRoot `
+                -CalibrationSetPath $setPath -RubricsRoot $rubricsRoot -RouteInvoker $routeInvoker `
+                -RouterInvoker $candidateSpy -JudgeInvoker $judgeSpy
+            Assert-Equal $result.mode 'route'
+            Assert-Equal $script:RouteCalls 24
+            Assert-Equal $script:RouteCandidateCalls 0
+            Assert-Equal $script:RouteJudgeCalls 0
+            Assert-Equal @($result.routes).Count 24
+            Assert-True (Test-Path -LiteralPath $result.artifact_path -PathType Leaf)
+            Assert-False (Test-Path -LiteralPath (Join-Path $temporary 'raw'))
+        } finally {
+            if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Recurse -Force }
+        }
+    }
+
+    Invoke-Assertion 'route and run are mutually exclusive before calls or writes' {
+        $runId = 'exclusive-test-{0}' -f [guid]::NewGuid().ToString('N')
+        $resultsRoot = Join-Path $calibrationRoot 'results'
+        $temporary = Join-Path $resultsRoot $runId
+        $script:ExclusiveCalls = 0
+        $spy = { $script:ExclusiveCalls++; throw 'mutually exclusive mode invoked work' }
+        $threw = $false
+        try {
+            Invoke-Calibration -Route -Run -RunId $runId -ResultsRoot $resultsRoot `
+                -CalibrationSetPath $setPath -RubricsRoot $rubricsRoot `
+                -RouteInvoker $spy -RouterInvoker $spy -JudgeInvoker $spy | Out-Null
+        } catch { $threw = $true }
+        Assert-True $threw
+        Assert-Equal $script:ExclusiveCalls 0
+        Assert-False (Test-Path -LiteralPath $temporary)
     }
 
     Invoke-Assertion 'explicit run uses injected orchestration, records two decisions, and does not mutate profiles' {
@@ -226,10 +441,14 @@ if (Test-Path -LiteralPath $implementationPath -PathType Leaf) {
             $router = {
                 param($Request, $PromptDefinition)
                 $script:RunRouterCalls++
+                $answer = "answer-$($PromptDefinition.id)"
+                if ($PromptDefinition.id -ceq 'general-low-biology-v1') {
+                    $answer = "$answer api_key=calibrationsecret123"
+                }
                 [pscustomobject]@{
                     response = [pscustomobject]@{
                         status = 'completed'; configuration_id = 'gpt-5.6-sol__max'; provider = 'openai'
-                        launcher = 'codex'; model = 'gpt-5.6-sol'; effort = 'max'; output = "answer-$($PromptDefinition.id)"
+                        launcher = 'codex'; model = 'gpt-5.6-sol'; effort = 'max'; output = $answer
                         price = 1.25; latency = 12
                     }
                     trace = [pscustomobject]@{ effective_quality = 'strong'; quality_bottleneck = 'task_types.general' }
@@ -238,7 +457,7 @@ if (Test-Path -LiteralPath $implementationPath -PathType Leaf) {
             $judge = {
                 param($JudgeProfileId, $JudgePayload, $PromptDefinition)
                 $script:RunJudgeCalls++
-                [pscustomobject]@{ decision = 'pass'; rationale = "reviewed-$JudgeProfileId" }
+                [pscustomobject]@{ decision = 'pass'; rationale = "reviewed-$JudgeProfileId Bearer judgecredential123" }
             }
             $result = Invoke-Calibration -Run -RunId $runId -ResultsRoot $resultsRoot `
                 -CalibrationSetPath $setPath -RubricsRoot $rubricsRoot -RouterInvoker $router -JudgeInvoker $judge
@@ -250,7 +469,27 @@ if (Test-Path -LiteralPath $implementationPath -PathType Leaf) {
             Assert-True (Test-Path -LiteralPath $result.artifact_path -PathType Leaf)
             $artifact = Get-Content -Raw -LiteralPath $result.artifact_path | ConvertFrom-Json -Depth 100
             Assert-Equal @($artifact.reviews).Count 24
-            foreach ($review in $artifact.reviews) { Assert-Equal @($review.judge_decisions).Count 2 }
+            $promptById = @{}
+            foreach ($prompt in (Import-CalibrationSet -Path $setPath -RubricsRoot $rubricsRoot).set.prompts) {
+                $promptById[[string]$prompt.id] = $prompt
+            }
+            foreach ($review in $artifact.reviews) {
+                Assert-Equal @($review.judge_decisions).Count 2
+                $hasGrader = $promptById[[string]$review.item_id].grading.PSObject.Properties.Name -ccontains 'deterministic_grader'
+                Assert-Equal ($null -ne $review.deterministic_result) $hasGrader
+                $rawResponse = Get-Content -Raw -LiteralPath (Join-Path $temporary $review.raw_response_file) | ConvertFrom-Json -Depth 100
+                $expectedRaw = "answer-$($review.item_id)"
+                if ($review.item_id -ceq 'general-low-biology-v1') { $expectedRaw = "$expectedRaw api_key=[credential redacted]" }
+                Assert-Equal $rawResponse.raw_candidate_output $expectedRaw
+                $rawReviews = Get-Content -Raw -LiteralPath (Join-Path $temporary $review.raw_review_file) | ConvertFrom-Json -Depth 100
+                Assert-Equal @($rawReviews.raw_judge_outputs).Count 2
+                Assert-True ($null -ne $rawReviews.anonymized_payload)
+            }
+            $persistedResults = @(Get-ChildItem -LiteralPath $temporary -File -Recurse |
+                ForEach-Object { Get-Content -Raw -LiteralPath $_.FullName }) -join "`n"
+            Assert-False $persistedResults.Contains('calibrationsecret123', [StringComparison]::Ordinal)
+            Assert-False $persistedResults.Contains('judgecredential123', [StringComparison]::Ordinal)
+            Assert-True $persistedResults.Contains('[credential redacted]', [StringComparison]::Ordinal)
             $repeatThrew = $false
             try {
                 Invoke-Calibration -Run -RunId $runId -ResultsRoot $resultsRoot `

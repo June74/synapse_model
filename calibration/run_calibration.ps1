@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
     [switch]$Run,
+    [switch]$Route,
     [AllowNull()][string]$RunId,
     [string]$CalibrationSetPath = (Join-Path $PSScriptRoot 'calibration-set-v1.json'),
     [string]$RubricsRoot = (Join-Path $PSScriptRoot 'rubrics'),
@@ -17,6 +18,7 @@ $script:CalibrationRouterPath = Join-Path $script:CalibrationProjectRoot 'router
 if (-not (Get-Command Invoke-RouterRun -ErrorAction SilentlyContinue)) {
     . $script:CalibrationRouterPath
 }
+. (Join-Path $PSScriptRoot 'lib/grading.ps1')
 
 function Test-CalibrationProperty {
     param([AllowNull()][object]$Value, [Parameter(Mandatory)][string]$Name)
@@ -54,7 +56,8 @@ function Resolve-CalibrationResultPath {
     [CmdletBinding()]
     param(
         [string]$ResultsRoot = $script:CalibrationResultsRoot,
-        [Parameter(Mandatory)][AllowEmptyString()][string]$RunId
+        [Parameter(Mandatory)][AllowEmptyString()][string]$RunId,
+        [ValidateSet('review.json', 'route-plan.json')][string]$ArtifactName = 'review.json'
     )
 
     if (-not (Test-CalibrationSafeLeafName $RunId)) {
@@ -69,7 +72,7 @@ function Resolve-CalibrationResultPath {
     if (-not (Test-CalibrationPathUnderRoot -Path $runDirectory -Root $resolvedRoot)) {
         throw 'Resolved calibration result escaped the configured results root.'
     }
-    return Join-Path $runDirectory 'review.json'
+    return Join-Path $runDirectory $ArtifactName
 }
 
 function Test-CalibrationRubric {
@@ -281,6 +284,26 @@ function Copy-CalibrationSanitizedValue {
     return [pscustomobject]$objectCopy
 }
 
+function Copy-CalibrationCredentialSafeValue {
+    param([AllowNull()][object]$Value)
+    if ($null -eq $Value) { return $null }
+    if ($Value -is [string]) { return ConvertTo-RunnerCredentialRedactedText -Text ([string]$Value) }
+    if ($Value -is [Collections.IDictionary]) {
+        $copy = [ordered]@{}
+        foreach ($key in $Value.Keys) { $copy[[string]$key] = Copy-CalibrationCredentialSafeValue $Value[$key] }
+        return [pscustomobject]$copy
+    }
+    if ($Value -is [Collections.IEnumerable] -and $Value -isnot [string]) {
+        return @($Value | ForEach-Object { Copy-CalibrationCredentialSafeValue $_ })
+    }
+    if ($Value -is [ValueType]) { return $Value }
+    $objectCopy = [ordered]@{}
+    foreach ($property in $Value.PSObject.Properties) {
+        $objectCopy[$property.Name] = Copy-CalibrationCredentialSafeValue $property.Value
+    }
+    return [pscustomobject]$objectCopy
+}
+
 function New-CalibrationJudgePayload {
     [CmdletBinding()]
     param(
@@ -314,12 +337,15 @@ function Get-CalibrationCategoryProposal {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][ValidateSet('unknown', 'standard', 'strong', 'frontier')][string]$ExternalCategory,
-        [Parameter(Mandatory)][object[]]$JudgeDecisions
+        [Parameter(Mandatory)][object[]]$JudgeDecisions,
+        [AllowNull()][object]$DeterministicResult
     )
     if ($JudgeDecisions.Count -ne 2 -or @($JudgeDecisions | Where-Object { $_ -cnotin @('pass', 'fail') }).Count -gt 0) {
         throw 'Exactly two pass/fail judge decisions are required.'
     }
-    if ($JudgeDecisions[0] -ceq 'pass' -and $JudgeDecisions[1] -ceq 'pass') {
+    $deterministicPassed = $null -eq $DeterministicResult -or
+        ((Test-CalibrationProperty $DeterministicResult 'outcome') -and $DeterministicResult.outcome -ceq 'pass')
+    if ($JudgeDecisions[0] -ceq 'pass' -and $JudgeDecisions[1] -ceq 'pass' -and $deterministicPassed) {
         return [pscustomobject][ordered]@{ outcome = 'retained'; proposed_category = $ExternalCategory }
     }
     return [pscustomobject][ordered]@{ outcome = 'review_required'; proposed_category = 'unknown' }
@@ -341,6 +367,55 @@ function Get-CalibrationProfileAndCandidate {
 function Invoke-CalibrationDefaultRouter {
     param([Parameter(Mandatory)][object]$Request, [Parameter(Mandatory)][object]$PromptDefinition)
     return Invoke-RouterRun -Request $Request -RunMode calibration
+}
+
+function New-CalibrationRouteContext {
+    $profilesRoot = Join-Path $script:CalibrationProjectRoot 'profiles'
+    $matrixPath = Join-Path $script:CalibrationProjectRoot 'pilot/model_matrix.json'
+    $profileSchemaPath = Join-Path $script:CalibrationProjectRoot 'router/schemas/model-profile.schema.json'
+    $requestSchemaPath = Join-Path $script:CalibrationProjectRoot 'router/schemas/request-profile.schema.json'
+    $pricingPath = Join-Path $script:CalibrationProjectRoot 'router/data/pricing-snapshot-2026-08-22.json'
+    $qualityPath = Join-Path $script:CalibrationProjectRoot 'router/data/quality-snapshot-2026-08-22.json'
+    $catalog = Import-RouterProfileCatalog -ProfilesRoot $profilesRoot -MatrixPath $matrixPath `
+        -ProfileSchemaPath $profileSchemaPath -PricingSnapshotPath $pricingPath `
+        -QualitySnapshotPath $qualityPath
+    if (-not $catalog.valid) { throw 'Router profiles are invalid for calibration route-only mode.' }
+    $pricing = Get-Content -Raw -LiteralPath $pricingPath -ErrorAction Stop |
+        ConvertFrom-Json -Depth 100 -ErrorAction Stop
+    return [pscustomobject][ordered]@{
+        profiles = @($catalog.profiles)
+        pricing_snapshot = $pricing
+        token_estimates = New-RouterTokenEstimateDocument -Profiles @($catalog.profiles)
+        request_schema_path = $requestSchemaPath
+        as_of_date = [string]$pricing.snapshot_date
+    }
+}
+
+function Invoke-CalibrationDefaultRoute {
+    param(
+        [Parameter(Mandatory)][object]$Request,
+        [Parameter(Mandatory)][object]$PromptDefinition,
+        [Parameter(Mandatory)][object]$Context
+    )
+    $normalized = ConvertTo-RouterNormalizedRequest -Request $Request
+    $decision = Invoke-RouterPolicy -Request $normalized -Profiles @($Context.profiles) `
+        -RequestSchemaPath ([string]$Context.request_schema_path) `
+        -PricingSnapshot $Context.pricing_snapshot -TokenEstimates $Context.token_estimates `
+        -AsOfDate ([string]$Context.as_of_date)
+    if ($null -eq $decision.selected_candidate) {
+        return [pscustomobject][ordered]@{ status = 'no_eligible'; selected_route = $null }
+    }
+    $selected = $decision.selected_candidate
+    return [pscustomobject][ordered]@{
+        status = 'selected'
+        selected_route = [pscustomobject][ordered]@{
+            configuration_id = [string]$selected.configuration_id
+            provider = [string]$selected.provider
+            launcher = [string]$selected.launcher
+            model = [string]$selected.model
+            effort = [string]$selected.effort
+        }
+    }
 }
 
 function Invoke-CalibrationDefaultJudge {
@@ -369,7 +444,10 @@ $($JudgePayload | ConvertTo-Json -Depth 100 -Compress)
 
 function ConvertTo-CalibrationJudgeDecision {
     param([Parameter(Mandatory)][object]$Value, [Parameter(Mandatory)][string]$JudgeProfileId)
-    if (-not (Test-CalibrationProperty $Value 'decision') -or
+    $propertyNames = @($Value.PSObject.Properties.Name)
+    if ($propertyNames.Count -ne 2 -or
+        $propertyNames -cnotcontains 'decision' -or $propertyNames -cnotcontains 'rationale' -or
+        -not (Test-CalibrationProperty $Value 'decision') -or
         $Value.decision -cnotin @('pass', 'fail') -or
         -not (Test-CalibrationProperty $Value 'rationale') -or
         [string]::IsNullOrWhiteSpace([string]$Value.rationale)) {
@@ -378,7 +456,7 @@ function ConvertTo-CalibrationJudgeDecision {
     return [pscustomobject][ordered]@{
         judge_profile_id = $JudgeProfileId
         decision = [string]$Value.decision
-        rationale = [string]$Value.rationale
+        rationale = ConvertTo-RunnerCredentialRedactedText -Text ([string]$Value.rationale)
     }
 }
 
@@ -399,14 +477,20 @@ function Invoke-Calibration {
     [CmdletBinding()]
     param(
         [switch]$Run,
+        [switch]$Route,
         [AllowNull()][string]$RunId,
         [string]$CalibrationSetPath = (Join-Path $script:CalibrationRoot 'calibration-set-v1.json'),
         [string]$RubricsRoot = (Join-Path $script:CalibrationRoot 'rubrics'),
         [string]$ResultsRoot = $script:CalibrationResultsRoot,
+        [scriptblock]$RouteInvoker,
         [scriptblock]$RouterInvoker,
-        [scriptblock]$JudgeInvoker
+        [scriptblock]$JudgeInvoker,
+        [scriptblock]$PythonExecutor,
+        [AllowNull()][string]$PythonExecutable,
+        [ValidateRange(100, 10000)][int]$PythonTimeoutMilliseconds = 2000
     )
 
+    if ($Run -and $Route) { throw 'Run and Route are mutually exclusive.' }
     $loaded = Import-CalibrationSet -Path $CalibrationSetPath -RubricsRoot $RubricsRoot
     if (-not $loaded.valid) {
         throw ('Calibration inputs are invalid: {0}' -f (@($loaded.errors) -join ', '))
@@ -424,7 +508,7 @@ function Invoke-Calibration {
         }
     )
     $planIdentity = Get-CalibrationSha256 -Text ($plan | ConvertTo-Json -Depth 20 -Compress)
-    if (-not $Run) {
+    if (-not $Run -and -not $Route) {
         return [pscustomobject][ordered]@{
             mode = 'dry-run'
             calibration_set_version = [string]$loaded.set.version
@@ -435,11 +519,58 @@ function Invoke-Calibration {
     }
 
     if ([string]::IsNullOrWhiteSpace($RunId)) { $RunId = New-CalibrationRunId }
-    $artifactPath = Resolve-CalibrationResultPath -ResultsRoot $ResultsRoot -RunId $RunId
+    $artifactName = if ($Route) { 'route-plan.json' } else { 'review.json' }
+    $artifactPath = Resolve-CalibrationResultPath -ResultsRoot $ResultsRoot -RunId $RunId -ArtifactName $artifactName
     $runDirectory = Split-Path -Parent $artifactPath
     if (Test-Path -LiteralPath $runDirectory) {
         throw "Calibration run '$RunId' already exists and will not be overwritten."
     }
+    if ($Route) {
+        if ($null -eq $RouteInvoker) {
+            $routeContext = New-CalibrationRouteContext
+            $RouteInvoker = {
+                param($Request, $PromptDefinition)
+                Invoke-CalibrationDefaultRoute -Request $Request -PromptDefinition $PromptDefinition -Context $routeContext
+            }.GetNewClosure()
+        }
+        $routes = @(
+            foreach ($prompt in @($loaded.set.prompts)) {
+                $routeResult = & $RouteInvoker $prompt.request $prompt
+                if ($null -eq $routeResult -or -not (Test-CalibrationProperty $routeResult 'status') -or
+                    $routeResult.status -cnotin @('selected', 'no_eligible') -or
+                    ($routeResult.status -ceq 'selected' -and (-not (Test-CalibrationProperty $routeResult 'selected_route') -or
+                        $null -eq $routeResult.selected_route))) {
+                    throw "Calibration route-only selection failed for '$($prompt.id)'."
+                }
+                [pscustomobject][ordered]@{
+                    item_id = [string]$prompt.id
+                    item_version = [string]$prompt.version
+                    task_type = [string]$prompt.request.task_type
+                    domain = [string]$prompt.request.domain
+                    complexity = [string]$prompt.request.complexity
+                    status = [string]$routeResult.status
+                    selected_route = $routeResult.selected_route
+                }
+            }
+        )
+        $artifact = [pscustomobject][ordered]@{
+            artifact_version = 'calibration-route-plan/v1'
+            calibration_set_version = [string]$loaded.set.version
+            run_id = $RunId
+            provider_calls = 0
+            routes = $routes
+        }
+        Write-CalibrationJsonFile -Path $artifactPath -Value $artifact
+        return [pscustomobject][ordered]@{
+            mode = 'route'
+            calibration_set_version = [string]$loaded.set.version
+            run_id = $RunId
+            artifact_path = $artifactPath
+            provider_calls = 0
+            routes = $routes
+        }
+    }
+
     $rawDirectory = Join-Path $runDirectory 'raw'
     if ($null -eq $RouterInvoker) { $RouterInvoker = ${function:Invoke-CalibrationDefaultRouter} }
     if ($null -eq $JudgeInvoker) { $JudgeInvoker = ${function:Invoke-CalibrationDefaultJudge} }
@@ -466,11 +597,22 @@ function Invoke-Calibration {
             profile_id = [string]$response.configuration_id
             candidate_id = [string]$response.configuration_id
         }
+        $responseText = ConvertTo-RunnerCredentialRedactedText -Text ([string]$response.output)
         $payload = New-CalibrationJudgePayload -Prompt $prompt -Rubric $rubric `
-            -ResponseText ([string]$response.output) -IdentityMetadata $identity
+            -ResponseText $responseText -IdentityMetadata $identity
+        $deterministicResult = if (Test-CalibrationProperty $prompt.grading 'deterministic_grader') {
+            Invoke-CalibrationDeterministicGrader -Prompt $prompt -ResponseText $responseText `
+                -PythonExecutor $PythonExecutor -PythonExecutable $PythonExecutable `
+                -PythonTimeoutMilliseconds $PythonTimeoutMilliseconds
+        } else { $null }
+        $rawJudgeOutputs = [Collections.Generic.List[object]]::new()
         $decisions = @(
             foreach ($judgeId in $judgeIds) {
                 $rawDecision = & $JudgeInvoker $judgeId $payload $prompt
+                $rawJudgeOutputs.Add([pscustomobject][ordered]@{
+                    judge_profile_id = $judgeId
+                    raw_output = Copy-CalibrationCredentialSafeValue $rawDecision
+                })
                 ConvertTo-CalibrationJudgeDecision -Value $rawDecision -JudgeProfileId $judgeId
             }
         )
@@ -479,16 +621,19 @@ function Invoke-Calibration {
             [string]$response.effective_quality
         } else { [string]$prompt.external_category }
         $proposal = Get-CalibrationCategoryProposal -ExternalCategory $externalCategory `
-            -JudgeDecisions @($decisions.decision)
+            -JudgeDecisions @($decisions.decision) -DeterministicResult $deterministicResult
 
         $safeItem = [string]$prompt.id
         $candidateOutputPath = Join-Path $rawDirectory ("$safeItem-response.json")
         $judgeOutputPath = Join-Path $rawDirectory ("$safeItem-reviews.json")
         Write-CalibrationJsonFile -Path $candidateOutputPath -Value ([pscustomobject]@{
-            item_id = $safeItem; response_text = [string]$response.output
+            item_id = $safeItem; raw_candidate_output = $responseText
         })
         Write-CalibrationJsonFile -Path $judgeOutputPath -Value ([pscustomobject]@{
-            item_id = $safeItem; payload = $payload; decisions = $decisions
+            item_id = $safeItem
+            anonymized_payload = $payload
+            raw_judge_outputs = @($rawJudgeOutputs)
+            normalized_decisions = $decisions
         })
 
         $reviews.Add([pscustomobject][ordered]@{
@@ -498,6 +643,7 @@ function Invoke-Calibration {
             outcome = [string]$proposal.outcome
             proposed_category = [string]$proposal.proposed_category
             selected_configuration_id = [string]$response.configuration_id
+            deterministic_result = $deterministicResult
             judge_decisions = $decisions
             raw_response_file = [IO.Path]::GetRelativePath($runDirectory, $candidateOutputPath)
             raw_review_file = [IO.Path]::GetRelativePath($runDirectory, $judgeOutputPath)
@@ -508,7 +654,7 @@ function Invoke-Calibration {
         artifact_version = 'calibration-review-artifact/v1'
         calibration_set_version = [string]$loaded.set.version
         run_id = $RunId
-        policy = 'retain only on two passes; otherwise propose unknown; never rewrite profiles'
+        policy = 'retain only when every applicable deterministic grader and both judges pass; otherwise propose unknown; never rewrite profiles'
         reviews = @($reviews)
     }
     Write-CalibrationJsonFile -Path $artifactPath -Value $artifact
@@ -523,13 +669,13 @@ function Invoke-Calibration {
 
 if ($MyInvocation.InvocationName -cne '.') {
     try {
-        $result = Invoke-Calibration -Run:$Run -RunId $RunId -CalibrationSetPath $CalibrationSetPath `
+        $result = Invoke-Calibration -Run:$Run -Route:$Route -RunId $RunId -CalibrationSetPath $CalibrationSetPath `
             -RubricsRoot $RubricsRoot -ResultsRoot $ResultsRoot
         [Console]::Out.WriteLine(($result | ConvertTo-Json -Depth 100 -Compress))
         exit 0
     } catch {
         [Console]::Out.WriteLine(([pscustomobject][ordered]@{
-            mode = if ($Run) { 'run' } else { 'dry-run' }
+            mode = if ($Run) { 'run' } elseif ($Route) { 'route' } else { 'dry-run' }
             error = 'calibration_failed'
             message = $_.Exception.Message
         } | ConvertTo-Json -Compress))
