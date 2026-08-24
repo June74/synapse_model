@@ -49,3 +49,12 @@ The `scope-gate` and `setback-logger` instructions were read successfully from t
 - Correction: expanded each catalog alias to its configured root and opened the incident using the exact path returned by `Get-ChildItem`.
 - Prevention: resolve catalog aliases and directory entries before issuing literal-path reads; do not derive filenames from display titles.
 - Verification: all required skill files and this incident were subsequently read successfully from resolved paths.
+
+### 2026-08-24 - schema filename assumption
+
+- Symptom: an interface-inspection command requested `request.schema.json` and `response.schema.json` even though the live test harness names `request-profile.schema.json` and `router-response.schema.json`.
+- Impact: two read-only schema reads reported path-not-found errors. Parallel source inspection continued; no product file or runtime state changed.
+- Confirmed cause: the command shortened filenames from memory instead of using the literal paths already exposed by the test harness.
+- Correction: use the exact schema paths from `router/tests/router.tests.ps1` and verify them through a directory listing before reading.
+- Prevention: copy live path variables verbatim; never normalize or abbreviate repository filenames.
+- Verification: the corrected literal-path reads loaded all three schema filenames and the full request and response schemas successfully.
