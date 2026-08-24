@@ -4,3 +4,8 @@
 
 # Local pilot results are runtime outputs and must never be committed.
 pilot/results/*.jsonl
+
+# Project-local router trace databases are runtime outputs.
+data/*.sqlite
+data/*.sqlite-shm
+data/*.sqlite-wal

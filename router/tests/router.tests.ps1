@@ -24,6 +24,7 @@ $requirementsModulePath = Join-Path $projectRoot 'router/lib/requirements.ps1'
 $qualityModulePath = Join-Path $projectRoot 'router/lib/quality.ps1'
 $pricingModulePath = Join-Path $projectRoot 'router/lib/pricing.ps1'
 $policyModulePath = Join-Path $projectRoot 'router/lib/policy.ps1'
+$traceModulePath = Join-Path $projectRoot 'router/lib/trace.ps1'
 $requestSchemaPath = Join-Path $projectRoot 'router/schemas/request-profile.schema.json'
 $profileSchemaPath = Join-Path $projectRoot 'router/schemas/model-profile.schema.json'
 $responseSchemaPath = Join-Path $projectRoot 'router/schemas/router-response.schema.json'
@@ -77,6 +78,12 @@ $policyAvailable = Test-Path -LiteralPath $policyModulePath -PathType Leaf
 if ($policyAvailable) {
     . $policyModulePath
 }
+$traceAvailable = Test-Path -LiteralPath $traceModulePath -PathType Leaf
+if (-not $traceAvailable) {
+    [Console]::Error.WriteLine('RED: Task 7 trace bridge missing (router/lib/trace.ps1)')
+    exit 1
+}
+. $traceModulePath
 $task4Assertions = {
 Invoke-Assertion 'Task 4 requirements module is available' {
     Assert-Equal $requirementsAvailable $true
@@ -4542,6 +4549,156 @@ Invoke-Assertion 'policy selection is invariant to forward and reverse tied inpu
 
         Assert-Equal (@($selectedIdentities | Select-Object -Unique).Count) 1
         Assert-Equal $selectedIdentities[0] 'agy|shared-model__medium'
+    }
+
+function New-Task7TraceFixture {
+    param([string]$TraceId = 'powershell-trace-0001')
+
+    $identity = 'codex|gpt-test__medium'
+    return [pscustomobject][ordered]@{
+        trace_id = $TraceId
+        created_at = '2026-08-24T03:45:00Z'
+        run_mode = 'normal'
+        request_profile = [pscustomobject][ordered]@{
+            task_type = 'coding'
+            domain = 'computer_science'
+            complexity = 'medium'
+            quality_floor = 'strong'
+            latency = 'normal'
+            privacy_level = 'standard'
+            risk_level = 'standard'
+            output_length = 'normal'
+            language = 'english'
+            additional_capabilities = @('reasoning')
+        }
+        selected_candidate = $identity
+        output_status = 'completed'
+        reason_code = $null
+        effective_quality = 'strong'
+        quality_bottleneck = 'task_type.coding'
+        price = '0.0100000000000000000000000001'
+        price_final = $true
+        latency_ms = '10.5'
+        router_policy_version = 'policy-v1'
+        profile_schema_version = 'router-model-profile/v1'
+        model_profile_version = 'catalog-2026-08-24'
+        pricing_snapshot_date = '2026-08-22'
+        quality_snapshot_date = '2026-08-22'
+        calibration_set_version = 'calibration-set-v1'
+        prompt_hash = ('A' * 64)
+        response_hash = ('B' * 64)
+        prompt_content = $null
+        response_content = $null
+        candidate_evaluations = @(
+            [pscustomobject][ordered]@{
+                candidate_identity = $identity
+                launcher = 'codex'
+                configuration_id = 'gpt-test__medium'
+                provider = 'openai'
+                model = 'gpt-test'
+                effort = 'medium'
+                eligible = $true
+                selected = $true
+                rejection_stage = $null
+                rejection_reason_codes = @()
+                requirements = [pscustomobject][ordered]@{
+                    candidate_identity = $identity
+                    passed = $true
+                    reason_codes = @()
+                    unavailable_capabilities = @()
+                    unsupported_requirements = @()
+                }
+                quality = [pscustomobject][ordered]@{
+                    candidate_identity = $identity
+                    passed = $true
+                    reason_code = $null
+                    effective_quality = 'strong'
+                    quality_bottleneck = 'task_type.coding'
+                    relevant_categories = @(
+                        [pscustomobject][ordered]@{
+                            key = 'task_type.coding'
+                            category = 'strong'
+                        }
+                    )
+                }
+                price = [pscustomobject][ordered]@{
+                    candidate_identity = $identity
+                    available = $true
+                    reason_code = $null
+                    request_profile_group = 'coding|computer_science|medium|normal'
+                    estimated_input_tokens = 100
+                    estimated_visible_output_tokens = 50
+                    estimated_reasoning_tokens = 25
+                    estimated_billable_output_tokens = 75
+                    input_usd_per_million_tokens = '1.25'
+                    output_usd_per_million_tokens = '10.00'
+                    price = '0.000875'
+                    price_final = $false
+                }
+                latency_available = $true
+                latency_milliseconds = '10.5'
+            }
+        )
+    }
+}
+
+Invoke-Assertion 'Task 7 trace bridge stores one complete trace through standard input' {
+    $python = 'C:\Users\2006i\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe'
+    $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('router-trace-' + [guid]::NewGuid().ToString('N'))
+    $databasePath = Join-Path $tempRoot 'router.sqlite'
+    try {
+        $result = Write-RouterTrace -Trace (New-Task7TraceFixture) -DatabasePath $databasePath `
+            -PythonExecutable $python
+
+        Assert-Equal $result.ok $true
+        Assert-Equal $result.trace_id 'powershell-trace-0001'
+        Assert-Equal $result.candidate_evaluations_inserted 1
+        Assert-Equal (Test-Path -LiteralPath $databasePath -PathType Leaf) $true
+    } finally {
+        if (Test-Path -LiteralPath $tempRoot) {
+            [IO.Directory]::Delete($tempRoot, $true)
+        }
+    }
+}
+
+Invoke-Assertion 'Task 7 trace bridge surfaces writer validation as a structured object' {
+    $python = 'C:\Users\2006i\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe'
+    $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('router-trace-' + [guid]::NewGuid().ToString('N'))
+    $databasePath = Join-Path $tempRoot 'router.sqlite'
+    try {
+        $trace = New-Task7TraceFixture -TraceId 'invalid-normal-content'
+        $trace.prompt_content = 'normal mode must reject this content'
+        $result = Write-RouterTrace -Trace $trace -DatabasePath $databasePath `
+            -PythonExecutable $python
+
+        Assert-Equal $result.ok $false
+        Assert-Equal $result.error.code 'invalid_trace'
+        Assert-Equal $result.error.path '$.prompt_content'
+        Assert-Equal (Test-Path -LiteralPath $databasePath) $false
+    } finally {
+        if (Test-Path -LiteralPath $tempRoot) {
+            [IO.Directory]::Delete($tempRoot, $true)
+        }
+    }
+}
+
+Invoke-Assertion 'Task 7 trace bridge returns a structured Python availability error' {
+    $missingPython = Join-Path ([IO.Path]::GetTempPath()) ('missing-python-' + [guid]::NewGuid().ToString('N') + '.exe')
+    $result = Write-RouterTrace -Trace (New-Task7TraceFixture) `
+        -DatabasePath (Join-Path ([IO.Path]::GetTempPath()) 'unused-router.sqlite') `
+        -PythonExecutable $missingPython
+
+    Assert-Equal $result.ok $false
+    Assert-Equal $result.error.code 'python_unavailable'
+}
+
+Invoke-Assertion 'Task 7 trace bridge keeps trace JSON off the native command line' {
+    $source = Get-Content -LiteralPath $traceModulePath -Raw
+
+    Assert-Equal ($source -match 'RedirectStandardInput\s*=\s*\$true') $true
+    Assert-Equal ($source -match 'StandardInput\.Write') $true
+    Assert-Equal ($source -match 'ArgumentList\.Add\(\$traceJson') $false
+    Assert-Equal ($source -match '(?i)\s-command\s') $false
 }
 
 if ($failures.Count -gt 0) {
