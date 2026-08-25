@@ -177,19 +177,60 @@ function New-TestCalibrationPilotExecution {
     }
 }
 
+function Assert-TestCalibrationPilotLaunchBoundary {
+    param(
+        [Parameter(Mandatory)][string]$ResultsRoot,
+        [Parameter(Mandatory)][string]$RunId,
+        [Parameter(Mandatory)][int]$Ordinal,
+        [Parameter(Mandatory)][int]$ExpectedClaimCount
+    )
+    $runRoot = Join-Path $ResultsRoot $RunId
+    $result = Get-Content -Raw -LiteralPath (Join-Path $runRoot 'result.json') | ConvertFrom-Json -Depth 100 -DateKind String
+    Assert-Equal $result.run_state 'running'
+    Assert-Equal $result.attempts[$Ordinal - 1].state 'slot_reserved'
+    for ($index = 0; $index -lt ($Ordinal - 1); $index++) {
+        Assert-Equal $result.attempts[$index].state 'succeeded'
+    }
+    Assert-Equal @(Get-ChildItem -LiteralPath (Join-Path $runRoot 'claims') -File -Force).Count $ExpectedClaimCount
+    if ($Ordinal -ge 2) {
+        Assert-True (Test-Path -LiteralPath (Join-Path $runRoot 'raw/candidate-response.json') -PathType Leaf)
+    }
+    if ($Ordinal -eq 3) {
+        $judges = Get-Content -Raw -LiteralPath (Join-Path $runRoot 'raw/judge-responses.json') | ConvertFrom-Json -Depth 100
+        Assert-Equal @($judges.normalized_decisions).Count 1
+    }
+}
+
+function Assert-TestCalibrationPilotGraderBoundary {
+    param(
+        [Parameter(Mandatory)][string]$ResultsRoot,
+        [Parameter(Mandatory)][string]$RunId
+    )
+    $runRoot = Join-Path $ResultsRoot $RunId
+    $result = Get-Content -Raw -LiteralPath (Join-Path $runRoot 'result.json') | ConvertFrom-Json -Depth 100 -DateKind String
+    Assert-Equal $result.run_state 'running'
+    Assert-Equal $result.attempts[0].state 'succeeded'
+    Assert-Equal $result.attempts[1].state 'planned'
+    Assert-Equal @(Get-ChildItem -LiteralPath (Join-Path $runRoot 'claims') -File -Force).Count 1
+    Assert-True (Test-Path -LiteralPath (Join-Path $runRoot 'raw/candidate-response.json') -PathType Leaf)
+}
+
 function Invoke-TestCalibrationPilotRun {
     param(
         [Parameter(Mandatory)][string]$CandidateAnswer,
         [Parameter(Mandatory)][ValidateSet('pass', 'fail')][string]$JudgeOneDecision,
         [Parameter(Mandatory)][ValidateSet('pass', 'fail')][string]$JudgeTwoDecision
     )
-    $input = New-TestCalibrationPilotLedgerInput
+    $ledgerInput = New-TestCalibrationPilotLedgerInput
     $invocations = [Collections.Generic.List[string]]::new()
+    $boundaryEvents = [Collections.Generic.List[string]]::new()
     $graderCalls = [pscustomobject]@{ count = 0 }
     $candidateInvoker = {
         param($Candidate, $Prompt, $LaunchGuard, $RunId)
         $command = New-TestCalibrationPilotCommand -Candidate $Candidate -Prompt $Prompt
         & $LaunchGuard $Candidate $command
+        Assert-TestCalibrationPilotLaunchBoundary -ResultsRoot $ledgerInput.results_root -RunId $RunId -Ordinal 1 -ExpectedClaimCount 1
+        $boundaryEvents.Add('candidate:slot_reserved:claims=1')
         $invocations.Add([string]$Candidate.route_id)
         return New-TestCalibrationPilotExecution -Candidate $Candidate -Answer $CandidateAnswer -RunId $RunId
     }.GetNewClosure()
@@ -198,29 +239,36 @@ function Invoke-TestCalibrationPilotRun {
         $resolved = Get-CalibrationProfileAndCandidate -ConfigurationId $JudgeProfileId
         $command = New-TestCalibrationPilotCommand -Candidate $resolved.candidate -Prompt 'anonymized-judge-payload'
         & $LaunchGuard $resolved.candidate $command
+        $ordinal = if ($JudgeProfileId -ceq 'gpt-5.6-sol__max') { 2 } else { 3 }
+        Assert-TestCalibrationPilotLaunchBoundary -ResultsRoot $ledgerInput.results_root -RunId $RunId `
+            -Ordinal $ordinal -ExpectedClaimCount $ordinal
+        $boundaryEvents.Add("judge$($ordinal - 1):slot_reserved:claims=$ordinal")
         $invocations.Add([string]$resolved.candidate.route_id)
         $decision = if ($JudgeProfileId -ceq 'gpt-5.6-sol__max') { $JudgeOneDecision } else { $JudgeTwoDecision }
         return [pscustomobject]@{ decision = $decision; rationale = "sanitized $decision evidence" }
     }.GetNewClosure()
     $graderInvoker = {
         param($Prompt, $ResponseText, $PythonExecutor, $PythonExecutable, $PythonTimeoutMilliseconds)
+        Assert-TestCalibrationPilotGraderBoundary -ResultsRoot $ledgerInput.results_root -RunId 'option1-live-20260825-001'
+        $boundaryEvents.Add('grader:candidate_persisted:claims=1')
         $graderCalls.count++
         return Invoke-CalibrationDeterministicGrader -Prompt $Prompt -ResponseText $ResponseText
     }.GetNewClosure()
     $gitInvoker = { [pscustomobject]@{ clean = $true; commit = ('a' * 40) } }
     try {
         $result = Invoke-Calibration -Pilot -Run -RunId 'option1-live-20260825-001' `
-            -ResultsRoot $input.results_root -CalibrationSetPath $setPath -RubricsRoot $rubricsRoot `
+            -ResultsRoot $ledgerInput.results_root -CalibrationSetPath $setPath -RubricsRoot $rubricsRoot `
             -CandidateInvoker $candidateInvoker -JudgeInvoker $judgeInvoker -GraderInvoker $graderInvoker `
             -PilotGitInvoker $gitInvoker
         return [pscustomobject]@{
             result = $result
-            input = $input
+            input = $ledgerInput
             invocations = @($invocations)
+            boundary_events = @($boundaryEvents)
             local_grader_calls = $graderCalls.count
         }
     } catch {
-        Remove-TestCalibrationPilotLedgerRoot -Path $input.results_root
+        Remove-TestCalibrationPilotLedgerRoot -Path $ledgerInput.results_root
         throw
     }
 }
@@ -1038,6 +1086,12 @@ if (Test-Path -LiteralPath $implementationPath -PathType Leaf) {
                 'codex__gpt_5_6_sol__max',
                 'claude__claude_opus_5__max'
             )
+            Assert-SequenceEqual @($execution.boundary_events) @(
+                'candidate:slot_reserved:claims=1',
+                'grader:candidate_persisted:claims=1',
+                'judge1:slot_reserved:claims=2',
+                'judge2:slot_reserved:claims=3'
+            )
             Assert-Equal $execution.local_grader_calls 1
             Assert-Equal $result.run_state 'completed'
             Assert-Equal $result.slots_consumed.total 3
@@ -1097,6 +1151,77 @@ if (Test-Path -LiteralPath $implementationPath -PathType Leaf) {
             Assert-Equal $execution.result.quality.outcome 'review_required'
             Assert-Equal $execution.result.quality.external_category 'unknown'
         } finally { Remove-TestCalibrationPilotLedgerRoot -Path $execution.input.results_root }
+    }
+
+    Invoke-Assertion 'option 1 default adapters forward the exact run id and guarded launch without native execution' {
+        $input = New-TestCalibrationPilotLedgerInput
+        $runId = 'option1-live-20260825-001'
+        $originalText = (Get-Command -Name Invoke-PilotCandidate -CommandType Function -ErrorAction Stop).ScriptBlock.ToString()
+        $immutableOriginal = [scriptblock]::Create($originalText)
+        $script:PilotDefaultAdapterState = [pscustomobject]@{
+            results_root = $input.results_root
+            invocations = [Collections.Generic.List[string]]::new()
+            guard_calls = 0
+            grader_calls = 0
+        }
+        $result = $null
+        try {
+            Set-Item -Path Function:\Invoke-PilotCandidate -Value {
+                param(
+                    [Parameter(Mandatory)][object]$Candidate,
+                    [Parameter(Mandatory)][string]$Prompt,
+                    [scriptblock]$NativeInvoker,
+                    [AllowNull()][string]$RunId,
+                    [int]$TimeoutSeconds = -1,
+                    [scriptblock]$LaunchGuard
+                )
+                Assert-Equal $RunId 'option1-live-20260825-001'
+                Assert-True ($null -ne $LaunchGuard) 'Default adapter omitted the launch guard.'
+                $command = New-TestCalibrationPilotCommand -Candidate $Candidate -Prompt $Prompt
+                $before = $script:PilotDefaultAdapterState.guard_calls
+                & $LaunchGuard $Candidate $command
+                $script:PilotDefaultAdapterState.guard_calls++
+                Assert-Equal $script:PilotDefaultAdapterState.guard_calls ($before + 1)
+                $ordinal = switch ([string]$Candidate.route_id) {
+                    'agy__gemini_3_7_flash_low__low' { 1 }
+                    'codex__gpt_5_6_sol__max' { 2 }
+                    'claude__claude_opus_5__max' { 3 }
+                    default { throw 'Unexpected default-adapter route.' }
+                }
+                Assert-TestCalibrationPilotLaunchBoundary -ResultsRoot $script:PilotDefaultAdapterState.results_root `
+                    -RunId $RunId -Ordinal $ordinal -ExpectedClaimCount $ordinal
+                $script:PilotDefaultAdapterState.invocations.Add([string]$Candidate.route_id)
+                $answer = switch ($ordinal) {
+                    1 { '{"event":"Robotics club demo","date":"2026-09-14","room":"Room B12"}' }
+                    2 { '{"decision":"pass","rationale":"sanitized openai evidence"}' }
+                    3 { '{"decision":"pass","rationale":"sanitized anthropic evidence"}' }
+                }
+                return New-TestCalibrationPilotExecution -Candidate $Candidate -Answer $answer -RunId $RunId
+            }
+            $grader = {
+                param($Prompt, $ResponseText, $PythonExecutor, $PythonExecutable, $PythonTimeoutMilliseconds)
+                Assert-TestCalibrationPilotGraderBoundary -ResultsRoot $script:PilotDefaultAdapterState.results_root `
+                    -RunId 'option1-live-20260825-001'
+                $script:PilotDefaultAdapterState.grader_calls++
+                return Invoke-CalibrationDeterministicGrader -Prompt $Prompt -ResponseText $ResponseText
+            }
+            $git = { [pscustomobject]@{ clean = $true; commit = ('b' * 40) } }
+            $result = Invoke-Calibration -Pilot -Run -RunId $runId -ResultsRoot $input.results_root `
+                -CalibrationSetPath $setPath -RubricsRoot $rubricsRoot -GraderInvoker $grader -PilotGitInvoker $git
+            Assert-Equal $result.run_state 'completed'
+            Assert-SequenceEqual @($script:PilotDefaultAdapterState.invocations) @(
+                'agy__gemini_3_7_flash_low__low',
+                'codex__gpt_5_6_sol__max',
+                'claude__claude_opus_5__max'
+            )
+            Assert-Equal $script:PilotDefaultAdapterState.guard_calls 3
+            Assert-Equal $script:PilotDefaultAdapterState.grader_calls 1
+        } finally {
+            Set-Item -Path Function:\Invoke-PilotCandidate -Value $immutableOriginal
+            Remove-TestCalibrationPilotLedgerRoot -Path $input.results_root
+            Remove-Variable -Scope Script -Name PilotDefaultAdapterState -ErrorAction SilentlyContinue
+        }
+        Assert-Equal (Get-Command -Name Invoke-PilotCandidate -CommandType Function -ErrorAction Stop).ScriptBlock.ToString() $originalText
     }
 
     Invoke-Assertion 'pilot plan and bounded live rejection never reach providers launch guard claims or writers' {
