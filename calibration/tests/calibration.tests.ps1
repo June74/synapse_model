@@ -696,6 +696,65 @@ if (Test-Path -LiteralPath $implementationPath -PathType Leaf) {
         }
     }
 
+    Invoke-Assertion 'pilot snapshot validation preserves importer parity for sensitive text and rubric references' {
+        $resultsRoot = New-CalibrationResultsTestRoot
+        try {
+            $sourceDirectory = Join-Path $resultsRoot 'sources'
+            New-Item -ItemType Directory -Path $sourceDirectory | Out-Null
+            $nonSelectedId = 'general-low-biology-v1'
+            $cases = @(
+                [pscustomobject]@{
+                    name = 'sensitive request text'; expected = "calibration_prompt_sensitive:$nonSelectedId"
+                    mutate = { param($prompt) $prompt.request.request_text = 'This synthetic test mentions an api key label only.' }
+                }
+                [pscustomobject]@{
+                    name = 'traversal rubric ref'; expected = "calibration_rubric_ref_invalid:$nonSelectedId"
+                    mutate = { param($prompt) $prompt.grading.rubric_ref = '../outside.json' }
+                }
+                [pscustomobject]@{
+                    name = 'nested rubric ref'; expected = "calibration_rubric_ref_invalid:$nonSelectedId"
+                    mutate = { param($prompt) $prompt.grading.rubric_ref = 'nested/file.json' }
+                }
+                [pscustomobject]@{
+                    name = 'missing rubric extension'; expected = "calibration_rubric_ref_invalid:$nonSelectedId"
+                    mutate = { param($prompt) $prompt.grading.rubric_ref = 'missing-extension' }
+                }
+                [pscustomobject]@{
+                    name = 'wrong rubric extension'; expected = "calibration_rubric_ref_invalid:$nonSelectedId"
+                    mutate = { param($prompt) $prompt.grading.rubric_ref = 'wrong.txt' }
+                }
+                [pscustomobject]@{
+                    name = 'invalid leading rubric character'; expected = "calibration_rubric_ref_invalid:$nonSelectedId"
+                    mutate = { param($prompt) $prompt.grading.rubric_ref = '.leading.json' }
+                }
+                [pscustomobject]@{
+                    name = 'backslash rubric ref'; expected = "calibration_rubric_ref_invalid:$nonSelectedId"
+                    mutate = { param($prompt) $prompt.grading.rubric_ref = 'nested\file.json' }
+                }
+            )
+            foreach ($case in $cases) {
+                $set = Copy-TestObject (Get-Content -Raw -LiteralPath $setPath | ConvertFrom-Json -Depth 100)
+                $prompt = @($set.prompts | Where-Object { $_.id -ceq $nonSelectedId })[0]
+                & $case.mutate $prompt
+                $casePath = Join-Path $sourceDirectory ("$($case.name -replace '[^A-Za-z0-9]', '-')-set.json")
+                $set | ConvertTo-Json -Depth 100 | Set-Content -LiteralPath $casePath -Encoding utf8NoBOM
+                $imported = Import-CalibrationSet -Path $casePath -RubricsRoot $rubricsRoot
+                Assert-True (@($imported.errors) -ccontains $case.expected) "Importer did not report $($case.expected)."
+                $before = Get-CalibrationResultsTreeSnapshot -Root $resultsRoot
+                $script:PilotParityCalls = 0
+                $spy = { $script:PilotParityCalls++; throw 'pilot parity validation invoked work' }
+                $null = Assert-Throws {
+                    Invoke-Calibration -Pilot -ResultsRoot $resultsRoot -CalibrationSetPath $casePath -RubricsRoot $rubricsRoot `
+                        -CandidateInvoker $spy -JudgeInvoker $spy -RouterInvoker $spy | Out-Null
+                } ("Pilot calibration set validation failed: {0}" -f $case.expected)
+                Assert-Equal $script:PilotParityCalls 0
+                Assert-SequenceEqual (Get-CalibrationResultsTreeSnapshot -Root $resultsRoot) $before
+            }
+        } finally {
+            if (Test-Path -LiteralPath $resultsRoot) { Remove-Item -LiteralPath $resultsRoot -Recurse -Force }
+        }
+    }
+
     Invoke-Assertion 'pilot rejects route and a non-live run id before calls or result writes' {
         $resultsRoot = New-CalibrationResultsTestRoot
         try {

@@ -642,8 +642,7 @@ function New-CalibrationPilotSourceBundle {
         if ($prompt -isnot [pscustomobject] -or $prompt.id -isnot [string] -or
             -not (Test-CalibrationSafeLeafName $prompt.id) -or -not $seenPromptIds.Add($prompt.id) -or
             $prompt.version -isnot [string] -or [string]::IsNullOrWhiteSpace($prompt.version) -or
-            $prompt.request -isnot [pscustomobject] -or $prompt.grading -isnot [pscustomobject] -or
-            $prompt.grading.rubric_ref -isnot [string]) {
+            $prompt.request -isnot [pscustomobject] -or $prompt.grading -isnot [pscustomobject]) {
             throw 'Pilot calibration set validation failed.'
         }
         $request = $prompt.request
@@ -661,6 +660,14 @@ function New-CalibrationPilotSourceBundle {
             $prompt.category_target -isnot [string] -or [string]::IsNullOrWhiteSpace($prompt.category_target) -or
             -not (Test-CalibrationDeterministicGrader -Prompt $prompt)) {
             throw 'Pilot calibration set validation failed.'
+        }
+        if ($request.request_text -match '(?i)\b(api[-_ ]?key|password|access[-_ ]?token|authentication code|social security number)\b') {
+            throw "Pilot calibration set validation failed: calibration_prompt_sensitive:$($prompt.id)"
+        }
+        if (-not (Test-CalibrationProperty $prompt.grading 'rubric_ref') -or
+            $prompt.grading.rubric_ref -isnot [string] -or
+            $prompt.grading.rubric_ref -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*\.json$') {
+            throw "Pilot calibration set validation failed: calibration_rubric_ref_invalid:$($prompt.id)"
         }
         $rubricPath = [IO.Path]::GetFullPath((Join-Path $RubricsRoot $prompt.grading.rubric_ref))
         if (-not (Test-CalibrationPathUnderRoot -Path $rubricPath -Root $RubricsRoot)) {
