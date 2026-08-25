@@ -2,7 +2,7 @@
 
 - **Status:** closed
 - **First observed:** 2026-08-24T23:49:56.062250Z
-- **Last observed:** 2026-08-24T23:50:12.460701Z
+- **Last observed:** 2026-08-25T23:13:19.9876258Z
 - **Phase/task:** Task 10 acceptance note commit
 - **Environment:** Managed Codex workspace-write sandbox, Windows PowerShell 7, linked Git worktree
 - **Version/commit:** `ba8c9035a0730c1e01735081e2652c744eb3846d` before correction; verification commit `ff368ec`
@@ -44,8 +44,10 @@ Git reported that it could not create `.git/worktrees/deterministic-router-v1/in
 
 ## Verification and related work
 
-Commit `ff368ec` contains only the two acceptance setback records and the setbacks index update. The command exited successfully.
+Commit `ff368ec` contains only the two acceptance setback records and the setbacks index update. The command exited successfully. On recurrence, the exact product/test paths were staged with scoped elevated permission and commit `f7eaab4` was created successfully before the setback documentation was staged separately.
 
 ## Recurrence history
 
 - 2026-08-24T23:49:56.062250Z: First observed.
+- 2026-08-25T23:12:31.2745448Z: Recurred while committing the swallowed-launch-guard recovery fix in the `option1-calibration-pilot` linked worktree; the ordinary sandbox again denied creation of the exact worktree `index.lock`. Product files remained unstaged and unchanged.
+- 2026-08-25T23:13:19.9876258Z: Closed after the exact bounded stage and commit operations succeeded with scoped elevated filesystem permission, producing product commit `f7eaab4`.

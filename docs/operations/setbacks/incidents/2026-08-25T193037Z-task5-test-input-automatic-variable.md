@@ -2,7 +2,7 @@
 
 - **Status:** closed
 - **First observed:** 2026-08-25T19:30:37.863856Z
-- **Last observed:** 2026-08-25T19:30:37.863856Z
+- **Last observed:** 2026-08-25T23:12:31.2745448Z
 - **Phase/task:** Option 1 Task 5 quality-review test hardening
 - **Environment:** Windows PowerShell 7, isolated `codex/option1-calibration-pilot` worktree
 - **Version/commit:** `b162471` plus uncommitted Task 5 quality-review test changes
@@ -49,7 +49,10 @@ Run the functional suite after adding durable-boundary reads inside fake invoker
 
 The corrected functional suite completed with exit code 0 and 47 passing assertions, including all three durable-boundary fake paths and the default-adapter shadow path.
 
+The recurrence correction captured the results-root string before constructing the candidate and judge closures. The focused malformed, extra, and missing-prior claim cases passed, followed by all 37 calibration security assertions and all 51 calibration functional assertions.
+
 ## Recurrence history
 
 - 2026-08-25T19:30:37.863856Z: First observed.
 - 2026-08-25: Closed after renaming the captured ledger object and observing the complete 47/47 functional suite.
+- 2026-08-25T23:12:31.2745448Z: Recurred in the swallowed-guard negative fixture when `$input.results_root` was referenced inside candidate and judge closures. The fixture was corrected by capturing a non-automatic scalar before closure creation; no production behavior caused the failure.
