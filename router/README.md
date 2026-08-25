@@ -281,9 +281,18 @@ The local grade runs between the candidate and the judges but is not a provider 
 
 Application launch slots are a local safety ceiling, not a claim about provider-internal behavior. The pilot records `provider_side_requests.observable: false` and `provider_side_requests.count: null` because a launcher does not reveal how many provider-side requests or internal retries it may make.
 
-No retry, fallback, or resume is allowed. The pilot never substitutes another model, repeats a role, adds a fourth launch, or continues after a technical stop. A stopped or indeterminate run requires a new RunId and new explicit approval; the same run ID cannot be resumed.
+No retry, fallback, or resume is allowed. The pilot never substitutes another model, repeats a role, adds a fourth launch, or continues after a technical stop. A stopped or indeterminate run requires a new RunId and new explicit approval; the same run ID cannot be resumed. The current build accepts only `option1-live-20260825-001`. Do not edit the command to invent a replacement RunId. A replacement RunId requires a new reviewed build that accepts it and a revised manifest or acceptance packet that freezes and allows that exact ID, followed by new explicit approval.
 
-The run writes only bounded safe artifacts under its claimed result directory: an immutable plan, a durable result ledger, a credential-sanitized candidate answer, and normalized judge decisions. These safe artifacts omit credentials, command arguments, environment dumps, raw provider event streams, arbitrary standard output or error text, exception text, and prompt-echo diagnostics.
+On a technically completed run, the complete persistent shape of the bounded safe artifacts is:
+
+- `.run.claim`: the exclusive run claim;
+- `plan.json`: the immutable source, budget, identity, and commit plan;
+- `result.json`: the durable technical-state and separate quality ledger;
+- `claims/01-google-candidate.claim`, `claims/02-openai-judge.claim`, and `claims/03-anthropic-judge.claim`: the three ordered, non-refundable slot claims;
+- `raw/candidate-response.json`: only `item_id`, `status`, credential-sanitized `output`, and bounded `error_code`; and
+- `raw/judge-responses.json`: only `item_id`, the anonymized judge payload, and accumulated normalized decisions.
+
+A stopped or indeterminate run may contain only the prefix of that shape that was durably written before the stop; missing later claims or raw files do not refund a consumed slot. The safe artifacts omit credentials, command arguments, environment dumps, raw provider event streams, arbitrary standard output or error text, exception text, and prompt-echo diagnostics. Temporary same-directory replacement files are owned by the writer and removed after use; they are not part of the persistent artifact contract.
 
 Pilot evidence is observational only. Results never promote production quality, never mutate model profiles, and never change production eligibility. External quality remains `unknown` unless a later, separately designed evidence-promotion process is approved and implemented.
 

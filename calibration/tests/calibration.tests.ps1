@@ -1807,17 +1807,28 @@ def sum_even(values):
 
     Invoke-Assertion 'operator documentation freezes the option 1 three-launch safety contract' {
         $readmePath = Join-Path $projectRoot 'router/README.md'
-        $readme = [IO.File]::ReadAllText($readmePath)
-        $lines = @($readme -split "\r?\n")
+        $readme = [IO.File]::ReadAllText($readmePath).Replace("`r`n", "`n")
+        $heading = '## Option 1 three-launch calibration pilot'
+        $sectionStart = $readme.IndexOf($heading, [StringComparison]::Ordinal)
+        Assert-True ($sectionStart -ge 0) 'README must contain the Option 1 operator section.'
+        $sectionEnd = $readme.IndexOf("`n## ", $sectionStart + $heading.Length, [StringComparison]::Ordinal)
+        if ($sectionEnd -lt 0) { $sectionEnd = $readme.Length }
+        $section = $readme.Substring($sectionStart, $sectionEnd - $sectionStart)
+        $lines = @($section -split "`n")
         $offlineCommand = 'pwsh -NoProfile -File .\calibration\run_calibration.ps1 -Pilot'
         $liveCommand = 'pwsh -NoProfile -File .\calibration\run_calibration.ps1 -Pilot -Run -RunId option1-live-20260825-001'
+        $orderedRoleBlock = @'
+1. Google candidate: `agy__gemini_3_7_flash_low__low`.
+2. Local exact-fields grading. This local deterministic grader does not consume a launcher slot.
+3. OpenAI Judge 1: `codex__gpt_5_6_sol__max`.
+4. Anthropic Judge 2: `claude__claude_opus_5__max`.
+'@.Trim().Replace("`r`n", "`n")
 
         Assert-True ($lines -ccontains $offlineCommand) 'README must contain the exact offline Option 1 command on its own line.'
         Assert-True ($lines -ccontains $liveCommand) 'README must contain the frozen accepted live command on its own line.'
+        Assert-True ($section.IndexOf($orderedRoleBlock, [StringComparison]::Ordinal) -ge 0) `
+            'README must contain one exact adjacent numbered block for the ordered candidate, local grader, and two judges.'
         foreach ($fragment in @(
-            'agy__gemini_3_7_flash_low__low',
-            'codex__gpt_5_6_sol__max',
-            'claude__claude_opus_5__max',
             'candidate execution',
             'local deterministic grader',
             'two independent cross-family judges',
@@ -1831,9 +1842,22 @@ def sum_even(values):
             'never mutate model profiles',
             'never change production eligibility',
             'safe artifacts',
-            'exact commit and exact ordered identities'
+            'exact commit and exact ordered identities',
+            'The current build accepts only `option1-live-20260825-001`.',
+            'Do not edit the command to invent a replacement RunId.',
+            'A replacement RunId requires a new reviewed build that accepts it and a revised manifest or acceptance packet that freezes and allows that exact ID, followed by new explicit approval.',
+            '`.run.claim`',
+            '`claims/01-google-candidate.claim`',
+            '`claims/02-openai-judge.claim`',
+            '`claims/03-anthropic-judge.claim`',
+            '`plan.json`',
+            '`result.json`',
+            '`raw/candidate-response.json`',
+            '`raw/judge-responses.json`',
+            '`item_id`, `status`, credential-sanitized `output`, and bounded `error_code`',
+            '`item_id`, the anonymized judge payload, and accumulated normalized decisions'
         )) {
-            Assert-True ($readme.IndexOf($fragment, [StringComparison]::Ordinal) -ge 0) "README is missing required Option 1 contract text: $fragment"
+            Assert-True ($section.IndexOf($fragment, [StringComparison]::Ordinal) -ge 0) "README Option 1 section is missing required contract text: $fragment"
         }
     }
 
