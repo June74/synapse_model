@@ -2,7 +2,7 @@
 
 - **Status:** closed
 - **First observed:** 2026-08-19
-- **Last observed:** 2026-08-24
+- **Last observed:** 2026-08-25
 - **Phase/task:** Task 5 verification
 - **Environment:** PowerShell 7, project-local subscription-runner worktree
 - **Symptom:** The parser-check command failed before parsing files because a double-quoted diagnostic string used `$path:` without delimiting the variable.
@@ -73,3 +73,13 @@
 - **Correction:** Compute each count in a separate statement, then emit the compact summary after the suite exits.
 - **Prevention:** Keep verification wrappers linear and preserve the child suite exit code independently of summary formatting.
 - **Related verification:** The corrected plain suite command is required before the Task 8 product commit.
+
+## Recurrence: 2026-08-25, Task 10 authorized-live preflight
+
+- **Phase/task:** Read-only candidate/profile validation before the three authorized launcher calls
+- **Symptom:** The preflight failed at parse time with `An empty pipe element is not allowed` because a direct `foreach` statement was piped to `ConvertTo-Json`.
+- **Impact:** The preflight did not run; zero launchers or providers were called and no project or external state changed.
+- **Confirmed cause:** The bounded reporting command repeated the known direct-statement-to-pipeline PowerShell error.
+- **Correction:** Collect the `foreach` output in `$results`, then serialize the completed collection.
+- **Prevention:** Use an explicit result variable for every multi-item PowerShell preflight before piping to formatting or JSON conversion.
+- **Related verification:** The corrected candidate/profile preflight must pass before any authorized live call begins.

@@ -240,7 +240,15 @@ pwsh -NoProfile -File .\router\run_router.ps1 `
   -RequestFile .\router\examples\standard-request.json
 ```
 
-Run it only with explicit authorization, authenticated launchers, and approved provider spend. Calibration `-Run` is also live and gated. No live router command, calibration `-Run`, or provider smoke was performed for this documentation work.
+Run it only with explicit authorization, authenticated launchers, and approved provider spend. Calibration `-Run` is also live and gated.
+
+On 2026-08-25, Task 10 performed an explicitly authorized subscription-backed smoke test through the real router execution and normalization path. Because the production quality snapshot still conservatively marks candidates `unknown`, the acceptance harness injected temporary in-memory `standard` quality and small synthetic token estimates; it did not modify production profiles or snapshots. The harness restricted each run to one candidate and used a temporary SQLite database:
+
+- Agy selected `agy|gemini-3.7-flash-low__low` and completed one call.
+- Codex selected `codex|gpt-5.6-luna__low` and completed one call.
+- Claude selected `claude|claude-haiku-4-5__default` and completed one call with effort omitted at the launcher boundary.
+
+All three runs stored one selected candidate evaluation, a completed status, version fields, and 64-character prompt and response hashes with no storage error. Inspection found three decisions and three candidate evaluations, null prompt/response content, and no raw prompt, credential, authorization-header, or environment-dump markers. Agy and Codex supplied complete trustworthy usage and produced `price_final: true`; Claude did not supply a complete reasoning split, so its estimate correctly remained `price_final: false`. No fallback, calibration `-Run`, paid API, local model, push, PR, or merge occurred. The temporary harness and database were removed after inspection.
 
 ## Decision trace lookup
 
