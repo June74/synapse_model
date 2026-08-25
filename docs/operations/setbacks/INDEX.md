@@ -37,6 +37,7 @@
 | [SB-20260825-201131-task6-review-red-empty-failure-code](incidents/2026-08-25T201131Z-task6-review-red-empty-failure-code.md) | closed | 2026-08-25T20:11:31.232106Z | 2026-08-25T20:18:09.4548683Z | Task 6 review RED fixture rejected empty failure code |
 | [SB-20260825-201548-task6-review-green-stopcode-binding](incidents/2026-08-25T201548Z-task6-review-green-stopcode-binding.md) | closed | 2026-08-25T20:15:48.940605Z | 2026-08-25T20:53:20.7528423Z | Task 6 review GREEN stop-code binding regression |
 | [SB-20260825-202324-task6-parallel-suite-result-lock](incidents/2026-08-25T202324Z-task6-parallel-suite-result-lock.md) | closed | 2026-08-25T20:23:24.5926183Z | 2026-08-25T20:26:10.4121215Z | Parallel calibration suites contended on a run claim |
+| [SB-20260825-210716-task6-post-launch-ledger-recovery](incidents/2026-08-25T210716Z-task6-post-launch-ledger-recovery.md) | closed | 2026-08-25T21:07:16.6369573Z | 2026-08-25T21:11:34.0598216Z | Post-launch ledger failure escaped durable recovery |
 | SB-2026-08-19-001 | PowerShell DOCX paragraph extraction syntax error | closed | 2026-08-19 | 2026-08-19 |
 | SB-2026-08-19-002 | Current DOCX locked during full-document scan | closed | 2026-08-19 | 2026-08-19 |
 | SB-2026-08-19-003 | Skill path lookup mismatch | closed | 2026-08-19 | 2026-08-25 |
