@@ -86,3 +86,17 @@ Run the full router PowerShell suite through an execution wrapper with a 30-seco
 - **Owner:** Codex.
 - **Next diagnostic step:** None. If the state assertion recurs in a non-overlapping direct run, open a separate incident and capture its exact failing step.
 - **Verification:** A dedicated functional run was polled through its continuation handle to exit 0 with 43 passing assertions. A dedicated security run exited 0 with 19 passing assertions. The exact state-machine sequence also passed in isolation.
+
+## Recurrence: Task 5 TDD RED verification wrapper
+
+- **Symptom:** The first Task 5 functional RED run yielded a partial PASS stream after 30 seconds, and the wrapper projected the output plus an undefined exit code without retaining the continuation identifier.
+- **Impact:** The partial stream was discarded as completion evidence and Task 5 implementation paused. The new assertions had not yet produced their expected RED evidence. No provider, native launcher, network request, or private output was involved.
+- **Confirmed cause:** The wrapper repeated the documented output projection before preserving the full long-running command result.
+- **Hypotheses:** The functional suite was still running when the 30-second yield boundary was reached.
+- **Rejected hypotheses:** The partial PASS stream does not prove either a green suite or a product failure.
+- **Known exclusions:** Only offline test code was changed; no calibration run directory, provider call, credential, or raw provider response was created.
+- **Correction:** Rerun the suite in a dedicated session-aware call, preserve the complete result object, and poll any returned session identifier until an explicit exit code is observed.
+- **Prevention:** Use direct session-aware execution for this functional suite because its normal duration exceeds 30 seconds; never project fields before checking for a continuation identifier.
+- **Owner:** Codex.
+- **Next diagnostic step:** None for the wrapper recurrence; proceed with the observed Task 5 RED cycle.
+- **Verification:** The corrected session-aware run was polled to exit code 1 and reported exactly the intended missing Task 5 orchestration seam plus the superseded bounded-live error expectation.

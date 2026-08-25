@@ -58,3 +58,12 @@ The `scope-gate` and `setback-logger` instructions were read successfully from t
 - Correction: use the exact schema paths from `router/tests/router.tests.ps1` and verify them through a directory listing before reading.
 - Prevention: copy live path variables verbatim; never normalize or abbreviate repository filenames.
 - Verification: the corrected literal-path reads loaded all three schema filenames and the full request and response schemas successfully.
+
+### 2026-08-25 - setback helper location assumption
+
+- Symptom: Task 5 attempted to run `new_setback.py` beneath the repository incident directory, but the helper is installed beneath the resolved `setback-logger` skill directory.
+- Impact: one read-only helper invocation failed before creating the Task 5 incident. No product file, provider, native launcher, network request, or private data was involved.
+- Confirmed cause: the command treated the skill's relative `scripts/` reference as repository-relative instead of resolving it against the skill directory.
+- Correction: enumerate the resolved skill directory and invoke its exact `scripts/new_setback.py` path with the bundled Python runtime.
+- Prevention: resolve relative resources against the directory containing `SKILL.md`, as required by the skill-loading contract.
+- Verification: the helper's `--help` completed with exit code 0 from the resolved skill path.

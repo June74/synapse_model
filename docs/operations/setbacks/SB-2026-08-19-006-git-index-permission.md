@@ -126,3 +126,13 @@
 - **Correction:** Retry only the bounded staging and planning commit with approved Git-metadata access.
 - **Prevention:** Treat this worktree's staging and commit operations as requiring approved Git-metadata access.
 - **Related verification:** The plan contract check reported 9 tasks and 48 checkbox steps; the narrowed marker scan and `git diff --check` passed before staging.
+
+## Recurrence: 2026-08-25, Option 1 Task 5 commits
+
+- **Phase/task:** Option 1 three-launch calibration pilot Task 5, setback and feature commits.
+- **Symptom:** Scoped staging could not create `.git/worktrees/option1-calibration-pilot/index.lock`; Git returned permission denied.
+- **Confirmed cause:** The isolated worktree files are writable, while its Git index metadata remains under the parent repository `.git` directory outside the managed write boundary.
+- **Impact:** No file was staged and no commit was created by the failed command. The verified Task 5 code, tests, and closed setback records remain intact; no provider or native launcher ran.
+- **Correction:** Retry only the bounded documentation and product staging/commit commands through approved Git-metadata access.
+- **Prevention:** Continue treating this worktree's staging and commit operations as requiring approved Git-metadata access.
+- **Related verification:** The functional suite completed with every assertion passing, the adjacent security suite completed with 22/22 passing assertions, and `git diff --check` passed before staging.
