@@ -2,7 +2,7 @@
 
 - **Status:** contained
 - **First observed:** 2026-08-19
-- **Last observed:** 2026-08-24
+- **Last observed:** 2026-08-25
 - **Symptom:** A scoped `git add`/`git commit` for the design specification failed because Git could not create `C:\Users\2006i\projects\router_model\.git\index.lock` due to permission denial.
 - **Confirmed:** The design file was written successfully; no commit was created and no existing files were overwritten.
 - **Correction:** Leave the specification uncommitted in the shared workspace. If a commit is desired, run the Git command from the user's personal terminal where the repository permissions are available.
@@ -116,3 +116,13 @@
 - **Correction:** Retry only the bounded documentation staging and commit through approved Git-metadata access.
 - **Prevention:** Continue treating this worktree's staging and commit operations as requiring approved Git-metadata access.
 - **Related verification:** Corrected route-only acceptance exited 0 with 24 routes and zero provider calls; both temporary acceptance directories were removed.
+
+## Recurrence: 2026-08-25, Option 1 implementation plan
+
+- **Phase/task:** Option 1 three-launch calibration pilot implementation planning commit.
+- **Symptom:** Scoped staging of the verified plan and setback records could not create `.git/worktrees/option1-calibration-pilot/index.lock`; Git returned permission denied.
+- **Confirmed cause:** The isolated worktree is writable, while its Git index metadata is stored under the parent repository `.git` directory outside the managed write boundary.
+- **Impact:** No file was staged and no commit was created. The verified plan and closed setback records remain intact; no implementation or provider execution occurred.
+- **Correction:** Retry only the bounded staging and planning commit with approved Git-metadata access.
+- **Prevention:** Treat this worktree's staging and commit operations as requiring approved Git-metadata access.
+- **Related verification:** The plan contract check reported 9 tasks and 48 checkbox steps; the narrowed marker scan and `git diff --check` passed before staging.

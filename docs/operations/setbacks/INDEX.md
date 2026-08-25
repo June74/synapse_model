@@ -24,12 +24,14 @@
 | [SB-20260824-232519-acceptance-artifact-shape](incidents/2026-08-24T232519Z-acceptance-artifact-shape.md) | Acceptance assertion expected response-only artifact fields | closed | 2026-08-24T23:25:19.859408Z | 2026-08-24T23:25:19.859408Z |
 | [SB-20260824-234956-git-worktree-index-lock-permission](incidents/2026-08-24T234956Z-git-worktree-index-lock-permission.md) | Sandbox denied Git worktree index lock creation | closed | 2026-08-24T23:49:56.062250Z | 2026-08-24T23:50:12.460701Z |
 | [SB-20260825-004903-task10-haiku-omitted-effort-preflight](incidents/2026-08-25T004903Z-task10-haiku-omitted-effort-preflight.md) | Task 10 Haiku preflight treated omitted effort as literal default | closed | 2026-08-25T00:49:03.892486Z | 2026-08-25T00:49:37.557659Z |
+| [SB-20260825-134119-calibration-rubric-path-assumption](incidents/2026-08-25T134119Z-calibration-rubric-path-assumption.md) | closed | 2026-08-25T13:41:19.481246Z | Option 1 implementation planning | Calibration rubric path assumed incorrectly during planning |
+| [SB-20260825-134552-plan-placeholder-scan-self-match](incidents/2026-08-25T134552Z-plan-placeholder-scan-self-match.md) | closed | 2026-08-25T13:45:52.451048Z | Option 1 implementation-plan verification | Plan placeholder verification matched its own scan command |
 | SB-2026-08-19-001 | PowerShell DOCX paragraph extraction syntax error | closed | 2026-08-19 | 2026-08-19 |
 | SB-2026-08-19-002 | Current DOCX locked during full-document scan | closed | 2026-08-19 | 2026-08-19 |
 | SB-2026-08-19-003 | Skill path lookup mismatch | closed | 2026-08-19 | 2026-08-23 |
 | SB-2026-08-19-004 | Claude CLI smoke test did not return within timeout | contained | 2026-08-19 | 2026-08-19 |
 | SB-2026-08-19-005 | Antigravity CLI authentication unavailable in sandbox | contained | 2026-08-19 | 2026-08-19 |
-| SB-2026-08-19-006 | Git index unavailable to sandbox | contained | 2026-08-19 | 2026-08-24 |
+| SB-2026-08-19-006 | Git index unavailable to sandbox | contained | 2026-08-19 | 2026-08-25 |
 | SB-2026-08-19-007 | Plan review command used an invalid PowerShell parameter | contained | 2026-08-19 | 2026-08-19 |
 | SB-2026-08-19-008 | Pre-creation worktree ignore check rejected absent directory | contained | 2026-08-19 | 2026-08-24 |
 | SB-2026-08-19-009 | Existing descendant-drain test was transiently timing-sensitive | closed | 2026-08-19 | 2026-08-19 |
