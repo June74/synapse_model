@@ -1805,6 +1805,38 @@ def sum_even(values):
         }
     }
 
+    Invoke-Assertion 'operator documentation freezes the option 1 three-launch safety contract' {
+        $readmePath = Join-Path $projectRoot 'router/README.md'
+        $readme = [IO.File]::ReadAllText($readmePath)
+        $lines = @($readme -split "\r?\n")
+        $offlineCommand = 'pwsh -NoProfile -File .\calibration\run_calibration.ps1 -Pilot'
+        $liveCommand = 'pwsh -NoProfile -File .\calibration\run_calibration.ps1 -Pilot -Run -RunId option1-live-20260825-001'
+
+        Assert-True ($lines -ccontains $offlineCommand) 'README must contain the exact offline Option 1 command on its own line.'
+        Assert-True ($lines -ccontains $liveCommand) 'README must contain the frozen accepted live command on its own line.'
+        foreach ($fragment in @(
+            'agy__gemini_3_7_flash_low__low',
+            'codex__gpt_5_6_sol__max',
+            'claude__claude_opus_5__max',
+            'candidate execution',
+            'local deterministic grader',
+            'two independent cross-family judges',
+            'does not consume a launcher slot',
+            'maximum of three non-refundable application launch slots',
+            '`provider_side_requests.observable: false`',
+            '`provider_side_requests.count: null`',
+            'No retry, fallback, or resume',
+            'new RunId and new explicit approval',
+            'never promote production quality',
+            'never mutate model profiles',
+            'never change production eligibility',
+            'safe artifacts',
+            'exact commit and exact ordered identities'
+        )) {
+            Assert-True ($readme.IndexOf($fragment, [StringComparison]::Ordinal) -ge 0) "README is missing required Option 1 contract text: $fragment"
+        }
+    }
+
     Invoke-Assertion 'result paths are bounded beneath calibration results and reject traversal' {
         $resultsRoot = Join-Path $calibrationRoot 'results'
         try {
