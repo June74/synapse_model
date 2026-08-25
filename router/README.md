@@ -1,6 +1,6 @@
 # Deterministic policy router V1
 
-This router accepts one structured request, checks every enabled launcher/model/effort configuration, and deterministically chooses at most one complete configuration. Deterministic means that the same request and the same versioned catalog produce the same decision.
+This router accepts one structured request, checks every enabled launcher/model/effort configuration, and deterministically chooses at most one complete configuration. Deterministic means that the same complete decision inputs and versions produce the same decision. Those inputs include the request, catalog and profile data, pricing and token estimates, runtime availability state, project instructions and context settings, and the effective pricing date. Changing any of them may legitimately change the result.
 
 The safe offline interface is the pure `Invoke-RouterPolicy` function. It evaluates policy only: it does not invoke a provider and does not write SQLite. By contrast, running `router/run_router.ps1` directly is a live route-and-execute command when an eligible candidate exists.
 
@@ -192,7 +192,16 @@ Get-ChildItem -LiteralPath .\router\examples -Filter '*-request.json' |
   } | Format-List
 ```
 
-With the checked-in snapshots used for this guide, all three requests are valid and evaluate 63 candidates in stable identity order. Repeating each complete decision is stable. Each request currently has no selected candidate: 59 candidates stop at `quality_evidence_unknown`, and four non-cost-comparable candidates stop at `price_unavailable` during requirements. Therefore no candidate reaches price or latency ranking. This is an expected conservative `no_eligible_configuration` outcome, not a fabricated successful route. The policy test suite separately exercises eligible fixtures and proves that raw price ranks before latency and stable identity.
+Task 10 used two complementary offline checks. First, with the checked-in production snapshots used for this guide, all three requests are valid and evaluate 63 candidates in stable identity order. Repeating each complete decision is stable. Each request currently has no selected candidate: 59 candidates stop at `quality_evidence_unknown`, and four non-cost-comparable candidates stop at `price_unavailable` during requirements. Therefore no candidate reaches price or latency ranking. This is an expected conservative `no_eligible_configuration` outcome, not a fabricated successful route.
+
+Second, an eligible-fixture acceptance check exercised ranking after requirements and quality. For each `standard`, `strong`, and `frontier` quality floor, it ran 20 repeated pure-policy decisions across both forward and reverse candidate input orders:
+
+- `standard` always selected `agy|shared-model__medium` and demonstrated that its price `0.00384` ranked ahead of `0.00618` for `codex|shared-model__medium`.
+- `strong` always selected `codex|shared-model__medium` with strong effective quality; the agy fixture was rejected with `quality_floor_not_met`.
+- `frontier` always selected `codex|shared-model__medium` with frontier effective quality; the strong agy fixture was rejected with `quality_floor_not_met`.
+- Every winner reported `task_type.coding` as its quality bottleneck, and the complete acceptance made zero provider calls.
+
+The `shared-model` identities and prices are synthetic acceptance fixtures—small controlled examples used to prove policy behavior—not claims about production models or current provider prices. Together, the checked-in snapshot check proves conservative production rejection when evidence is unknown, while the eligible-fixture check proves stable winner selection, quality-floor enforcement, price ordering, and input-order independence when candidates can reach ranking.
 
 ### 4. Calibration route-only mode
 
