@@ -95,6 +95,7 @@ function Get-RecursiveKeysAndStrings {
         param([AllowNull()][object]$Current)
         if ($null -eq $Current) { return }
         if ($Current -is [string]) { $found.Add([string]$Current); return }
+        if ($Current -is [ValueType]) { return }
         if ($Current -is [Collections.IDictionary]) {
             foreach ($key in $Current.Keys) {
                 $found.Add([string]$key)
@@ -280,6 +281,136 @@ Invoke-Assertion 'an atomic run claim rejects collisions before artifact writes'
         if ($null -ne $claim -and $null -ne $claim.stream) { $claim.stream.Dispose() }
         Remove-TestPath -Path $runDirectory
     }
+}
+
+function New-SecurityPilotCommand {
+    param([Parameter(Mandatory)][object]$Candidate, [Parameter(Mandatory)][string]$Prompt)
+    return [pscustomobject]@{
+        executable = [string]$Candidate.tool
+        arguments = @()
+        prompt = $Prompt
+        tool = [string]$Candidate.tool
+        route_id = [string]$Candidate.route_id
+        working_directory = $projectRoot
+    }
+}
+
+function New-SecurityPilotExecution {
+    param(
+        [Parameter(Mandatory)][object]$Candidate,
+        [Parameter(Mandatory)][string]$RunId,
+        [AllowNull()][string]$Answer,
+        [AllowNull()][string]$FailureCode,
+        [bool]$ProcessStarted = $true,
+        [string[]]$Sentinels = @()
+    )
+    $hasFailure = -not [string]::IsNullOrEmpty($FailureCode)
+    $process = if ($ProcessStarted) {
+        [pscustomobject]@{
+            exit_code = if (-not $hasFailure) { 0 } else { 17 }
+            duration_ms = 1
+            timed_out = ($FailureCode -ceq 'timeout')
+            cleanup_failed = ($FailureCode -ceq 'cleanup_failed')
+            cleanup_status = 'test-only'
+            process_exited = $true
+        }
+    } else { $null }
+    return [pscustomobject][ordered]@{
+        run_id = $RunId
+        candidate = $Candidate
+        process_started = $ProcessStarted
+        process = $process
+        canonical = if (-not $hasFailure) {
+            [pscustomobject]@{ status = 'success'; answer = $Answer; error = $null }
+        } else { $null }
+        failure = if (-not $hasFailure) { $null } else { 'arbitrary unsafe failure text' }
+        failure_code = if ($hasFailure) { $FailureCode } else { $null }
+        diagnostic_note = if (-not $hasFailure) { 'completed' } else { 'unsafe diagnostic' }
+        unsafe_environment = @($Sentinels)
+        unsafe_arguments = @($Sentinels)
+        stderr = @($Sentinels) -join '|'
+        exception = @($Sentinels) -join '|'
+    }
+}
+
+function Invoke-SecurityPilotFailureCase {
+    param(
+        [Parameter(Mandatory)][ValidateSet('candidate', 'judge_1', 'judge_2')][string]$FailureRole,
+        [Parameter(Mandatory)][string]$FailureCode,
+        [ValidateSet('confirmed_start', 'preclaim_throw', 'postclaim_throw')][string]$FailureMode = 'confirmed_start',
+        [string[]]$Sentinels = @(),
+        [scriptblock]$ArtifactWriter
+    )
+    $input = New-SecurityPilotLedgerInput
+    $calls = [Collections.Generic.List[string]]::new()
+    $candidate = {
+        param($Candidate, $Prompt, $LaunchGuard, $RunId)
+        $calls.Add('candidate')
+        if ($FailureRole -ceq 'candidate' -and $FailureMode -ceq 'preclaim_throw') {
+            throw (@($Sentinels) -join '|')
+        }
+        & $LaunchGuard $Candidate (New-SecurityPilotCommand -Candidate $Candidate -Prompt $Prompt)
+        if ($FailureRole -ceq 'candidate' -and $FailureMode -ceq 'postclaim_throw') {
+            throw (@($Sentinels) -join '|')
+        }
+        $failure = if ($FailureRole -ceq 'candidate') { $FailureCode } else { $null }
+        return New-SecurityPilotExecution -Candidate $Candidate -RunId $RunId `
+            -Answer '{"event":"Robotics club demo","date":"2026-09-14","room":"Room B12"}' `
+            -FailureCode $failure -Sentinels $Sentinels
+    }.GetNewClosure()
+    $judge = {
+        param($JudgeProfileId, $JudgePayload, $PromptDefinition, $LaunchGuard, $RunId)
+        $role = if ($JudgeProfileId -ceq 'gpt-5.6-sol__max') { 'judge_1' } else { 'judge_2' }
+        $calls.Add($role)
+        $resolved = Get-CalibrationProfileAndCandidate -ConfigurationId $JudgeProfileId
+        & $LaunchGuard $resolved.candidate (New-SecurityPilotCommand -Candidate $resolved.candidate -Prompt 'safe judge payload')
+        if ($FailureRole -ceq $role) {
+            return [pscustomobject]@{
+                pilot_execution = New-SecurityPilotExecution -Candidate $resolved.candidate -RunId $RunId `
+                    -Answer $null -FailureCode $FailureCode -Sentinels $Sentinels
+                decision = $null
+            }
+        }
+        return [pscustomobject]@{ decision = 'pass'; rationale = 'bounded safe evidence' }
+    }.GetNewClosure()
+    $grader = {
+        param($Prompt, $ResponseText, $PythonExecutor, $PythonExecutable, $TimeoutMilliseconds)
+        return Invoke-CalibrationDeterministicGrader -Prompt $Prompt -ResponseText $ResponseText
+    }
+    $git = { [pscustomobject]@{ clean = $true; commit = ('d' * 40) } }
+    $parameters = @{
+        Pilot = $true
+        Run = $true
+        RunId = 'option1-live-20260825-001'
+        ResultsRoot = $input.results_root
+        CalibrationSetPath = $setPath
+        RubricsRoot = $rubricsRoot
+        CandidateInvoker = $candidate
+        GraderInvoker = $grader
+        JudgeInvoker = $judge
+        PilotGitInvoker = $git
+    }
+    if ($null -ne $ArtifactWriter) { $parameters.PilotArtifactWriter = $ArtifactWriter }
+    try {
+        $result = Invoke-Calibration @parameters
+        return [pscustomobject]@{ input = $input; result = $result; calls = @($calls) }
+    } catch {
+        Remove-SecurityPilotLedgerRoot -Path $input.results_root
+        throw
+    }
+}
+
+function Get-SecurityFileHashes {
+    $paths = @(
+        Get-ChildItem -LiteralPath (Join-Path $projectRoot 'profiles') -File -Recurse
+        Get-Item -LiteralPath (Join-Path $calibrationRoot 'calibration-set-v1.json')
+        Get-Item -LiteralPath (Join-Path $projectRoot 'pilot/model_matrix.json')
+        Get-ChildItem -LiteralPath (Join-Path $calibrationRoot 'pilots') -File -Recurse
+        Get-ChildItem -LiteralPath (Join-Path $calibrationRoot 'rubrics') -File -Recurse
+    )
+    return @($paths | Sort-Object FullName | ForEach-Object {
+        '{0}|{1}' -f $_.FullName, (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash
+    })
 }
 
 Invoke-Assertion 'pilot run plan and claim artifacts use create-new semantics and result replacement is isolated' {
@@ -795,6 +926,159 @@ Invoke-Assertion 'result path resolution and writes reject junction ancestors an
     }
 }
 
+Invoke-Assertion 'option 1 stop-code conversion accepts only the exact bounded allowlist' {
+    $allowedStopCodes = @(
+        'source_drift', 'repository_not_clean', 'authentication_failed', 'quota_failed',
+        'unsupported_configuration', 'process_start_failed', 'timeout', 'cleanup_failed',
+        'nonzero_exit', 'provider_envelope_invalid', 'response_contract_invalid',
+        'artifact_persistence_failed', 'sensitive_output_detected', 'budget_invariant_failed',
+        'manual_abort'
+    )
+    Assert-SequenceEqual @($script:CalibrationPilotAllowedStopCodes) $allowedStopCodes
+    foreach ($code in $allowedStopCodes) { Assert-Equal (Resolve-CalibrationPilotStopCode $code) $code }
+    foreach ($unsafe in @($null, '', 'TIMEOUT', 'exception: private text', 'pilot_candidate_execution_failed')) {
+        Assert-Equal (Resolve-CalibrationPilotStopCode $unsafe) 'provider_envelope_invalid'
+    }
+    $malformedEnvelope = [pscustomobject]@{
+        process = [pscustomobject]@{ timed_out = $false; cleanup_failed = $false; exit_code = 'EXCEPTION_SENTINEL_EXIT_42' }
+        canonical = $null
+    }
+    Assert-Equal (Get-CalibrationPilotExecutionStopCode -Execution $malformedEnvelope -ExplicitCode $null) `
+        'provider_envelope_invalid'
+}
+
+Invoke-Assertion 'option 1 technical failures stop at each exact role and durably skip every later role' {
+    $cases = @(
+        [pscustomobject]@{ role = 'candidate'; code = 'timeout'; claims = 1; calls = @('candidate'); states = @('failed', 'skipped', 'skipped') },
+        [pscustomobject]@{ role = 'judge_1'; code = 'authentication_failed'; claims = 2; calls = @('candidate', 'judge_1'); states = @('succeeded', 'failed', 'skipped') },
+        [pscustomobject]@{ role = 'judge_2'; code = 'quota_failed'; claims = 3; calls = @('candidate', 'judge_1', 'judge_2'); states = @('succeeded', 'succeeded', 'failed') }
+    )
+    foreach ($case in $cases) {
+        $execution = Invoke-SecurityPilotFailureCase -FailureRole $case.role -FailureCode $case.code
+        try {
+            Assert-SequenceEqual @($execution.calls) @($case.calls)
+            Assert-Equal $execution.result.run_state 'stopped'
+            Assert-Equal $execution.result.stop_reason $case.code
+            Assert-True ($execution.result.slots_consumed.total -eq $case.claims) `
+                "$($case.role) expected $($case.claims) slots, got $($execution.result.slots_consumed.total)."
+            Assert-True ($execution.result.launcher_processes_started.total -eq $case.claims) `
+                "$($case.role) expected $($case.claims) starts, got $($execution.result.launcher_processes_started.total)."
+            Assert-SequenceEqual @($execution.result.attempts.state) @($case.states)
+            $runRoot = Join-Path $execution.input.results_root 'option1-live-20260825-001'
+            Assert-Equal @(Get-ChildItem -LiteralPath (Join-Path $runRoot 'claims') -File -Force).Count $case.claims
+            $persisted = Get-Content -Raw -LiteralPath (Join-Path $runRoot 'result.json') | ConvertFrom-Json -Depth 100
+            Assert-Equal $persisted.stop_reason $case.code
+            Assert-SequenceEqual @($persisted.attempts.state) @($case.states)
+        } finally { Remove-SecurityPilotLedgerRoot -Path $execution.input.results_root }
+    }
+}
+
+Invoke-Assertion 'option 1 preclaim and postclaim failures preserve exact non-refundable boundaries' {
+    $sentinels = @('CREDENTIAL_SENTINEL_42', 'ENVIRONMENT_SENTINEL_42', 'PROMPT_ECHO_SENTINEL_42',
+        'ARGUMENTS_SENTINEL_42', 'STDERR_SENTINEL_42', 'EXCEPTION_SENTINEL_42')
+    $cases = @(
+        [pscustomobject]@{ mode = 'preclaim_throw'; claims = 0; states = @('skipped', 'skipped', 'skipped') },
+        [pscustomobject]@{ mode = 'postclaim_throw'; claims = 1; states = @('failed', 'skipped', 'skipped') }
+    )
+    foreach ($case in $cases) {
+        $execution = Invoke-SecurityPilotFailureCase -FailureRole candidate -FailureCode provider_envelope_invalid `
+            -FailureMode $case.mode -Sentinels $sentinels
+        try {
+            Assert-SequenceEqual @($execution.calls) @('candidate')
+            Assert-Equal $execution.result.run_state 'stopped'
+            Assert-Equal $execution.result.stop_reason 'provider_envelope_invalid'
+            Assert-Equal $execution.result.slots_consumed.total $case.claims
+            Assert-Equal $execution.result.launcher_processes_started.total 0
+            Assert-SequenceEqual @($execution.result.attempts.state) @($case.states)
+            $runRoot = Join-Path $execution.input.results_root 'option1-live-20260825-001'
+            $persistedText = @(Get-ChildItem -LiteralPath $runRoot -File -Recurse | ForEach-Object {
+                Get-Content -Raw -LiteralPath $_.FullName
+            }) -join "`n"
+            foreach ($sentinel in $sentinels) {
+                Assert-False $persistedText.Contains($sentinel, [StringComparison]::Ordinal) "Failure artifact leaked $sentinel."
+            }
+        } finally { Remove-SecurityPilotLedgerRoot -Path $execution.input.results_root }
+    }
+}
+
+Invoke-Assertion 'option 1 artifact failure after confirmed start becomes indeterminate and forbids same-run resume' {
+    $writerCalls = [pscustomobject]@{ count = 0 }
+    $artifactWriter = {
+        param($Context, $Name, $Value)
+        $writerCalls.count++
+        throw 'EXCEPTION_SENTINEL_ARTIFACT_WRITER_42'
+    }.GetNewClosure()
+    $execution = Invoke-SecurityPilotFailureCase -FailureRole judge_2 -FailureCode quota_failed -ArtifactWriter $artifactWriter
+    try {
+        Assert-SequenceEqual @($execution.calls) @('candidate')
+        Assert-True ($writerCalls.count -eq 1) "Expected one artifact writer call, got $($writerCalls.count)."
+        Assert-Equal $execution.result.run_state 'indeterminate'
+        Assert-Equal $execution.result.stop_reason 'artifact_persistence_failed'
+        Assert-Equal $execution.result.slots_consumed.total 1
+        Assert-Equal $execution.result.launcher_processes_started.total 1
+        Assert-SequenceEqual @($execution.result.attempts.state) @('failed', 'skipped', 'skipped')
+        $resumeCalls = [pscustomobject]@{ count = 0 }
+        $resumeSpy = { $resumeCalls.count++; throw 'resume reached invoker' }.GetNewClosure()
+        $null = Assert-Throws {
+            Invoke-Calibration -Pilot -Run -RunId 'option1-live-20260825-001' `
+                -ResultsRoot $execution.input.results_root -CalibrationSetPath $setPath -RubricsRoot $rubricsRoot `
+                -CandidateInvoker $resumeSpy -JudgeInvoker $resumeSpy `
+                -PilotGitInvoker { [pscustomobject]@{ clean = $true; commit = ('d' * 40) } } | Out-Null
+        } 'pilot_run_collision'
+        Assert-Equal $resumeCalls.count 0
+        $runRoot = Join-Path $execution.input.results_root 'option1-live-20260825-001'
+        $persistedText = @(Get-ChildItem -LiteralPath $runRoot -File -Recurse | ForEach-Object {
+            Get-Content -Raw -LiteralPath $_.FullName
+        }) -join "`n"
+        Assert-False $persistedText.Contains('EXCEPTION_SENTINEL_ARTIFACT_WRITER_42', [StringComparison]::Ordinal)
+    } finally { Remove-SecurityPilotLedgerRoot -Path $execution.input.results_root }
+}
+
+Invoke-Assertion 'option 1 failure artifacts exclude unsafe fields and do not mutate sources or routing traces' {
+    $sentinels = @('CREDENTIAL_SENTINEL_99', 'ENVIRONMENT_SENTINEL_99', 'PROMPT_ECHO_SENTINEL_99',
+        'ARGUMENTS_SENTINEL_99', 'STDERR_SENTINEL_99', 'EXCEPTION_SENTINEL_99')
+    $before = Get-SecurityFileHashes
+    $originalRouterText = (Get-Command -Name Invoke-RouterRun -CommandType Function -ErrorAction Stop).ScriptBlock.ToString()
+    $immutableRouter = [scriptblock]::Create($originalRouterText)
+    $traceSentinel = [pscustomobject]@{ calls = 0 }
+    Set-Item -Path Function:\Invoke-RouterRun -Value {
+        $traceSentinel.calls++
+        throw 'routing trace sentinel reached'
+    }.GetNewClosure()
+    $execution = $null
+    try {
+        $execution = Invoke-SecurityPilotFailureCase -FailureRole judge_2 `
+            -FailureCode response_contract_invalid -Sentinels $sentinels
+        $after = Get-SecurityFileHashes
+        Assert-SequenceEqual @($after) @($before)
+        Assert-Equal $traceSentinel.calls 0
+        Assert-Equal $execution.result.run_state 'stopped'
+        Assert-Equal $execution.result.stop_reason 'response_contract_invalid'
+        Assert-False $execution.result.profile_mutated
+        Assert-False $execution.result.production_eligibility_changed
+        $runRoot = Join-Path $execution.input.results_root 'option1-live-20260825-001'
+        $artifacts = @(Get-ChildItem -LiteralPath $runRoot -File -Recurse | Where-Object {
+            $_.Name -in @('plan.json', 'result.json', 'candidate-response.json', 'judge-responses.json')
+        })
+        Assert-True ($artifacts.Count -ge 3) 'Expected plan, result, and bounded raw artifacts.'
+        foreach ($artifact in $artifacts) {
+            $parsed = Get-Content -Raw -LiteralPath $artifact.FullName | ConvertFrom-Json -Depth 100
+            $recursive = @(Get-RecursiveKeysAndStrings $parsed) -join "`n"
+            foreach ($sentinel in $sentinels) {
+                Assert-False $recursive.Contains($sentinel, [StringComparison]::Ordinal) `
+                    "Artifact '$($artifact.Name)' leaked $sentinel."
+            }
+        }
+        Assert-Equal @(Get-ChildItem -LiteralPath $runRoot -File -Recurse -Include '*.sqlite','*.db').Count 0
+        Assert-False (Test-Path -LiteralPath (Join-Path $runRoot 'routing_decisions'))
+        Assert-False (Test-Path -LiteralPath (Join-Path $runRoot 'candidate_evaluations'))
+    } finally {
+        Set-Item -Path Function:\Invoke-RouterRun -Value $immutableRouter
+        if ($null -ne $execution) { Remove-SecurityPilotLedgerRoot -Path $execution.input.results_root }
+    }
+    Assert-Equal (Get-Command -Name Invoke-RouterRun -CommandType Function -ErrorAction Stop).ScriptBlock.ToString() $originalRouterText
+}
+
 Invoke-Assertion 'per-item failures continue and final manifest explains candidate grader and both judge failures' {
     $runId = 'isolation-test-{0}' -f [guid]::NewGuid().ToString('N')
     $runDirectory = Join-Path $resultsRoot $runId
@@ -963,6 +1247,13 @@ Invoke-Assertion 'route-only outer failure writes a safe partial failure manifes
     } finally {
         Remove-TestPath -Path $runDirectory
     }
+}
+
+Invoke-Assertion 'security failure fixtures leave no owned pilot result roots' {
+    $ownedRoots = @(Get-ChildItem -LiteralPath $resultsRoot -Directory -Force | Where-Object {
+        $_.Name -match '^pilot-ledger-security-[0-9a-f]{32}$'
+    })
+    Assert-Equal $ownedRoots.Count 0
 }
 
 if ($script:Failures.Count -gt 0) {
