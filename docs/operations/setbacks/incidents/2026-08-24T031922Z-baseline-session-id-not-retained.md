@@ -2,10 +2,10 @@
 
 - **Status:** closed
 - **First observed:** 2026-08-24T03:19:22.527505Z
-- **Last observed:** 2026-08-24T04:42:50Z
-- **Phase/task:** Task 7 pre-implementation baseline
+- **Last observed:** 2026-08-25
+- **Phase/task:** Task 4 atomic ledger follow-up verification
 - **Environment:** Windows PowerShell, Codex desktop managed workspace
-- **Version/commit:** `12481f6`
+- **Version/commit:** First observed at `12481f6`; Task 4 recurrence at `9d35707`
 
 ## Symptom
 
@@ -72,3 +72,17 @@ Run the full router PowerShell suite through an execution wrapper with a 30-seco
 - **Correction:** Reran the suite in a dedicated call, retained session `73876`, and polled it to exit code 0.
 - **Prevention:** Long-running test commands must run in dedicated calls that print or persist the full result object before any projection.
 - **Verification:** The corrected full router baseline completed with exit code 0.
+
+## Recurrence: Task 4 combined verification wrapper
+
+- **Symptom:** A wrapper running both calibration suites produced no captured output after approximately 30 seconds, so it did not establish either suite's exit status.
+- **Impact:** Final verification and commit were paused. A dedicated direct run then exposed one functional-suite failure; no provider was invoked and no private output was recorded.
+- **Confirmed cause:** The wrapper projected only the nested command's output field and did not preserve the continuation identifier when execution crossed the yield boundary.
+- **Hypotheses:** The first overlapping direct invocation may have observed interference from the still-running discarded session; there is not enough retained evidence to classify that transient assertion as a product defect.
+- **Rejected hypotheses:** The empty wrapper result did not prove the suites were green or hung. The state-machine behavior was not a stable regression: its exact sequence passed in isolation and the full suite passed on a fresh, session-aware rerun.
+- **Known exclusions:** No provider, network, credential, prompt text, or raw private payload was involved.
+- **Correction:** Use dedicated direct suite calls, retain the full execution result, and poll any returned session identifier before accepting the outcome.
+- **Prevention:** Do not combine long suites inside an output-only projection. Verification evidence must include each direct command's explicit exit code and assertion count.
+- **Owner:** Codex.
+- **Next diagnostic step:** None. If the state assertion recurs in a non-overlapping direct run, open a separate incident and capture its exact failing step.
+- **Verification:** A dedicated functional run was polled through its continuation handle to exit 0 with 43 passing assertions. A dedicated security run exited 0 with 19 passing assertions. The exact state-machine sequence also passed in isolation.
