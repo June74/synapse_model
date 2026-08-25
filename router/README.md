@@ -62,7 +62,7 @@ Every model and effort pair is one complete candidate. The router does not choos
 1. Requirements: reject unsupported boundaries, unavailable configurations, insufficient context/output windows, missing capabilities, and non-comparable prices.
 2. Quality floor: reject unknown evidence or an effective quality below the requested floor.
 3. Price: choose the lowest estimated request price among survivors.
-4. Latency: break an equal-price tie with lower measured end-to-end latency, except that `relaxed` skips this tie-break.
+4. Latency: break an equal-price tie with lower measured end-to-end latency. V1 treats `fast` and `normal` identically: both use this tie-break. `relaxed` skips it.
 5. Stable identity: break any remaining tie by the ordinal `launcher|configuration_id` text identity.
 
 Later factors never compensate for an earlier failure. A cheaper candidate cannot bypass requirements or quality, and a faster candidate cannot beat a cheaper eligible candidate.
@@ -77,7 +77,7 @@ Before execution, `price` is calculated from estimated input, visible-output, an
 
 Run commands from the repository root.
 
-### 1. Structural checks
+### 1. Schema-only structural validation
 
 Structural checks parse files and validate schemas. They do not route or invoke a provider.
 
@@ -98,7 +98,7 @@ Get-ChildItem -LiteralPath (Join-Path $PWD 'router/examples') -Filter '*.json' |
   }
 ```
 
-The complete structural suites are also provider-free:
+The broader offline behavioral suites are also provider-free. Unlike the schema-only check above, these suites exercise policy, storage, calibration, and fake-executor behavior:
 
 ```powershell
 pwsh -NoProfile -File .\pilot\tests\runner.tests.ps1
@@ -192,7 +192,7 @@ Get-ChildItem -LiteralPath .\router\examples -Filter '*-request.json' |
   } | Format-List
 ```
 
-Task 10 used two complementary offline checks. First, with the checked-in production snapshots used for this guide, all three requests are valid and evaluate 63 candidates in stable identity order. Repeating each complete decision is stable. Each request currently has no selected candidate: 59 candidates stop at `quality_evidence_unknown`, and four non-cost-comparable candidates stop at `price_unavailable` during requirements. Therefore no candidate reaches price or latency ranking. This is an expected conservative `no_eligible_configuration` outcome, not a fabricated successful route.
+Task 10 used two complementary offline checks. First, at commit `d588f07`, the checked-in production snapshots made all three requests valid and produced 63 candidate evaluations in stable identity order. Repeating each complete decision was stable. Each request had no selected candidate: 59 candidates stopped at `quality_evidence_unknown`, and four non-cost-comparable candidates stopped at `price_unavailable` during requirements. Therefore no candidate reached price or latency ranking. These `63/59/4` counts are a snapshot-specific observation at that commit and may change when profiles or snapshots change. The conservative `no_eligible_configuration` result was expected, not a fabricated successful route.
 
 Second, an eligible-fixture acceptance check exercised ranking after requirements and quality. For each `standard`, `strong`, and `frontier` quality floor, it ran 20 repeated pure-policy decisions across both forward and reverse candidate input orders:
 
@@ -203,12 +203,29 @@ Second, an eligible-fixture acceptance check exercised ranking after requirement
 
 The `shared-model` identities and prices are synthetic acceptance fixtures—small controlled examples used to prove policy behavior—not claims about production models or current provider prices. Together, the checked-in snapshot check proves conservative production rejection when evidence is unknown, while the eligible-fixture check proves stable winner selection, quality-floor enforcement, price ordering, and input-order independence when candidates can reach ranking.
 
+The 20-decision matrix was an ad hoc Task 10 acceptance run; the maintained suite does not claim to repeat that historical matrix exactly. Future maintainers can reproduce its core guarantees with the already documented command `pwsh -NoProfile -File .\router\tests\router.tests.ps1`. The relevant named tests are:
+
+- Quality-floor category ordering across all three floors and all three candidate categories:
+  - `quality floor standard evaluates category standard by standard less than strong less than frontier`
+  - `quality floor standard evaluates category strong by standard less than strong less than frontier`
+  - `quality floor standard evaluates category frontier by standard less than strong less than frontier`
+  - `quality floor strong evaluates category standard by standard less than strong less than frontier`
+  - `quality floor strong evaluates category strong by standard less than strong less than frontier`
+  - `quality floor strong evaluates category frontier by standard less than strong less than frontier`
+  - `quality floor frontier evaluates category standard by standard less than strong less than frontier`
+  - `quality floor frontier evaluates category strong by standard less than strong less than frontier`
+  - `quality floor frontier evaluates category frontier by standard less than strong less than frontier`
+- Price and quality ordering: `cheaper frontier beats more expensive strong after both pass the quality floor`.
+- Price before latency: `price strictly outranks latency`.
+- Forward/reverse input-order stability: `policy selection is invariant to forward and reverse tied input order`.
+- Exactly one winner: `policy selects exactly one candidate`.
+
 ### 4. Calibration route-only mode
 
-Route-only mode applies the pure policy to the 24 calibration prompts and writes a bounded route-plan artifact under `calibration/results`. It executes no candidate and invokes no judge.
+Route-only mode applies the pure policy to the 24 calibration prompts and writes a bounded route-plan artifact under `calibration/results`. It executes no candidate and invokes no judge. When `-RunId` is omitted, the script generates a unique run ID and a corresponding unique artifact directory, so the command can be repeated without reusing a fixed result path.
 
 ```powershell
-pwsh -NoProfile -File .\calibration\run_calibration.ps1 -Route -RunId task10-route-only
+pwsh -NoProfile -File .\calibration\run_calibration.ps1 -Route
 ```
 
 Route-only can legitimately record `no_eligible_configuration` while relevant checked-in quality is unknown.
