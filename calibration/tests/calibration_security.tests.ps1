@@ -342,7 +342,9 @@ function Invoke-SecurityPilotFailureCase {
         [ValidateSet('confirmed_start', 'preclaim_throw', 'postclaim_throw')][string]$FailureMode = 'confirmed_start',
         [string[]]$Sentinels = @(),
         [scriptblock]$ArtifactWriter,
-        [scriptblock]$EnvelopeMutation
+        [scriptblock]$EnvelopeMutation,
+        [scriptblock]$GraderMutation,
+        [scriptblock]$WrapperMutation
     )
     $input = New-SecurityPilotLedgerInput
     $calls = [Collections.Generic.List[string]]::new()
@@ -374,12 +376,14 @@ function Invoke-SecurityPilotFailureCase {
                 -Answer '{"decision":"pass","rationale":"bounded safe evidence"}' `
                 -FailureCode $FailureCode -Sentinels $Sentinels
             if ($null -ne $EnvelopeMutation) { & $EnvelopeMutation $execution }
-            return [pscustomobject]@{
+            $wrapper = [pscustomobject]@{
                 pilot_execution = $execution
                 decision = if ([string]::IsNullOrEmpty($FailureCode)) {
                     [pscustomobject]@{ decision = 'pass'; rationale = 'bounded safe evidence' }
                 } else { $null }
             }
+            if ($null -ne $WrapperMutation) { & $WrapperMutation $wrapper }
+            return $wrapper
         }
         return [pscustomobject]@{
             pilot_execution = New-SecurityPilotExecution -Candidate $resolved.candidate -RunId $RunId `
@@ -389,8 +393,10 @@ function Invoke-SecurityPilotFailureCase {
     }.GetNewClosure()
     $grader = {
         param($Prompt, $ResponseText, $PythonExecutor, $PythonExecutable, $TimeoutMilliseconds)
-        return Invoke-CalibrationDeterministicGrader -Prompt $Prompt -ResponseText $ResponseText
-    }
+        $result = Invoke-CalibrationDeterministicGrader -Prompt $Prompt -ResponseText $ResponseText
+        if ($null -ne $GraderMutation) { & $GraderMutation $result }
+        return $result
+    }.GetNewClosure()
     $git = { [pscustomobject]@{ clean = $true; commit = ('d' * 40) } }
     $parameters = @{
         Pilot = $true
@@ -966,21 +972,26 @@ Invoke-Assertion 'option 1 stop-code conversion accepts only the exact bounded a
 
 Invoke-Assertion 'option 1 rejects malformed candidate and judge execution envelopes without coercion' {
     $cases = @(
-        [pscustomobject]@{ role = 'candidate'; name = 'string exit zero'; starts = 0; mutate = { param($e) $e.process.exit_code = '0' } },
-        [pscustomobject]@{ role = 'candidate'; name = 'fractional exit zero'; starts = 0; mutate = { param($e) $e.process.exit_code = [decimal]0.0 } },
-        [pscustomobject]@{ role = 'candidate'; name = 'contradictory start flag'; starts = 0; mutate = { param($e) $e.process_started = $false } },
-        [pscustomobject]@{ role = 'candidate'; name = 'string timeout flag'; starts = 0; mutate = { param($e) $e.process.timed_out = 'false' } },
-        [pscustomobject]@{ role = 'judge_1'; name = 'string exit zero'; starts = 1; mutate = { param($e) $e.process.exit_code = '0' } },
-        [pscustomobject]@{ role = 'judge_1'; name = 'numeric cleanup flag'; starts = 1; mutate = { param($e) $e.process.cleanup_failed = 0 } },
-        [pscustomobject]@{ role = 'judge_1'; name = 'string exited flag'; starts = 1; mutate = { param($e) $e.process.process_exited = 'true' } }
+        [pscustomobject]@{ role = 'candidate'; name = 'string exit zero'; starts = 1; terminal = 'stopped'; mutate = { param($e) $e.process.exit_code = '0' } },
+        [pscustomobject]@{ role = 'candidate'; name = 'fractional exit zero'; starts = 1; terminal = 'stopped'; mutate = { param($e) $e.process.exit_code = [decimal]0.0 } },
+        [pscustomobject]@{ role = 'candidate'; name = 'contradictory start flag'; starts = 0; terminal = 'indeterminate'; mutate = { param($e) $e.process_started = $false } },
+        [pscustomobject]@{ role = 'candidate'; name = 'string start flag'; starts = 0; terminal = 'indeterminate'; mutate = { param($e) $e.process_started = 'true' } },
+        [pscustomobject]@{ role = 'candidate'; name = 'true start without process'; starts = 0; terminal = 'indeterminate'; mutate = { param($e) $e.process = $null } },
+        [pscustomobject]@{ role = 'candidate'; name = 'string timeout flag'; starts = 1; terminal = 'stopped'; mutate = { param($e) $e.process.timed_out = 'false' } },
+        [pscustomobject]@{ role = 'judge_1'; name = 'string exit zero'; starts = 2; terminal = 'stopped'; mutate = { param($e) $e.process.exit_code = '0' } },
+        [pscustomobject]@{ role = 'judge_1'; name = 'numeric cleanup flag'; starts = 2; terminal = 'stopped'; mutate = { param($e) $e.process.cleanup_failed = 0 } },
+        [pscustomobject]@{ role = 'judge_1'; name = 'string exited flag'; starts = 2; terminal = 'stopped'; mutate = { param($e) $e.process.process_exited = 'true' } }
     )
     foreach ($case in $cases) {
         $execution = Invoke-SecurityPilotFailureCase -FailureRole $case.role -FailureCode '' `
             -EnvelopeMutation $case.mutate
         try {
-            Assert-Equal $execution.result.run_state 'stopped'
-            Assert-Equal $execution.result.stop_reason 'provider_envelope_invalid'
-            Assert-Equal $execution.result.launcher_processes_started.total $case.starts
+            Assert-True ($execution.result.run_state -ceq $case.terminal) `
+                "$($case.role)/$($case.name) expected terminal $($case.terminal), got $($execution.result.run_state)."
+            Assert-True ($execution.result.stop_reason -ceq 'provider_envelope_invalid') `
+                "$($case.role)/$($case.name) expected provider_envelope_invalid, got $($execution.result.stop_reason)."
+            Assert-True ($execution.result.launcher_processes_started.total -eq $case.starts) `
+                "$($case.role)/$($case.name) expected $($case.starts) starts, got $($execution.result.launcher_processes_started.total)."
             $expectedStates = if ($case.role -ceq 'candidate') {
                 @('failed', 'skipped', 'skipped')
             } else { @('succeeded', 'failed', 'skipped') }
@@ -989,6 +1000,92 @@ Invoke-Assertion 'option 1 rejects malformed candidate and judge execution envel
             $persisted = Get-Content -Raw -LiteralPath (Join-Path $runRoot 'result.json') | ConvertFrom-Json -Depth 100
             Assert-Equal $persisted.stop_reason 'provider_envelope_invalid'
             Assert-SequenceEqual @($persisted.attempts.state) $expectedStates
+        } finally { Remove-SecurityPilotLedgerRoot -Path $execution.input.results_root }
+    }
+}
+
+Invoke-Assertion 'option 1 strictly validates deterministic grader results before any quality mutation' {
+    $cases = @(
+        [pscustomobject]@{ name = 'missing checks'; mutate = { param($r) $r.PSObject.Properties.Remove('checks') } },
+        [pscustomobject]@{ name = 'non-string type'; mutate = { param($r) $r.type = 7 } },
+        [pscustomobject]@{ name = 'non-string outcome'; mutate = { param($r) $r.outcome = $true } },
+        [pscustomobject]@{ name = 'extra top-level property'; mutate = { param($r) $r | Add-Member -NotePropertyName extra -NotePropertyValue 'unsafe' } },
+        [pscustomobject]@{ name = 'malformed check Boolean'; mutate = { param($r) $r.checks[0].passed = 'true' } },
+        [pscustomobject]@{ name = 'extra check property'; mutate = { param($r) $r.checks[0] | Add-Member -NotePropertyName extra -NotePropertyValue 'unsafe' } }
+    )
+    foreach ($case in $cases) {
+        $execution = Invoke-SecurityPilotFailureCase -FailureRole candidate -FailureCode '' `
+            -GraderMutation $case.mutate
+        try {
+            Assert-SequenceEqual @($execution.calls) @('candidate')
+            Assert-Equal $execution.result.run_state 'stopped'
+            Assert-Equal $execution.result.stop_reason 'response_contract_invalid'
+            Assert-Equal $execution.result.slots_consumed.total 1
+            Assert-Equal $execution.result.launcher_processes_started.total 1
+            Assert-SequenceEqual @($execution.result.attempts.state) @('succeeded', 'skipped', 'skipped')
+            Assert-True ($null -eq $execution.result.quality.deterministic_result)
+            $runRoot = Join-Path $execution.input.results_root 'option1-live-20260825-001'
+            Assert-Equal @(Get-ChildItem -LiteralPath (Join-Path $runRoot 'claims') -File -Force).Count 1
+            $persisted = Get-Content -Raw -LiteralPath (Join-Path $runRoot 'result.json') | ConvertFrom-Json -Depth 100
+            Assert-Equal $persisted.stop_reason 'response_contract_invalid'
+            Assert-True ($null -eq $persisted.quality.deterministic_result)
+        } finally { Remove-SecurityPilotLedgerRoot -Path $execution.input.results_root }
+    }
+}
+
+Invoke-Assertion 'option 1 rejects contradictory success and failure metadata symmetrically' {
+    $cases = @(
+        [pscustomobject]@{ role = 'candidate'; starts = 1; code = 'provider_envelope_invalid'; mutate = { param($e) $e.failure_code = 'quota_failed' } },
+        [pscustomobject]@{ role = 'candidate'; starts = 1; code = 'provider_envelope_invalid'; mutate = { param($e) $e.failure = 'failure contradicts success' } },
+        [pscustomobject]@{ role = 'candidate'; starts = 1; code = 'provider_envelope_invalid'; mutate = { param($e) $e.process.exit_code = 17 } },
+        [pscustomobject]@{ role = 'candidate'; starts = 1; code = 'response_contract_invalid'; mutate = {
+            param($e); $e.canonical.status = 'failure'; $e.canonical.answer = ''; $e.canonical.error = 'declared failure'
+        } },
+        [pscustomobject]@{ role = 'judge_1'; starts = 2; code = 'provider_envelope_invalid'; mutate = { param($e) $e.failure_code = 'quota_failed' } },
+        [pscustomobject]@{ role = 'judge_1'; starts = 2; code = 'provider_envelope_invalid'; mutate = { param($e) $e.failure = 'failure contradicts success' } }
+    )
+    foreach ($case in $cases) {
+        $execution = Invoke-SecurityPilotFailureCase -FailureRole $case.role -FailureCode '' `
+            -EnvelopeMutation $case.mutate
+        try {
+            Assert-True ($execution.result.run_state -ceq 'stopped') `
+                "$($case.role) consistency case expected stopped, got $($execution.result.run_state)."
+            Assert-True ($execution.result.stop_reason -ceq $case.code) `
+                "$($case.role) consistency case expected $($case.code), got $($execution.result.stop_reason)."
+            Assert-Equal $execution.result.launcher_processes_started.total $case.starts
+            $expectedStates = if ($case.role -ceq 'candidate') {
+                @('failed', 'skipped', 'skipped')
+            } else { @('succeeded', 'failed', 'skipped') }
+            Assert-SequenceEqual @($execution.result.attempts.state) $expectedStates
+        } finally { Remove-SecurityPilotLedgerRoot -Path $execution.input.results_root }
+    }
+}
+
+Invoke-Assertion 'option 1 rejects malformed candidate and judge stop metadata without continuation' {
+    $cases = @(
+        [pscustomobject]@{ role = 'candidate'; starts = 1; envelope = { param($e) $e.failure_code = 9 }; wrapper = $null },
+        [pscustomobject]@{ role = 'candidate'; starts = 1; envelope = { param($e) $e | Add-Member -NotePropertyName stop_code -NotePropertyValue $false }; wrapper = $null },
+        [pscustomobject]@{ role = 'judge_1'; starts = 2; envelope = $null; wrapper = { param($w) $w | Add-Member -NotePropertyName stop_code -NotePropertyValue 9 } },
+        [pscustomobject]@{ role = 'judge_1'; starts = 2; envelope = $null; wrapper = { param($w) $w | Add-Member -NotePropertyName stop_code -NotePropertyValue @('quota_failed') } }
+    )
+    foreach ($case in $cases) {
+        $parameters = @{
+            FailureRole = $case.role
+            FailureCode = ''
+        }
+        if ($null -ne $case.envelope) { $parameters.EnvelopeMutation = $case.envelope }
+        if ($null -ne $case.wrapper) { $parameters.WrapperMutation = $case.wrapper }
+        $execution = Invoke-SecurityPilotFailureCase @parameters
+        try {
+            Assert-True ($execution.result.run_state -ceq 'stopped') `
+                "$($case.role) stop-metadata case expected stopped, got $($execution.result.run_state)."
+            Assert-True ($execution.result.stop_reason -ceq 'provider_envelope_invalid') `
+                "$($case.role) stop-metadata case expected provider_envelope_invalid, got $($execution.result.stop_reason)."
+            Assert-Equal $execution.result.launcher_processes_started.total $case.starts
+            $expectedStates = if ($case.role -ceq 'candidate') {
+                @('failed', 'skipped', 'skipped')
+            } else { @('succeeded', 'failed', 'skipped') }
+            Assert-SequenceEqual @($execution.result.attempts.state) $expectedStates
         } finally { Remove-SecurityPilotLedgerRoot -Path $execution.input.results_root }
     }
 }
@@ -1032,7 +1129,9 @@ Invoke-Assertion 'option 1 technical failures stop at each exact role and durabl
     foreach ($case in $cases) {
         $execution = Invoke-SecurityPilotFailureCase -FailureRole $case.role -FailureCode $case.code
         try {
-            Assert-SequenceEqual @($execution.calls) @($case.calls)
+            try { Assert-SequenceEqual @($execution.calls) @($case.calls) } catch {
+                throw "$($case.role) call sequence: $($_.Exception.Message)"
+            }
             Assert-Equal $execution.result.run_state 'stopped'
             Assert-Equal $execution.result.stop_reason $case.code
             Assert-True ($execution.result.slots_consumed.total -eq $case.claims) `
@@ -1054,15 +1153,15 @@ Invoke-Assertion 'option 1 preclaim and postclaim failures preserve exact non-re
         'ARGUMENTS_SENTINEL_42', 'STDOUT_SENTINEL_42', 'STDERR_SENTINEL_42',
         'PROVIDER_EVENT_SENTINEL_42', 'EXCEPTION_SENTINEL_42')
     $cases = @(
-        [pscustomobject]@{ mode = 'preclaim_throw'; claims = 0; states = @('skipped', 'skipped', 'skipped') },
-        [pscustomobject]@{ mode = 'postclaim_throw'; claims = 1; states = @('failed', 'skipped', 'skipped') }
+        [pscustomobject]@{ mode = 'preclaim_throw'; terminal = 'stopped'; claims = 0; states = @('skipped', 'skipped', 'skipped') },
+        [pscustomobject]@{ mode = 'postclaim_throw'; terminal = 'indeterminate'; claims = 1; states = @('failed', 'skipped', 'skipped') }
     )
     foreach ($case in $cases) {
         $execution = Invoke-SecurityPilotFailureCase -FailureRole candidate -FailureCode provider_envelope_invalid `
             -FailureMode $case.mode -Sentinels $sentinels
         try {
             Assert-SequenceEqual @($execution.calls) @('candidate')
-            Assert-Equal $execution.result.run_state 'stopped'
+            Assert-Equal $execution.result.run_state $case.terminal
             Assert-Equal $execution.result.stop_reason 'provider_envelope_invalid'
             Assert-Equal $execution.result.slots_consumed.total $case.claims
             Assert-Equal $execution.result.launcher_processes_started.total 0
