@@ -2,7 +2,7 @@
 
 - **Status:** closed
 - **First observed:** 2026-08-24T05:14:03Z
-- **Last observed:** 2026-08-25T20:23:24.5926183Z
+- **Last observed:** 2026-08-25T22:30:48.1539712Z
 - **Phase/task:** Task 8 pre-implementation baseline
 - **Environment:** Windows PowerShell, Codex desktop managed workspace
 - **Version/commit:** `50ca437`
@@ -47,10 +47,11 @@ Invoke `python` from the Task 8 managed PowerShell environment without resolving
 
 ## Verification and related work
 
-The bundled interpreter completed all 52 storage tests with exit code 0 in 15.598 seconds. On recurrence during Task 8 quality verification, it completed all 53 current storage tests with exit code 0 in 15.222 seconds.
+The bundled interpreter completed all 52 storage tests with exit code 0 in 15.598 seconds. On recurrence during Task 8 quality verification, it completed all 53 current storage tests with exit code 0 in 15.222 seconds. The 2026-08-25T22:30:48Z recurrence was closed by rerunning all 53 storage tests through the resolved bundled interpreter; they passed in 14.618 seconds with exit code 0.
 
 ## Recurrence history
 
+- 2026-08-25T22:30:48.1539712Z: The unavailable `python` alias recurred in the Task 8 final five-suite wrapper after the pilot and router suites passed. The wrapper continued to the calibration suites because command-not-found did not supply a failing native exit code; no provider, network, or live path ran. The storage suite remains unverified in that wrapper and must be rerun with the resolved repository-approved runtime.
 - 2026-08-25T20:23:24.5926183Z: The unavailable `python` and `py` aliases recurred while starting the Task 6 parallel-suite setback helper. Work remained contained; the bundled runtime was resolved before continuing, and no product or live path ran.
 - 2026-08-25T19:55:35.3677309Z: The unavailable `python` and `py` aliases recurred during Task 6 setback-helper discovery. Work remained contained, no product path or provider launcher ran, and the bundled Python 3.12 executable was resolved through the workspace dependency inventory before continuing.
 - 2026-08-25 Task 5: The unavailable `python` alias recurred while requesting setback-helper usage for the first GREEN failure. Work remained contained, no provider or native launcher ran, and the bundled runtime was resolved before retrying the helper.
