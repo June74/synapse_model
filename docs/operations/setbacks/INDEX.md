@@ -35,7 +35,7 @@
 | [SB-20260825-194559-task6-first-green-failure-boundaries](incidents/2026-08-25T194559Z-task6-first-green-failure-boundaries.md) | closed | 2026-08-25T19:45:59.724892Z | 2026-08-25T19:55:35.3677309Z | Task 6 first GREEN failure boundaries |
 | [SB-20260825-195710-task6-red-fixture-cleanup](incidents/2026-08-25T195710Z-task6-red-fixture-cleanup.md) | closed | 2026-08-25T19:57:10.373023Z | 2026-08-25T19:59:31.4342992Z | Task 6 RED fixture left owned result roots |
 | [SB-20260825-201131-task6-review-red-empty-failure-code](incidents/2026-08-25T201131Z-task6-review-red-empty-failure-code.md) | closed | 2026-08-25T20:11:31.232106Z | 2026-08-25T20:18:09.4548683Z | Task 6 review RED fixture rejected empty failure code |
-| [SB-20260825-201548-task6-review-green-stopcode-binding](incidents/2026-08-25T201548Z-task6-review-green-stopcode-binding.md) | closed | 2026-08-25T20:15:48.940605Z | 2026-08-25T20:18:09.4548683Z | Task 6 review GREEN stop-code binding regression |
+| [SB-20260825-201548-task6-review-green-stopcode-binding](incidents/2026-08-25T201548Z-task6-review-green-stopcode-binding.md) | closed | 2026-08-25T20:15:48.940605Z | 2026-08-25T20:53:20.7528423Z | Task 6 review GREEN stop-code binding regression |
 | [SB-20260825-202324-task6-parallel-suite-result-lock](incidents/2026-08-25T202324Z-task6-parallel-suite-result-lock.md) | closed | 2026-08-25T20:23:24.5926183Z | 2026-08-25T20:26:10.4121215Z | Parallel calibration suites contended on a run claim |
 | SB-2026-08-19-001 | PowerShell DOCX paragraph extraction syntax error | closed | 2026-08-19 | 2026-08-19 |
 | SB-2026-08-19-002 | Current DOCX locked during full-document scan | closed | 2026-08-19 | 2026-08-19 |
