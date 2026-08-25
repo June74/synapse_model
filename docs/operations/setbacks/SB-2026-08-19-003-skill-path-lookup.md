@@ -4,7 +4,7 @@
 - Title: Skill path lookup mismatch
 - Status: closed
 - First observed: 2026-08-19
-- Last observed: 2026-08-25
+- Last observed: 2026-08-25T21:21:13.2998235Z
 - Phase/task: Task 7 SQLite trace storage preflight
 - Environment: Windows PowerShell, Codex desktop
 - Version/commit: Not applicable
@@ -76,3 +76,12 @@ The `scope-gate` and `setback-logger` instructions were read successfully from t
 - Correction: enumerate `AGENTS.md` and setback files before opening them. The only `AGENTS.md` is scoped beneath `pilot/providers/openai/` and does not govern the Task 6 files.
 - Prevention: use `rg --files` before literal reads whenever the requested repository instruction or incident path has not already been verified.
 - Verification: repository enumeration identified the exact scoped instruction and incident paths; Task 6 preflight continued without applying unrelated provider-scoped instructions.
+
+### 2026-08-25 - Task 7 setback-helper and Windows path assumptions
+
+- Symptom: Task 7 first looked for the setback helper beneath the repository incident directory, then attempted to execute the located Python file as a native Windows program. A later search passed a wildcard as part of a literal Windows path and reported an invalid filename.
+- Impact: three read-only lookup or launch attempts failed before Task 7 edits. No product file, provider, native launcher, network request, result artifact, or private data was involved.
+- Confirmed cause: commands constructed unverified relative or wildcard paths and did not invoke the Python helper through the repository-resolved Python runtime.
+- Correction: enumerate the skill directory, read the exact helper path, resolve Python through `Resolve-RouterPythonExecutable`, and search explicit directories without a literal Windows wildcard path.
+- Prevention: resolve every relative skill resource against the loaded `SKILL.md` directory, invoke `.py` helpers through the resolved Python executable, and use `rg` directory roots or `Get-ChildItem` for Windows wildcard expansion.
+- Verification: the exact helper source and `--help` completed through the resolved Python runtime; the explicit incident and index searches completed without using the invalid wildcard path.

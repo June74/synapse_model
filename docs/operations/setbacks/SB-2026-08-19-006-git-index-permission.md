@@ -2,7 +2,7 @@
 
 - **Status:** contained
 - **First observed:** 2026-08-19
-- **Last observed:** 2026-08-25
+- **Last observed:** 2026-08-25T21:25:41.9314538Z
 - **Symptom:** A scoped `git add`/`git commit` for the design specification failed because Git could not create `C:\Users\2006i\projects\router_model\.git\index.lock` due to permission denial.
 - **Confirmed:** The design file was written successfully; no commit was created and no existing files were overwritten.
 - **Correction:** Leave the specification uncommitted in the shared workspace. If a commit is desired, run the Git command from the user's personal terminal where the repository permissions are available.
@@ -146,3 +146,13 @@
 - **Correction:** Retry only the bounded documentation and product staging/commit commands through approved Git-metadata access.
 - **Prevention:** Continue treating this worktree's staging and commit operations as requiring approved Git-metadata access.
 - **Related verification:** The functional suite passed 47/47 assertions, the security suite passed 28/28 assertions, `git diff --check` passed, and `calibration/results` contained only `.gitkeep` before staging.
+
+## Recurrence: 2026-08-25, Option 1 Task 7 commits
+
+- **Phase/task:** Option 1 three-launch calibration pilot Task 7, operator documentation and setback commits.
+- **Symptom:** Scoped staging could not create `.git/worktrees/option1-calibration-pilot/index.lock`; Git returned permission denied.
+- **Confirmed cause:** The isolated worktree files are writable, while its Git index metadata remains under the parent repository `.git` directory outside the managed write boundary.
+- **Impact:** No file was staged and no commit was created by the failed command. The verified README, documentation contract, and closed setback records remain intact; no provider, native launcher, network, API, local model, or live CLI ran.
+- **Correction:** Retry only the bounded documentation and product staging/commit commands through approved Git-metadata access.
+- **Prevention:** Continue treating this worktree's staging and commit operations as requiring approved Git-metadata access.
+- **Related verification:** The functional calibration suite passed, the offline `-Pilot` plan reported zero provider calls and three roles, `calibration/results` remained unchanged, and `git diff --check` passed before staging.

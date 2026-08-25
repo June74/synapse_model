@@ -38,12 +38,13 @@
 | [SB-20260825-201548-task6-review-green-stopcode-binding](incidents/2026-08-25T201548Z-task6-review-green-stopcode-binding.md) | closed | 2026-08-25T20:15:48.940605Z | 2026-08-25T20:53:20.7528423Z | Task 6 review GREEN stop-code binding regression |
 | [SB-20260825-202324-task6-parallel-suite-result-lock](incidents/2026-08-25T202324Z-task6-parallel-suite-result-lock.md) | closed | 2026-08-25T20:23:24.5926183Z | 2026-08-25T20:26:10.4121215Z | Parallel calibration suites contended on a run claim |
 | [SB-20260825-210716-task6-post-launch-ledger-recovery](incidents/2026-08-25T210716Z-task6-post-launch-ledger-recovery.md) | closed | 2026-08-25T21:07:16.6369573Z | 2026-08-25T21:11:34.0598216Z | Post-launch ledger failure escaped durable recovery |
+| [SB-20260825-212139-task7-live-runid-plan-mismatch](incidents/2026-08-25T212139Z-task7-live-runid-plan-mismatch.md) | closed | 2026-08-25T21:25:03.8356342Z | Option 1 Task 7 operator documentation | Task 7 live RunId disagreed with frozen acceptance packet |
 | SB-2026-08-19-001 | PowerShell DOCX paragraph extraction syntax error | closed | 2026-08-19 | 2026-08-19 |
 | SB-2026-08-19-002 | Current DOCX locked during full-document scan | closed | 2026-08-19 | 2026-08-19 |
-| SB-2026-08-19-003 | Skill path lookup mismatch | closed | 2026-08-19 | 2026-08-25 |
+| SB-2026-08-19-003 | Skill path lookup mismatch | closed | 2026-08-19 | 2026-08-25T21:21:13.2998235Z |
 | SB-2026-08-19-004 | Claude CLI smoke test did not return within timeout | contained | 2026-08-19 | 2026-08-19 |
 | SB-2026-08-19-005 | Antigravity CLI authentication unavailable in sandbox | contained | 2026-08-19 | 2026-08-19 |
-| SB-2026-08-19-006 | Git index unavailable to sandbox | contained | 2026-08-19 | 2026-08-25 |
+| SB-2026-08-19-006 | Git index unavailable to sandbox | contained | 2026-08-19 | 2026-08-25T21:25:41.9314538Z |
 | SB-2026-08-19-007 | Plan review command used an invalid PowerShell parameter | contained | 2026-08-19 | 2026-08-19 |
 | SB-2026-08-19-008 | Pre-creation worktree ignore check rejected absent directory | contained | 2026-08-19 | 2026-08-24 |
 | SB-2026-08-19-009 | Existing descendant-drain test was transiently timing-sensitive | closed | 2026-08-19 | 2026-08-19 |
