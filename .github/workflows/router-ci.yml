@@ -1,0 +1,45 @@
+name: Router CI
+
+"on":
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  offline-tests:
+    name: Offline router suites
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Run pilot tests
+        run: pwsh -NoProfile -File .\pilot\tests\runner.tests.ps1
+
+      - name: Run router tests
+        run: pwsh -NoProfile -File .\router\tests\router.tests.ps1
+
+      - name: Run SQLite tests
+        run: python -m unittest router.storage.test_sqlite_store
+
+      - name: Run calibration tests
+        run: pwsh -NoProfile -File .\calibration\tests\calibration.tests.ps1
+
+      - name: Run calibration security tests
+        run: pwsh -NoProfile -File .\calibration\tests\calibration_security.tests.ps1
