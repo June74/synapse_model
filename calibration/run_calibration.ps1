@@ -1806,17 +1806,22 @@ function Assert-CalibrationPilotResultContract {
     if ($Result.run_state -ceq 'completed' -and
         @($Result.attempts | Where-Object { $_.state -cne 'succeeded' }).Count -gt 0) { throw $errorCode }
     if ($Result.run_state -cin @('stopped', 'indeterminate')) {
-        $terminalBoundarySeen = $false
-        foreach ($attempt in $Result.attempts) {
-            if (-not $terminalBoundarySeen -and $attempt.state -ceq 'succeeded') { continue }
-            if (-not $terminalBoundarySeen -and $attempt.state -cin @('failed', 'skipped')) {
-                $terminalBoundarySeen = $true
-                continue
+        $allAttemptsSucceeded = @($Result.attempts | Where-Object { $_.state -cne 'succeeded' }).Count -eq 0
+        $validPostExecutionUncertainty = $Result.run_state -ceq 'indeterminate' -and
+            $Result.stop_reason -ceq 'artifact_persistence_failed' -and $allAttemptsSucceeded
+        if (-not $validPostExecutionUncertainty) {
+            $terminalBoundarySeen = $false
+            foreach ($attempt in $Result.attempts) {
+                if (-not $terminalBoundarySeen -and $attempt.state -ceq 'succeeded') { continue }
+                if (-not $terminalBoundarySeen -and $attempt.state -cin @('failed', 'skipped')) {
+                    $terminalBoundarySeen = $true
+                    continue
+                }
+                if ($terminalBoundarySeen -and $attempt.state -ceq 'skipped') { continue }
+                throw $errorCode
             }
-            if ($terminalBoundarySeen -and $attempt.state -ceq 'skipped') { continue }
-            throw $errorCode
+            if (-not $terminalBoundarySeen) { throw $errorCode }
         }
-        if (-not $terminalBoundarySeen) { throw $errorCode }
     } else {
         $priorAttemptSucceeded = $true
         foreach ($attempt in $Result.attempts) {
@@ -2213,6 +2218,70 @@ function Complete-CalibrationPilotFailure {
     } finally { [Threading.Monitor]::Exit($syncRoot) }
 }
 
+function Complete-CalibrationPilotPersistenceFailure {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][object]$Context,
+        [Parameter(Mandatory)][ValidateRange(1, 3)][int]$BoundaryOrdinal,
+        [bool]$ProcessStarted = $false
+    )
+    $syncRoot = Get-CalibrationPilotSyncRoot -Context $Context
+    [Threading.Monitor]::Enter($syncRoot)
+    try {
+        Assert-CalibrationPilotContext -Context $Context
+        Assert-CalibrationPilotResultContract -Context $Context -Result $Context.result
+        if ($Context.result.run_state -cne 'running') { throw 'pilot_persistence_failure_run_not_running' }
+        $index = $BoundaryOrdinal - 1
+        $current = [string]$Context.result.attempts[$index].state
+        if ($current -cnotin @('planned', 'slot_reserved', 'process_started', 'succeeded')) {
+            throw 'pilot_persistence_failure_attempt_invalid'
+        }
+        $next = Copy-CalibrationJsonValue $Context.result
+        $now = [DateTimeOffset]::UtcNow.ToString('o')
+        if ($ProcessStarted) {
+            if ($current -ceq 'slot_reserved') {
+                $next.attempts[$index].process_started_at = $now
+                $family = [string]$next.attempts[$index].family
+                $next.launcher_processes_started.total = [int64]$next.launcher_processes_started.total + 1
+                $next.launcher_processes_started.provider_family.$family = `
+                    [int64]$next.launcher_processes_started.provider_family.$family + 1
+                $current = 'process_started'
+            } elseif ($current -cnotin @('process_started', 'succeeded')) {
+                throw 'pilot_persistence_failure_start_invalid'
+            }
+        }
+        switch ($current) {
+            'planned' {
+                $next.attempts[$index].state = 'skipped'
+                $next.attempts[$index].completed_at = $now
+            }
+            'slot_reserved' {
+                $next.attempts[$index].state = 'failed'
+                $next.attempts[$index].completed_at = $now
+            }
+            'process_started' {
+                $next.attempts[$index].state = 'failed'
+                $next.attempts[$index].completed_at = $now
+            }
+            'succeeded' { }
+        }
+        for ($laterIndex = $index + 1; $laterIndex -lt 3; $laterIndex++) {
+            $laterState = [string]$next.attempts[$laterIndex].state
+            if ($laterState -ceq 'planned') {
+                $next.attempts[$laterIndex].state = 'skipped'
+                $next.attempts[$laterIndex].completed_at = $now
+            } elseif ($laterState -cne 'succeeded') { throw 'pilot_persistence_failure_later_attempt_invalid' }
+        }
+        $next.run_state = 'indeterminate'
+        $next.stop_reason = 'artifact_persistence_failed'
+        $next.finished_at = $now
+        Assert-CalibrationPilotResultContract -Context $Context -Result $next -SkipPersistedResultMatch
+        Write-CalibrationAtomicResultJson -Path $Context.result_path -Value $next -AllowedRunRoot $Context.run_root
+        $Context.result = $next
+        return Copy-CalibrationJsonValue $next
+    } finally { [Threading.Monitor]::Exit($syncRoot) }
+}
+
 function New-CalibrationPilotSlotClaim {
     [CmdletBinding()]
     param(
@@ -2528,7 +2597,12 @@ function Invoke-CalibrationPilotRun {
         }
         $candidateEnvelope = Test-CalibrationPilotExecutionEnvelope -Execution $candidateExecution
         if ($candidateEnvelope.process_started) {
-            Set-CalibrationPilotAttemptState -Context $context -Ordinal 1 -State 'process_started'
+            try {
+                Set-CalibrationPilotAttemptState -Context $context -Ordinal 1 -State 'process_started'
+            } catch {
+                return Complete-CalibrationPilotPersistenceFailure -Context $context `
+                    -BoundaryOrdinal 1 -ProcessStarted $true
+            }
         }
         if (-not $candidateEnvelope.valid) {
             return Complete-CalibrationPilotFailure -Context $context -Ordinal 1 `
@@ -2551,7 +2625,11 @@ function Invoke-CalibrationPilotRun {
             return Complete-CalibrationPilotFailure -Context $context -Ordinal 1 `
                 -StopCode 'artifact_persistence_failed' -Indeterminate
         }
-        Complete-CalibrationPilotAttempt -Context $context -Ordinal 1
+        try {
+            Complete-CalibrationPilotAttempt -Context $context -Ordinal 1
+        } catch {
+            return Complete-CalibrationPilotPersistenceFailure -Context $context -BoundaryOrdinal 1
+        }
 
         try {
             $deterministicResult = & $GraderInvoker $prompt $candidateAnswer $null $null 2000
@@ -2566,14 +2644,7 @@ function Invoke-CalibrationPilotRun {
         try {
             Set-CalibrationPilotDeterministicResult -Context $context -DeterministicResult $deterministicResult
         } catch {
-            $graderSetValidationFailed = $_.Exception.Message -cin @(
-                'pilot_result_contract_invalid', 'pilot_quality_transition_invalid'
-            )
-            return Complete-CalibrationPilotFailure -Context $context -Ordinal 2 `
-                -StopCode $(if ($graderSetValidationFailed) {
-                    'response_contract_invalid'
-                } else { 'artifact_persistence_failed' }) `
-                -Indeterminate:(-not $graderSetValidationFailed)
+            return Complete-CalibrationPilotPersistenceFailure -Context $context -BoundaryOrdinal 2
         }
 
         $identity = [pscustomobject]@{
@@ -2614,7 +2685,12 @@ function Invoke-CalibrationPilotRun {
             $judgeExecution = $rawDecision.pilot_execution
             $judgeEnvelope = Test-CalibrationPilotExecutionEnvelope -Execution $judgeExecution
             if ($judgeEnvelope.process_started) {
-                Set-CalibrationPilotAttemptState -Context $context -Ordinal ($index + 1) -State 'process_started'
+                try {
+                    Set-CalibrationPilotAttemptState -Context $context -Ordinal ($index + 1) -State 'process_started'
+                } catch {
+                    return Complete-CalibrationPilotPersistenceFailure -Context $context `
+                        -BoundaryOrdinal ($index + 1) -ProcessStarted $true
+                }
             }
             if (-not $judgeEnvelope.valid) {
                 return Complete-CalibrationPilotFailure -Context $context -Ordinal ($index + 1) `
@@ -2654,12 +2730,25 @@ function Invoke-CalibrationPilotRun {
                 return Complete-CalibrationPilotFailure -Context $context -Ordinal ($index + 1) `
                     -StopCode 'artifact_persistence_failed' -Indeterminate
             }
-            Complete-CalibrationPilotAttempt -Context $context -Ordinal ($index + 1) -JudgeDecision $decision
+            try {
+                Complete-CalibrationPilotAttempt -Context $context -Ordinal ($index + 1) -JudgeDecision $decision
+            } catch {
+                return Complete-CalibrationPilotPersistenceFailure -Context $context `
+                    -BoundaryOrdinal ($index + 1)
+            }
         }
         $proposal = Get-CalibrationCategoryProposal -ExternalCategory unknown `
             -JudgeDecisions @($normalizedDecisions.decision) -DeterministicResult $deterministicResult
-        Set-CalibrationPilotQualityOutcome -Context $context -Outcome ([string]$proposal.outcome)
-        Set-CalibrationPilotRunState -Context $context -State 'completed'
+        try {
+            Set-CalibrationPilotQualityOutcome -Context $context -Outcome ([string]$proposal.outcome)
+        } catch {
+            return Complete-CalibrationPilotPersistenceFailure -Context $context -BoundaryOrdinal 3
+        }
+        try {
+            Set-CalibrationPilotRunState -Context $context -State 'completed'
+        } catch {
+            return Complete-CalibrationPilotPersistenceFailure -Context $context -BoundaryOrdinal 3
+        }
         return Copy-CalibrationJsonValue $context.result
     } finally {
         if ($null -ne $context) { Close-CalibrationPilotRun -Context $context }

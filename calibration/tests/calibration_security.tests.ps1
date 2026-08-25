@@ -436,6 +436,34 @@ function Get-SecurityFileHashes {
     })
 }
 
+function Test-SecurityPilotLedgerFaultStage {
+    param([Parameter(Mandatory)][string]$Stage, [Parameter(Mandatory)][object]$Value)
+    switch ($Stage) {
+        'process_start_record' {
+            return $Value.run_state -ceq 'running' -and $Value.attempts[0].state -ceq 'process_started'
+        }
+        'candidate_attempt_completion' {
+            return $Value.run_state -ceq 'running' -and $Value.attempts[0].state -ceq 'succeeded' -and
+                $null -eq $Value.quality.deterministic_result
+        }
+        'deterministic_result_setter' {
+            return $Value.run_state -ceq 'running' -and $Value.attempts[0].state -ceq 'succeeded' -and
+                $null -ne $Value.quality.deterministic_result -and @($Value.quality.judge_decisions).Count -eq 0
+        }
+        'judge_completion' {
+            return $Value.run_state -ceq 'running' -and $Value.attempts[1].state -ceq 'succeeded' -and
+                @($Value.quality.judge_decisions).Count -eq 1
+        }
+        'quality_outcome' {
+            return $Value.run_state -ceq 'running' -and
+                @($Value.attempts | Where-Object { $_.state -cne 'succeeded' }).Count -eq 0 -and
+                $null -ne $Value.quality.outcome
+        }
+        'final_completed_transition' { return $Value.run_state -ceq 'completed' }
+        default { throw "Unknown test-only ledger fault stage '$Stage'." }
+    }
+}
+
 Invoke-Assertion 'pilot run plan and claim artifacts use create-new semantics and result replacement is isolated' {
     $caseData = New-SecurityPilotLedgerInput
     $context = $null
@@ -1208,6 +1236,80 @@ Invoke-Assertion 'option 1 artifact failure after confirmed start becomes indete
         }) -join "`n"
         Assert-False $persistedText.Contains('EXCEPTION_SENTINEL_ARTIFACT_WRITER_42', [StringComparison]::Ordinal)
     } finally { Remove-SecurityPilotLedgerRoot -Path $execution.input.results_root }
+}
+
+Invoke-Assertion 'every post-launch ledger transition recovers one-shot persistence failure durably' {
+    $cases = @(
+        [pscustomobject]@{ stage = 'process_start_record'; calls = @('candidate'); claims = 1; starts = 1; states = @('failed', 'skipped', 'skipped'); deterministic = $false; decisions = 0; outcome = $null },
+        [pscustomobject]@{ stage = 'candidate_attempt_completion'; calls = @('candidate'); claims = 1; starts = 1; states = @('failed', 'skipped', 'skipped'); deterministic = $false; decisions = 0; outcome = $null },
+        [pscustomobject]@{ stage = 'deterministic_result_setter'; calls = @('candidate'); claims = 1; starts = 1; states = @('succeeded', 'skipped', 'skipped'); deterministic = $false; decisions = 0; outcome = $null },
+        [pscustomobject]@{ stage = 'judge_completion'; calls = @('candidate', 'judge_1'); claims = 2; starts = 2; states = @('succeeded', 'failed', 'skipped'); deterministic = $true; decisions = 0; outcome = $null },
+        [pscustomobject]@{ stage = 'quality_outcome'; calls = @('candidate', 'judge_1', 'judge_2'); claims = 3; starts = 3; states = @('succeeded', 'succeeded', 'succeeded'); deterministic = $true; decisions = 2; outcome = $null },
+        [pscustomobject]@{ stage = 'final_completed_transition'; calls = @('candidate', 'judge_1', 'judge_2'); claims = 3; starts = 3; states = @('succeeded', 'succeeded', 'succeeded'); deterministic = $true; decisions = 2; outcome = 'retained' }
+    )
+    $originalWriterText = (Get-Command -Name Write-CalibrationAtomicResultJson -CommandType Function -ErrorAction Stop).ScriptBlock.ToString()
+    $immutableWriter = [scriptblock]::Create($originalWriterText)
+    foreach ($case in $cases) {
+        $fault = [pscustomobject]@{ armed = $true; injected = 0; writes = 0 }
+        Set-Item -Path Function:\Write-CalibrationAtomicResultJson -Value {
+            param($Path, $Value, $AllowedRunRoot, $TemporaryPath)
+            $fault.writes++
+            if ($fault.armed -and (Test-SecurityPilotLedgerFaultStage -Stage $case.stage -Value $Value)) {
+                $fault.armed = $false
+                $fault.injected++
+                throw 'ONE_SHOT_LEDGER_SENTINEL_MUST_NOT_PERSIST'
+            }
+            & $immutableWriter -Path $Path -Value $Value -AllowedRunRoot $AllowedRunRoot -TemporaryPath $TemporaryPath
+        }.GetNewClosure()
+        $execution = $null
+        try {
+            $execution = Invoke-SecurityPilotFailureCase -FailureRole candidate -FailureCode ''
+            Assert-Equal $fault.injected 1
+            Assert-False $fault.armed
+            Assert-SequenceEqual @($execution.calls) @($case.calls)
+            Assert-Equal $execution.result.run_state 'indeterminate'
+            Assert-Equal $execution.result.stop_reason 'artifact_persistence_failed'
+            Assert-Equal $execution.result.slots_consumed.total $case.claims
+            Assert-Equal $execution.result.launcher_processes_started.total $case.starts
+            Assert-SequenceEqual @($execution.result.attempts.state) @($case.states)
+            Assert-Equal @($execution.result.attempts | Where-Object { $null -ne $_.process_started_at }).Count $case.starts
+            Assert-Equal @($execution.result.attempts | Where-Object { $null -ne $_.completed_at }).Count 3
+            Assert-Equal ($null -ne $execution.result.quality.deterministic_result) $case.deterministic
+            Assert-Equal @($execution.result.quality.judge_decisions).Count $case.decisions
+            Assert-Equal $execution.result.quality.outcome $case.outcome
+            Assert-Equal $execution.result.quality.external_category 'unknown'
+            Assert-False $execution.result.profile_promotion_allowed
+            Assert-False $execution.result.profile_mutated
+            Assert-False $execution.result.production_eligibility_changed
+            $runRoot = Join-Path $execution.input.results_root 'option1-live-20260825-001'
+            $persisted = Get-Content -Raw -LiteralPath (Join-Path $runRoot 'result.json') | ConvertFrom-Json -Depth 100
+            Assert-Equal @(Get-ChildItem -LiteralPath (Join-Path $runRoot 'claims') -File -Force).Count $case.claims
+            Assert-Equal $persisted.run_state 'indeterminate'
+            Assert-Equal $persisted.stop_reason 'artifact_persistence_failed'
+            Assert-Equal $persisted.launcher_processes_started.total $case.starts
+            Assert-SequenceEqual @($persisted.attempts.state) @($case.states)
+            Assert-Equal ($null -ne $persisted.quality.deterministic_result) $case.deterministic
+            Assert-Equal @($persisted.quality.judge_decisions).Count $case.decisions
+            Assert-Equal $persisted.quality.outcome $case.outcome
+            $persistedText = @(Get-ChildItem -LiteralPath $runRoot -File -Recurse | ForEach-Object {
+                Get-Content -Raw -LiteralPath $_.FullName
+            }) -join "`n"
+            Assert-False $persistedText.Contains('ONE_SHOT_LEDGER_SENTINEL_MUST_NOT_PERSIST', [StringComparison]::Ordinal)
+            $resumeCalls = [pscustomobject]@{ count = 0 }
+            $resumeSpy = { $resumeCalls.count++; throw 'resume reached invoker' }.GetNewClosure()
+            $null = Assert-Throws {
+                Invoke-Calibration -Pilot -Run -RunId 'option1-live-20260825-001' `
+                    -ResultsRoot $execution.input.results_root -CalibrationSetPath $setPath -RubricsRoot $rubricsRoot `
+                    -CandidateInvoker $resumeSpy -JudgeInvoker $resumeSpy `
+                    -PilotGitInvoker { [pscustomobject]@{ clean = $true; commit = ('d' * 40) } } | Out-Null
+            } 'pilot_run_collision'
+            Assert-Equal $resumeCalls.count 0
+        } finally {
+            Set-Item -Path Function:\Write-CalibrationAtomicResultJson -Value $immutableWriter
+            if ($null -ne $execution) { Remove-SecurityPilotLedgerRoot -Path $execution.input.results_root }
+        }
+    }
+    Assert-Equal (Get-Command -Name Write-CalibrationAtomicResultJson -CommandType Function -ErrorAction Stop).ScriptBlock.ToString() $originalWriterText
 }
 
 Invoke-Assertion 'option 1 failure artifacts exclude unsafe fields and do not mutate sources or routing traces' {
