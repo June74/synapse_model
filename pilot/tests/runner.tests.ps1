@@ -1598,6 +1598,65 @@ Invoke-Assertion 'Invoke-PilotCandidate executes one exact candidate without wri
     Assert-True (-not $serialized.Contains('item.completed'))
 }
 
+Invoke-Assertion 'Invoke-PilotCandidate runs LaunchGuard immediately before NativeInvoker with the exact command' {
+    $matrix = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'pilot/model_matrix.json') | ConvertFrom-Json
+    $candidate = @($matrix.candidates | Where-Object { $_.route_id -eq 'agy__gemini_3_7_flash_low__low' } | Select-Object -First 1)[0]
+    $events = [Collections.Generic.List[string]]::new()
+    $nativeInvoker = {
+        param($command)
+        $events.Add(('native:' + $command.route_id))
+        [pscustomobject]@{
+            exit_code = 0
+            stdout = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'pilot/tests/fixtures/agy-success.json')
+            stderr = ''
+            duration_ms = 1
+        }
+    }
+    $launchGuard = {
+        param($guardCandidate, $command)
+        Assert-Equal $guardCandidate.route_id 'agy__gemini_3_7_flash_low__low'
+        Assert-Equal $command.route_id 'agy__gemini_3_7_flash_low__low'
+        Assert-Equal $guardCandidate.model 'gemini-3.7-flash-low'
+        Assert-Equal $command.executable 'agy'
+        Assert-SequenceEqual $command.arguments @('-p', 'guard ordering prompt', '--output-format', 'json', '--json-schema', 'pilot/shared/response_schema.json', '--model', 'gemini-3.7-flash-low', '--effort', 'low', '--print-timeout', '2m', '--disable-slash-commands')
+        $events.Add(('guard:' + $guardCandidate.route_id))
+    }
+
+    $execution = Invoke-PilotCandidate -Candidate $candidate -Prompt 'guard ordering prompt' `
+        -LaunchGuard $launchGuard -NativeInvoker $nativeInvoker -RunId 'task2-guard-ordering'
+
+    Assert-SequenceEqual @($events) @(
+        'guard:agy__gemini_3_7_flash_low__low',
+        'native:agy__gemini_3_7_flash_low__low'
+    )
+    Assert-Equal $execution.diagnostic_note 'completed'
+    Assert-Equal $execution.canonical.status 'success'
+    Assert-Equal $execution.canonical.answer '4'
+}
+
+Invoke-Assertion 'Invoke-PilotCandidate vetoes launch safely without invoking NativeInvoker' {
+    $matrix = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'pilot/model_matrix.json') | ConvertFrom-Json
+    $candidate = @($matrix.candidates | Where-Object { $_.route_id -eq 'agy__gemini_3_7_flash_low__low' } | Select-Object -First 1)[0]
+    $nativeCalls = 0
+    $nativeInvoker = {
+        $nativeCalls++
+        throw 'native invoker must not run after launch guard veto'
+    }
+    $launchGuard = {
+        throw 'launch_guard_vetoed'
+    }
+
+    $execution = Invoke-PilotCandidate -Candidate $candidate -Prompt 'veto ordering prompt' `
+        -LaunchGuard $launchGuard -NativeInvoker $nativeInvoker -RunId 'task2-guard-veto'
+
+    Assert-Equal $nativeCalls 0
+    Assert-Equal $execution.diagnostic_note 'execution failure'
+    Assert-Equal $execution.failure 'execution failure'
+    Assert-Equal $execution.canonical $null
+    $serialized = $execution | ConvertTo-Json -Depth 20 -Compress
+    Assert-True (-not $serialized.Contains('launch_guard_vetoed'))
+}
+
 Invoke-Assertion 'Invoke-PilotCandidate preserves provider-declared and parse failure diagnostics' {
     $matrix = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'pilot/model_matrix.json') | ConvertFrom-Json
     $candidate = @($matrix.candidates | Where-Object { $_.tool -eq 'codex' } | Select-Object -First 1)[0]

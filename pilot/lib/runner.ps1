@@ -1514,6 +1514,7 @@ function Invoke-PilotCandidate {
         [Parameter(Mandatory)][object]$Candidate,
         [Parameter(Mandatory)][ValidateNotNullOrEmpty()][string]$Prompt,
         [scriptblock]$NativeInvoker,
+        [scriptblock]$LaunchGuard,
         [AllowNull()][string]$RunId,
         [ValidateRange(-1, [int]::MaxValue)][int]$TimeoutSeconds = -1
     )
@@ -1531,6 +1532,7 @@ function Invoke-PilotCandidate {
     $note = 'completed'
     try {
         $command = New-CandidateCommand -Candidate $Candidate -Prompt $Prompt
+        if ($null -ne $LaunchGuard) { & $LaunchGuard $Candidate $command }
         $processResult = if ($null -ne $NativeInvoker) {
             & $NativeInvoker $command
         } else {
