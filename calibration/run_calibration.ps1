@@ -491,15 +491,28 @@ function Get-CalibrationCategoryProposal {
 }
 
 function Get-CalibrationProfileAndCandidate {
-    param([Parameter(Mandatory)][string]$ConfigurationId)
-    $profileFiles = @(Get-ChildItem -LiteralPath (Join-Path $script:CalibrationProjectRoot 'profiles') -Filter '*.json' -File -Recurse |
+    param(
+        [Parameter(Mandatory)][string]$ConfigurationId,
+        [string]$ProfilesRoot = (Join-Path $script:CalibrationProjectRoot 'profiles'),
+        [string]$MatrixPath = (Join-Path $script:CalibrationProjectRoot 'pilot/model_matrix.json')
+    )
+    $profileFiles = @(Get-ChildItem -LiteralPath $ProfilesRoot -Filter '*.json' -File -Recurse |
         Where-Object { $_.BaseName -ceq $ConfigurationId })
     if ($profileFiles.Count -ne 1) { throw "Judge profile '$ConfigurationId' was not found exactly once." }
-    $profile = Get-Content -Raw -LiteralPath $profileFiles[0].FullName | ConvertFrom-Json -Depth 100 -ErrorAction Stop
-    $matrix = Get-Content -Raw -LiteralPath (Join-Path $script:CalibrationProjectRoot 'pilot/model_matrix.json') |
-        ConvertFrom-Json -Depth 100 -ErrorAction Stop
+    $profileRead = Read-RouterCatalogJson -FilePath $profileFiles[0].FullName
+    if (-not $profileRead.valid) { throw "Pilot profile '$ConfigurationId' JSON is invalid at $($profileRead.path)." }
+    $profile = $profileRead.value
+    if (-not (Test-CalibrationProperty $profile 'enabled') -or $profile.enabled -isnot [bool]) {
+        throw "Pilot profile '$ConfigurationId' enabled must be a Boolean."
+    }
+    $matrixRead = Read-RouterCatalogJson -FilePath $MatrixPath
+    if (-not $matrixRead.valid) { throw "Pilot model matrix JSON is invalid at $($matrixRead.path)." }
+    $matrix = $matrixRead.value
     $candidate = Find-RouterPilotCandidate -SelectedProfile $profile -Matrix $matrix
     if ($null -eq $candidate) { throw "Judge profile '$ConfigurationId' has no exact pilot candidate." }
+    if (-not (Test-CalibrationProperty $candidate 'enabled') -or $candidate.enabled -isnot [bool]) {
+        throw "Pilot route selected for '$ConfigurationId' enabled must be a Boolean."
+    }
     return [pscustomobject]@{ profile = $profile; candidate = $candidate }
 }
 
@@ -514,7 +527,9 @@ function Test-CalibrationPilotManifestObject {
         [Parameter(Mandatory)][object]$Manifest,
         [Parameter(Mandatory)][string]$SchemaPath,
         [Parameter(Mandatory)][string]$CalibrationSetPath,
-        [Parameter(Mandatory)][string]$RubricsRoot
+        [Parameter(Mandatory)][string]$RubricsRoot,
+        [string]$MatrixPath = (Join-Path $script:CalibrationProjectRoot 'pilot/model_matrix.json'),
+        [string]$ProfilesRoot = (Join-Path $script:CalibrationProjectRoot 'profiles')
     )
 
     $schemaValidation = Test-RouterSchema -Value $Manifest -SchemaPath $SchemaPath
@@ -577,8 +592,9 @@ function Test-CalibrationPilotManifestObject {
         throw 'Pilot manifest fixed prompt rubric was not loaded from the validated calibration set.'
     }
 
-    $matrixPath = Join-Path $script:CalibrationProjectRoot 'pilot/model_matrix.json'
-    $matrix = Get-Content -Raw -LiteralPath $matrixPath -ErrorAction Stop | ConvertFrom-Json -Depth 100 -ErrorAction Stop
+    $matrixRead = Read-RouterCatalogJson -FilePath $MatrixPath
+    if (-not $matrixRead.valid) { throw "Pilot model matrix JSON is invalid at $($matrixRead.path)." }
+    $matrix = $matrixRead.value
     $seenRoutes = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
     $seenFamilies = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
     $seenConfigurations = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
@@ -597,7 +613,10 @@ function Test-CalibrationPilotManifestObject {
         $matrixMatches = @($matrix.candidates | Where-Object { $_.route_id -ceq $role.route_id })
         if ($matrixMatches.Count -ne 1) { throw "Pilot route '$($role.route_id)' was not found exactly once in the model matrix." }
         $matrixCandidate = $matrixMatches[0]
-        if (-not [bool]$matrixCandidate.enabled) { throw "Pilot route '$($role.route_id)' is disabled." }
+        if (-not (Test-CalibrationProperty $matrixCandidate 'enabled') -or $matrixCandidate.enabled -isnot [bool]) {
+            throw "Pilot route '$($role.route_id)' enabled must be a Boolean."
+        }
+        if ($matrixCandidate.enabled -ne $true) { throw "Pilot route '$($role.route_id)' is disabled." }
         if ($matrixCandidate.candidate_kind -cne 'model') { throw "Pilot route '$($role.route_id)' is not a model candidate." }
         foreach ($field in @('route_id', 'model', 'effort')) {
             Assert-CalibrationPilotExactValue -Actual $matrixCandidate.$field -Expected $role.$field -Name "matrix.$field"
@@ -605,7 +624,15 @@ function Test-CalibrationPilotManifestObject {
         Assert-CalibrationPilotExactValue -Actual $matrixCandidate.tool -Expected $role.launcher -Name 'matrix.tool'
         Assert-CalibrationPilotExactValue -Actual $matrixCandidate.provider -Expected $role.family -Name 'matrix.provider'
 
-        $resolved = Get-CalibrationProfileAndCandidate -ConfigurationId $role.configuration_id
+        $resolved = Get-CalibrationProfileAndCandidate -ConfigurationId $role.configuration_id `
+            -ProfilesRoot $ProfilesRoot -MatrixPath $MatrixPath
+        if (-not (Test-CalibrationProperty $resolved.profile 'enabled') -or $resolved.profile.enabled -isnot [bool]) {
+            throw "Pilot profile '$($role.configuration_id)' enabled must be a Boolean."
+        }
+        if ($matrixCandidate.enabled -ne $resolved.profile.enabled) {
+            throw "Pilot route '$($role.route_id)' matrix and profile enabled values disagree."
+        }
+        if ($resolved.profile.enabled -ne $true) { throw "Pilot profile '$($role.configuration_id)' is disabled." }
         foreach ($field in @('configuration_id', 'launcher', 'model', 'effort')) {
             Assert-CalibrationPilotExactValue -Actual $resolved.profile.$field -Expected $role.$field -Name "profile.$field"
         }
@@ -650,7 +677,9 @@ function Import-CalibrationPilotManifest {
         [Parameter(Mandatory)][string]$CalibrationSetPath,
         [Parameter(Mandatory)][string]$RubricsRoot
     )
-    $manifest = Get-Content -Raw -LiteralPath $Path | ConvertFrom-Json -Depth 100 -NoEnumerate
+    $manifestRead = Read-RouterCatalogJson -FilePath $Path
+    if (-not $manifestRead.valid) { throw "Pilot manifest JSON is invalid at $($manifestRead.path)." }
+    $manifest = $manifestRead.value
     return Test-CalibrationPilotManifestObject -Manifest $manifest -SchemaPath $SchemaPath -CalibrationSetPath $CalibrationSetPath -RubricsRoot $RubricsRoot
 }
 

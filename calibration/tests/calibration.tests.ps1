@@ -33,10 +33,16 @@ function Assert-SequenceEqual {
 }
 
 function Assert-Throws {
-    param([scriptblock]$Script)
+    param([scriptblock]$Script, [AllowNull()][string]$ExpectedMessageFragment)
     $threw = $false
-    try { & $Script } catch { $threw = $true }
+    $exception = $null
+    try { & $Script } catch { $threw = $true; $exception = $_.Exception }
     if (-not $threw) { throw 'Expected script to throw.' }
+    if (-not [string]::IsNullOrWhiteSpace($ExpectedMessageFragment) -and
+        $exception.Message.IndexOf($ExpectedMessageFragment, [StringComparison]::Ordinal) -lt 0) {
+        throw "Expected error containing '$ExpectedMessageFragment' but got '$($exception.Message)'."
+    }
+    return $exception
 }
 
 function Invoke-Assertion {
@@ -87,6 +93,28 @@ function New-TestDirectory {
     return $path
 }
 
+function Write-TestPilotMatrix {
+    param([Parameter(Mandatory)][string]$Directory, [Parameter(Mandatory)][scriptblock]$Mutation)
+    $matrix = Copy-TestObject (Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'pilot/model_matrix.json') | ConvertFrom-Json -Depth 100)
+    $candidate = @($matrix.candidates | Where-Object { $_.route_id -ceq 'agy__gemini_3_7_flash_low__low' })
+    Assert-Equal $candidate.Count 1
+    & $Mutation $candidate[0]
+    $path = Join-Path $Directory 'model_matrix.json'
+    $matrix | ConvertTo-Json -Depth 100 | Set-Content -LiteralPath $path -Encoding utf8NoBOM
+    return $path
+}
+
+function Write-TestPilotProfileRoot {
+    param([Parameter(Mandatory)][string]$Directory, [Parameter(Mandatory)][scriptblock]$Mutation)
+    $profilesRoot = Join-Path $Directory 'profiles'
+    $destinationDirectory = Join-Path $profilesRoot 'agy'
+    New-Item -ItemType Directory -Path $destinationDirectory -Force | Out-Null
+    $profile = Copy-TestObject (Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'profiles/agy/gemini-3.7-flash-low__low.json') | ConvertFrom-Json -Depth 100)
+    & $Mutation $profile
+    $profile | ConvertTo-Json -Depth 100 | Set-Content -LiteralPath (Join-Path $destinationDirectory 'gemini-3.7-flash-low__low.json') -Encoding utf8NoBOM
+    return $profilesRoot
+}
+
 Invoke-Assertion 'Task 9 production script exists before behavioral checks' {
     Assert-True (Test-Path -LiteralPath $implementationPath -PathType Leaf) 'Missing calibration/run_calibration.ps1.'
 }
@@ -121,7 +149,104 @@ if (Test-Path -LiteralPath $implementationPath -PathType Leaf) {
             Assert-Throws {
                 Test-CalibrationPilotManifestObject -Manifest $mutated -SchemaPath $pilotManifestSchemaPath `
                     -CalibrationSetPath $setPath -RubricsRoot $rubricsRoot | Out-Null
+            } 'Pilot manifest' | Out-Null
+        }
+    }
+
+    Invoke-Assertion 'option 1 pilot manifest rejects duplicate top-level and nested properties before conversion' {
+        $temporary = New-TestDirectory
+        try {
+            $manifestText = Get-Content -Raw -LiteralPath $pilotManifestPath
+            $duplicateTopLevel = $manifestText -replace '\r?\n}\s*$', ",`n  `"pilot_id`": `"option1-three-launch-v1`"`n}"
+            $duplicateNested = $manifestText.Replace(
+                '"id": "extraction-low-general-v1", "version": "1.0.0"',
+                '"id": "extraction-low-general-v1", "id": "duplicate", "version": "1.0.0"')
+            foreach ($case in @(
+                [pscustomobject]@{ name = 'top-level'; text = $duplicateTopLevel }
+                [pscustomobject]@{ name = 'nested'; text = $duplicateNested }
+            )) {
+                $path = Join-Path $temporary ("duplicate-$($case.name).json")
+                Set-Content -LiteralPath $path -Value $case.text -Encoding utf8NoBOM
+                Assert-Throws {
+                    Import-CalibrationPilotManifest -Path $path -SchemaPath $pilotManifestSchemaPath `
+                        -CalibrationSetPath $setPath -RubricsRoot $rubricsRoot | Out-Null
+                } 'Pilot manifest JSON is invalid' | Out-Null
             }
+        } finally {
+            if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Recurse -Force }
+        }
+    }
+
+    Invoke-Assertion 'option 1 pilot rejects duplicate matrix and profile identities through isolated source paths' {
+        $temporary = New-TestDirectory
+        try {
+            $manifest = Get-Content -Raw -LiteralPath $pilotManifestPath | ConvertFrom-Json -Depth 100
+            $matrixPath = Join-Path $temporary 'duplicate-matrix.json'
+            $matrixText = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'pilot/model_matrix.json')
+            $matrixText = $matrixText.Replace(
+                '"route_id": "agy__gemini_3_7_flash_low__low",',
+                '"route_id": "agy__gemini_3_7_flash_low__low", "route_id": "duplicate",')
+            Set-Content -LiteralPath $matrixPath -Value $matrixText -Encoding utf8NoBOM
+            Assert-Throws {
+                Test-CalibrationPilotManifestObject -Manifest $manifest -SchemaPath $pilotManifestSchemaPath `
+                    -CalibrationSetPath $setPath -RubricsRoot $rubricsRoot -MatrixPath $matrixPath | Out-Null
+            } 'Pilot model matrix JSON is invalid' | Out-Null
+
+            $profileRoot = Join-Path $temporary 'duplicate-profiles'
+            $profilePath = Join-Path $profileRoot 'agy/gemini-3.7-flash-low__low.json'
+            New-Item -ItemType Directory -Path (Split-Path -Parent $profilePath) -Force | Out-Null
+            $profileText = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'profiles/agy/gemini-3.7-flash-low__low.json')
+            $profileText = $profileText.Replace(
+                '"configuration_id": "gemini-3.7-flash-low__low",',
+                '"configuration_id": "gemini-3.7-flash-low__low", "configuration_id": "duplicate",')
+            Set-Content -LiteralPath $profilePath -Value $profileText -Encoding utf8NoBOM
+            Assert-Throws {
+                Test-CalibrationPilotManifestObject -Manifest $manifest -SchemaPath $pilotManifestSchemaPath `
+                    -CalibrationSetPath $setPath -RubricsRoot $rubricsRoot -ProfilesRoot $profileRoot | Out-Null
+            } 'Pilot profile' | Out-Null
+        } finally {
+            if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Recurse -Force }
+        }
+    }
+
+    Invoke-Assertion 'option 1 pilot rejects non-Boolean or disabled matrix and profile candidates' {
+        $temporary = New-TestDirectory
+        try {
+            $manifest = Get-Content -Raw -LiteralPath $pilotManifestPath | ConvertFrom-Json -Depth 100
+            foreach ($case in @(
+                [pscustomobject]@{ name = 'false'; value = $false; expected = 'is disabled' }
+                [pscustomobject]@{ name = 'string'; value = 'false'; expected = 'enabled must be a Boolean' }
+                [pscustomobject]@{ name = 'numeric'; value = 1; expected = 'enabled must be a Boolean' }
+                [pscustomobject]@{ name = 'missing'; value = $null; expected = 'enabled must be a Boolean' }
+            )) {
+                $matrixPath = Write-TestPilotMatrix -Directory $temporary -Mutation {
+                    param($candidate)
+                    if ($case.name -ceq 'missing') { $candidate.PSObject.Properties.Remove('enabled') }
+                    else { $candidate.enabled = $case.value }
+                }
+                Assert-Throws {
+                    Test-CalibrationPilotManifestObject -Manifest $manifest -SchemaPath $pilotManifestSchemaPath `
+                        -CalibrationSetPath $setPath -RubricsRoot $rubricsRoot -MatrixPath $matrixPath | Out-Null
+                } $case.expected | Out-Null
+            }
+            foreach ($case in @(
+                [pscustomobject]@{ name = 'false'; value = $false; expected = 'enabled values disagree' }
+                [pscustomobject]@{ name = 'string'; value = 'false'; expected = 'enabled must be a Boolean' }
+                [pscustomobject]@{ name = 'numeric'; value = 1; expected = 'enabled must be a Boolean' }
+                [pscustomobject]@{ name = 'missing'; value = $null; expected = 'enabled must be a Boolean' }
+            )) {
+                $profileRoot = Write-TestPilotProfileRoot -Directory $temporary -Mutation {
+                    param($profile)
+                    if ($case.name -ceq 'missing') { $profile.PSObject.Properties.Remove('enabled') }
+                    else { $profile.enabled = $case.value }
+                }
+                Assert-Throws {
+                    Test-CalibrationPilotManifestObject -Manifest $manifest -SchemaPath $pilotManifestSchemaPath `
+                        -CalibrationSetPath $setPath -RubricsRoot $rubricsRoot -ProfilesRoot $profileRoot | Out-Null
+                } $case.expected | Out-Null
+            }
+        } finally {
+            if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Recurse -Force }
         }
     }
 
