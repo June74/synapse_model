@@ -93,6 +93,13 @@ function New-TestDirectory {
     return $path
 }
 
+function Get-TestCalibrationObjectSha256 {
+    param([Parameter(Mandatory)][object]$Value)
+    $text = $Value | ConvertTo-Json -Depth 100 -Compress
+    $bytes = [Text.Encoding]::UTF8.GetBytes($text)
+    return [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes)).ToLowerInvariant()
+}
+
 function New-CalibrationResultsTestRoot {
     $path = Join-Path $calibrationRoot ('results/pilot-admission-{0}' -f [guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $path | Out-Null
@@ -352,6 +359,18 @@ if (Test-Path -LiteralPath $implementationPath -PathType Leaf) {
         Assert-Equal ($first | ConvertTo-Json -Depth 100 -Compress) ($second | ConvertTo-Json -Depth 100 -Compress)
     }
 
+    Invoke-Assertion 'non-pilot CLI failure envelope preserves the original three-property contract' {
+        $output = & pwsh -NoProfile -File $implementationPath -Run -Route
+        $exitCode = $LASTEXITCODE
+        Assert-Equal $exitCode 1
+        Assert-Equal @($output).Count 1
+        $envelope = $output | ConvertFrom-Json -Depth 100
+        Assert-SequenceEqual @($envelope.PSObject.Properties.Name) @('mode', 'error', 'message')
+        Assert-Equal $envelope.mode 'run'
+        Assert-Equal $envelope.error 'calibration_failed'
+        Assert-Equal $envelope.message 'Run and Route are mutually exclusive.'
+    }
+
     Invoke-Assertion 'pilot admission returns the immutable offline three-launch plan without calls or result writes' {
         $resultsRoot = New-CalibrationResultsTestRoot
         try {
@@ -369,17 +388,22 @@ if (Test-Path -LiteralPath $implementationPath -PathType Leaf) {
             Assert-Equal $result.selection_mode 'calibration_only_exact_pin'
             Assert-Equal $result.prompt.id 'extraction-low-general-v1'
             Assert-Equal $result.prompt.version '1.0.0'
-            Assert-SequenceEqual @($result.roles.ordinal) @(1, 2, 3)
-            Assert-SequenceEqual @($result.roles.route_id) @(
-                'agy__gemini_3_7_flash_low__low',
-                'codex__gpt_5_6_sol__max',
-                'claude__claude_opus_5__max'
+            $expectedRoles = @(
+                [pscustomobject][ordered]@{ ordinal = 1; role = 'candidate'; family = 'google'; launcher = 'agy'; route_id = 'agy__gemini_3_7_flash_low__low'; configuration_id = 'gemini-3.7-flash-low__low'; model = 'gemini-3.7-flash-low'; effort = 'low' }
+                [pscustomobject][ordered]@{ ordinal = 2; role = 'judge_1'; family = 'openai'; launcher = 'codex'; route_id = 'codex__gpt_5_6_sol__max'; configuration_id = 'gpt-5.6-sol__max'; model = 'gpt-5.6-sol'; effort = 'max' }
+                [pscustomobject][ordered]@{ ordinal = 3; role = 'judge_2'; family = 'anthropic'; launcher = 'claude'; route_id = 'claude__claude_opus_5__max'; configuration_id = 'claude-opus-5__max'; model = 'claude-opus-5'; effort = 'max' }
             )
-            Assert-SequenceEqual @($result.roles.configuration_id) @(
-                'gemini-3.7-flash-low__low',
-                'gpt-5.6-sol__max',
-                'claude-opus-5__max'
-            )
+            Assert-Equal @($result.roles).Count 3
+            for ($index = 0; $index -lt $expectedRoles.Count; $index++) {
+                $actualRole = $result.roles[$index]
+                $expectedRole = $expectedRoles[$index]
+                Assert-SequenceEqual @($actualRole.PSObject.Properties.Name) @('ordinal', 'role', 'family', 'launcher', 'route_id', 'configuration_id', 'model', 'effort')
+                foreach ($name in @('ordinal', 'role', 'family', 'launcher', 'route_id', 'configuration_id', 'model', 'effort')) {
+                    Assert-Equal $actualRole.$name $expectedRole.$name
+                }
+                Assert-False ($actualRole.PSObject.Properties.Name -ccontains 'candidate')
+                Assert-False ($actualRole.PSObject.Properties.Name -ccontains 'profile')
+            }
             Assert-Equal $result.limits.total 3
             Assert-Equal $result.limits.provider_family.google 1
             Assert-Equal $result.limits.provider_family.openai 1
@@ -391,9 +415,24 @@ if (Test-Path -LiteralPath $implementationPath -PathType Leaf) {
             Assert-False ([bool]$result.profile_promotion_allowed)
             Assert-False ([bool]$result.profile_mutated)
             Assert-False ([bool]$result.production_eligibility_changed)
-            foreach ($name in @('manifest', 'matrix', 'candidate_profile', 'calibration_set', 'prompt_definition', 'rubric', 'response_schema')) {
+            $hashNames = @('manifest', 'matrix', 'candidate_profile', 'calibration_set', 'prompt_definition', 'rubric', 'response_schema')
+            Assert-SequenceEqual @($result.source_hashes.PSObject.Properties.Name) $hashNames
+            $validatedSources = Import-CalibrationPilotManifest -Path $pilotManifestPath -SchemaPath $pilotManifestSchemaPath `
+                -CalibrationSetPath $setPath -RubricsRoot $rubricsRoot
+            $candidateProfilePath = Join-Path $projectRoot 'profiles/agy/gemini-3.7-flash-low__low.json'
+            $expectedHashes = [ordered]@{
+                manifest = (Get-FileHash -LiteralPath $pilotManifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
+                matrix = (Get-FileHash -LiteralPath (Join-Path $projectRoot 'pilot/model_matrix.json') -Algorithm SHA256).Hash.ToLowerInvariant()
+                candidate_profile = Get-TestCalibrationObjectSha256 -Value (Get-Content -Raw -LiteralPath $candidateProfilePath | ConvertFrom-Json -Depth 100)
+                calibration_set = (Get-FileHash -LiteralPath $setPath -Algorithm SHA256).Hash.ToLowerInvariant()
+                prompt_definition = Get-TestCalibrationObjectSha256 -Value $validatedSources.prompt
+                rubric = Get-TestCalibrationObjectSha256 -Value $validatedSources.rubric
+                response_schema = (Get-FileHash -LiteralPath (Join-Path $projectRoot 'pilot/shared/response_schema.json') -Algorithm SHA256).Hash.ToLowerInvariant()
+            }
+            foreach ($name in $hashNames) {
                 $hash = [string]$result.source_hashes.$name
                 Assert-True ($hash -cmatch '^[0-9a-f]{64}$') "Expected a lowercase SHA-256 for '$name'."
+                Assert-Equal $hash $expectedHashes[$name]
             }
             Assert-Equal $script:PilotCandidateCalls 0
             Assert-Equal $script:PilotJudgeCalls 0
@@ -401,6 +440,61 @@ if (Test-Path -LiteralPath $implementationPath -PathType Leaf) {
         } finally {
             if (Test-Path -LiteralPath $resultsRoot) { Remove-Item -LiteralPath $resultsRoot -Recurse -Force }
         }
+    }
+
+    Invoke-Assertion 'pilot plan and bounded live rejection never reach providers launch guard claims or writers' {
+        $resultsRoot = New-CalibrationResultsTestRoot
+        $originalFunctions = @{}
+        foreach ($name in @('Invoke-PilotCandidate', 'New-CalibrationRunClaim', 'Write-CalibrationJsonFile')) {
+            $originalFunctions[$name] = (Get-Command -Name $name -CommandType Function -ErrorAction Stop).ScriptBlock
+        }
+        try {
+            $before = Get-CalibrationResultsTreeSnapshot -Root $resultsRoot
+            $script:PilotCandidateCalls = 0
+            $script:PilotJudgeCalls = 0
+            $script:PilotRouterCalls = 0
+            $script:PilotProviderCalls = 0
+            $script:PilotClaimCalls = 0
+            $script:PilotWriterCalls = 0
+            Set-Item -Path Function:\Invoke-PilotCandidate -Value { $script:PilotProviderCalls++; throw 'pilot called Invoke-PilotCandidate' }
+            Set-Item -Path Function:\New-CalibrationRunClaim -Value { $script:PilotClaimCalls++; throw 'pilot claimed a result directory' }
+            Set-Item -Path Function:\Write-CalibrationJsonFile -Value { $script:PilotWriterCalls++; throw 'pilot wrote an artifact' }
+            $candidateSpy = { $script:PilotCandidateCalls++; throw 'pilot invoked candidate seam' }
+            $judgeSpy = { $script:PilotJudgeCalls++; throw 'pilot invoked judge seam' }
+            $routerSpy = { $script:PilotRouterCalls++; throw 'pilot invoked router seam' }
+            Invoke-Calibration -Pilot -ResultsRoot $resultsRoot -CalibrationSetPath $setPath -RubricsRoot $rubricsRoot `
+                -CandidateInvoker $candidateSpy -JudgeInvoker $judgeSpy -RouterInvoker $routerSpy | Out-Null
+            $null = Assert-Throws {
+                Invoke-Calibration -Pilot -Run -RunId 'task3-live-not-implemented' -ResultsRoot $resultsRoot `
+                    -CalibrationSetPath $setPath -RubricsRoot $rubricsRoot -CandidateInvoker $candidateSpy `
+                    -JudgeInvoker $judgeSpy -RouterInvoker $routerSpy | Out-Null
+            } 'pilot_live_not_implemented'
+            foreach ($counter in @('PilotCandidateCalls', 'PilotJudgeCalls', 'PilotRouterCalls', 'PilotProviderCalls', 'PilotClaimCalls', 'PilotWriterCalls')) {
+                Assert-Equal (Get-Variable -Scope Script -Name $counter -ValueOnly) 0
+            }
+            Assert-SequenceEqual (Get-CalibrationResultsTreeSnapshot -Root $resultsRoot) $before
+        } finally {
+            foreach ($name in $originalFunctions.Keys) { Set-Item -Path ("Function:\$name") -Value $originalFunctions[$name] }
+            if (Test-Path -LiteralPath $resultsRoot) { Remove-Item -LiteralPath $resultsRoot -Recurse -Force }
+        }
+    }
+
+    Invoke-Assertion 'pilot live CLI rejection is compact bounded and leaves results unchanged' {
+        $resultsRoot = Join-Path $calibrationRoot 'results'
+        $before = Get-CalibrationResultsTreeSnapshot -Root $resultsRoot
+        $output = & pwsh -NoProfile -File $implementationPath -Pilot -Run -RunId 'task3-live-not-implemented'
+        $exitCode = $LASTEXITCODE
+        $after = Get-CalibrationResultsTreeSnapshot -Root $resultsRoot
+        Assert-Equal $exitCode 1
+        Assert-Equal @($output).Count 1
+        $envelope = $output | ConvertFrom-Json -Depth 100
+        Assert-SequenceEqual @($envelope.PSObject.Properties.Name) @('mode', 'error', 'message', 'code')
+        Assert-Equal $envelope.mode 'pilot'
+        Assert-Equal $envelope.error 'pilot_failed'
+        Assert-Equal $envelope.message 'pilot_admission_failed'
+        Assert-Equal $envelope.code 'pilot_admission_failed'
+        Assert-False ([string]$output).Contains('pilot_live_not_implemented', [StringComparison]::Ordinal)
+        Assert-SequenceEqual $after $before
     }
 
     Invoke-Assertion 'pilot validates all 24 calibration prompts before fixed-prompt selection without calls or writes' {

@@ -1225,12 +1225,21 @@ if ($MyInvocation.InvocationName -cne '.') {
         [Console]::Out.WriteLine(($result | ConvertTo-Json -Depth 100 -Compress))
         exit 0
     } catch {
-        [Console]::Out.WriteLine(([pscustomobject][ordered]@{
-            mode = if ($Pilot) { 'pilot' } elseif ($Run) { 'run' } elseif ($Route) { 'route' } else { 'dry-run' }
-            error = if ($Pilot) { 'pilot_failed' } else { 'calibration_failed' }
-            message = if ($Pilot) { 'pilot_admission_failed' } else { $_.Exception.Message }
-            code = if ($Pilot) { 'pilot_admission_failed' } else { $null }
-        } | ConvertTo-Json -Compress))
+        $failure = if ($Pilot) {
+            [pscustomobject][ordered]@{
+                mode = 'pilot'
+                error = 'pilot_failed'
+                message = 'pilot_admission_failed'
+                code = 'pilot_admission_failed'
+            }
+        } else {
+            [pscustomobject][ordered]@{
+                mode = if ($Run) { 'run' } elseif ($Route) { 'route' } else { 'dry-run' }
+                error = 'calibration_failed'
+                message = $_.Exception.Message
+            }
+        }
+        [Console]::Out.WriteLine(($failure | ConvertTo-Json -Compress))
         exit 1
     }
 }
