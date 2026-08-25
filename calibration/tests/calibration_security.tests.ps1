@@ -527,6 +527,51 @@ Invoke-Assertion 'post-claim validation drift is classified as persistence indet
     }
 }
 
+Invoke-Assertion 'claim write failure after create-new is persistence indeterminate and non-refundable' {
+    $caseData = New-SecurityPilotLedgerInput
+    $context = $null
+    try {
+        $context = New-CalibrationPilotRun -ResultsRoot $caseData.results_root -RunId 'ledger-security-011' -Plan $caseData.plan
+        Set-CalibrationPilotRunState -Context $context -State 'preflight_passed'
+        Set-CalibrationPilotRunState -Context $context -State 'running'
+        $resultHash = (Get-FileHash -LiteralPath $context.result_path -Algorithm SHA256).Hash
+        $claimPath = Join-Path $context.claims_path '01-google-candidate.claim'
+        $null = Assert-Throws {
+            New-CalibrationPilotSlotClaim -Context $context -Ordinal 1 -Identity $caseData.plan.roles[0] `
+                -AfterSlotClaimCreate { throw 'forced raw claim writer failure' } | Out-Null
+        } 'pilot_claim_persistence_indeterminate'
+
+        Assert-True (Test-Path -LiteralPath $claimPath -PathType Leaf) 'Created claim was refunded after its writer failed.'
+        Assert-Equal (Get-FileHash -LiteralPath $context.result_path -Algorithm SHA256).Hash $resultHash
+        $persisted = Get-Content -Raw -LiteralPath $context.result_path | ConvertFrom-Json -Depth 100
+        Assert-Equal $persisted.attempts[0].state 'planned'
+        Assert-Equal $persisted.slots_consumed.total 0
+        $claimHash = (Get-FileHash -LiteralPath $claimPath -Algorithm SHA256).Hash
+        $null = Assert-Throws {
+            Write-CalibrationPilotClaimCreateNewJson -Path $claimPath -Value ([pscustomobject]@{ safe = $true }) `
+                -AllowedRunRoot $context.run_root
+        } 'pilot_create_new_collision'
+        $null = Assert-Throws {
+            New-CalibrationPilotSlotClaim -Context $context -Ordinal 1 -Identity $caseData.plan.roles[0] | Out-Null
+        } 'pilot_claim_artifact_invalid'
+        Assert-Equal (Get-FileHash -LiteralPath $claimPath -Algorithm SHA256).Hash $claimHash
+        Assert-Equal (Get-FileHash -LiteralPath $context.result_path -Algorithm SHA256).Hash $resultHash
+        Assert-Equal @(Get-ChildItem -LiteralPath $context.run_root -Force -Recurse -Filter '.result-*.tmp').Count 0
+        $relativeFiles = @(Get-ChildItem -LiteralPath $context.run_root -Force -Recurse -File | ForEach-Object {
+            $_.FullName.Substring($context.run_root.Length).TrimStart('\')
+        } | Sort-Object)
+        Assert-SequenceEqual $relativeFiles @(
+            '.run.claim',
+            'claims\01-google-candidate.claim',
+            'plan.json',
+            'result.json'
+        )
+    } finally {
+        if ($null -ne $context) { Close-CalibrationPilotRun -Context $context }
+        Remove-SecurityPilotLedgerRoot -Path $caseData.results_root
+    }
+}
+
 Invoke-Assertion 'close serializes with reservation and is idempotent after releasing the run claim' {
     $caseData = New-SecurityPilotLedgerInput
     $context = $null

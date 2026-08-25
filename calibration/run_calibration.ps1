@@ -1168,6 +1168,61 @@ function Write-CalibrationCreateNewJson {
     }
 }
 
+function Write-CalibrationPilotClaimCreateNewJson {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][object]$Value,
+        [Parameter(Mandatory)][string]$AllowedRunRoot,
+        [AllowNull()][scriptblock]$AfterCreateNew
+    )
+    Assert-CalibrationWriteBoundary -Path $Path -AllowedRunRoot $AllowedRunRoot
+    $fullRunRoot = [IO.Path]::GetFullPath($AllowedRunRoot)
+    if (-not (Test-Path -LiteralPath $fullRunRoot -PathType Container)) { throw 'pilot_run_root_missing' }
+    $parent = [IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($Path))
+    if (-not (Test-Path -LiteralPath $parent -PathType Container)) { throw 'pilot_claim_parent_missing' }
+    Assert-CalibrationWriteBoundary -Path $Path -AllowedRunRoot $fullRunRoot
+    try {
+        $json = $Value | ConvertTo-Json -Depth 100 -ErrorAction Stop
+        $bytes = [Text.Encoding]::UTF8.GetBytes($json)
+    } catch { throw 'pilot_json_value_invalid' }
+
+    $stream = $null
+    $claimCreated = $false
+    $postCreateFailure = $false
+    try {
+        try {
+            $stream = [IO.File]::Open([IO.Path]::GetFullPath($Path), [IO.FileMode]::CreateNew,
+                [IO.FileAccess]::Write, [IO.FileShare]::None)
+            $claimCreated = $true
+        } catch [IO.IOException] { throw 'pilot_create_new_collision' }
+        catch { throw 'pilot_create_new_failed' }
+
+        try {
+            if ($null -ne $AfterCreateNew) { & $AfterCreateNew }
+            $stream.Write($bytes, 0, $bytes.Length)
+            $stream.Flush($true)
+        } catch {
+            $postCreateFailure = $true
+        } finally {
+            if ($null -ne $stream) {
+                try { $stream.Dispose() } catch { $postCreateFailure = $true }
+                $stream = $null
+            }
+        }
+    } catch {
+        if ($claimCreated) {
+            if ($null -ne $stream) {
+                try { $stream.Dispose() } catch { }
+                $stream = $null
+            }
+            throw 'pilot_claim_persistence_indeterminate'
+        }
+        throw
+    }
+    if ($postCreateFailure) { throw 'pilot_claim_persistence_indeterminate' }
+}
+
 function Remove-CalibrationOwnedResultTemp {
     param(
         [Parameter(Mandatory)][string]$Path,
@@ -1712,6 +1767,7 @@ function New-CalibrationPilotSlotClaim {
         [Parameter(Mandatory)][object]$Ordinal,
         [Parameter(Mandatory)][object]$Identity,
         [AllowNull()][scriptblock]$BeforeSlotClaim,
+        [AllowNull()][scriptblock]$AfterSlotClaimCreate,
         [AllowNull()][scriptblock]$AfterSlotClaim
     )
     if (-not ($Ordinal -is [byte] -or $Ordinal -is [int16] -or $Ordinal -is [int32] -or $Ordinal -is [int64]) -or
@@ -1762,7 +1818,8 @@ function New-CalibrationPilotSlotClaim {
             claimed_at = $claimedAt
         }
         $claimPath = Join-Path $Context.claims_path $script:PilotClaimFileNames[$index]
-        Write-CalibrationCreateNewJson -Path $claimPath -Value $claimValue -AllowedRunRoot $Context.run_root
+        Write-CalibrationPilotClaimCreateNewJson -Path $claimPath -Value $claimValue -AllowedRunRoot $Context.run_root `
+            -AfterCreateNew $AfterSlotClaimCreate
         try {
             if ($null -ne $AfterSlotClaim) { & $AfterSlotClaim }
             Assert-CalibrationPilotResultContract -Context $Context -Result $Context.result -SkipClaimCounterCheck
