@@ -29,6 +29,7 @@
 | [SB-20260825-153736-parent-worktree-ignore-dubious-ownership](incidents/2026-08-25T153736Z-parent-worktree-ignore-dubious-ownership.md) | closed | 2026-08-25T15:37:36.292408Z | Option 1 subagent execution baseline | Parent checkout ignore verification rejected sandbox ownership |
 | [SB-20260825-184420-calibration-hook-restore-reference](incidents/2026-08-25T184420Z-calibration-hook-restore-reference.md) | closed | 2026-08-25T18:56:55Z | Task 4 quality review verification | Calibration hook restoration retained a live function reference |
 | [SB-20260825-184646-calibration-state-contract-intermittent](incidents/2026-08-25T184646Z-calibration-state-contract-intermittent.md) | closed | 2026-08-25T18:52:00Z | Task 4 quality review final verification | Calibration state-machine assertion intermittently fails contract validation |
+| [SB-20260825-190440-quality-review-math-min-types](incidents/2026-08-25T190440Z-quality-review-math-min-types.md) | closed | 2026-08-25T19:04:40.2918430Z | Task 4 final code-quality review | Quality-review line-range helper used ambiguous Math.Min types |
 | SB-2026-08-19-001 | PowerShell DOCX paragraph extraction syntax error | closed | 2026-08-19 | 2026-08-19 |
 | SB-2026-08-19-002 | Current DOCX locked during full-document scan | closed | 2026-08-19 | 2026-08-19 |
 | SB-2026-08-19-003 | Skill path lookup mismatch | closed | 2026-08-19 | 2026-08-23 |
