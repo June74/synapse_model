@@ -245,7 +245,11 @@ function Invoke-TestCalibrationPilotRun {
         $boundaryEvents.Add("judge$($ordinal - 1):slot_reserved:claims=$ordinal")
         $invocations.Add([string]$resolved.candidate.route_id)
         $decision = if ($JudgeProfileId -ceq 'gpt-5.6-sol__max') { $JudgeOneDecision } else { $JudgeTwoDecision }
-        return [pscustomobject]@{ decision = $decision; rationale = "sanitized $decision evidence" }
+        return [pscustomobject]@{
+            pilot_execution = New-TestCalibrationPilotExecution -Candidate $resolved.candidate `
+                -Answer ('{{"decision":"{0}","rationale":"sanitized {0} evidence"}}' -f $decision) -RunId $RunId
+            decision = [pscustomobject]@{ decision = $decision; rationale = "sanitized $decision evidence" }
+        }
     }.GetNewClosure()
     $graderInvoker = {
         param($Prompt, $ResponseText, $PythonExecutor, $PythonExecutable, $PythonTimeoutMilliseconds)
@@ -989,7 +993,7 @@ if (Test-Path -LiteralPath $implementationPath -PathType Leaf) {
             $null = Assert-Throws { Set-CalibrationPilotRunState -Context $context -State 'stopped' } 'pilot_result_contract_invalid'
             Assert-Equal (Get-FileHash -LiteralPath $resultPath -Algorithm SHA256).Hash $before
             $context.result = Get-Content -Raw -LiteralPath $resultPath | ConvertFrom-Json -Depth 100 -DateKind String
-            Set-CalibrationPilotRunState -Context $context -State 'stopped'
+            Set-CalibrationPilotRunState -Context $context -State 'stopped' -StopCode 'manual_abort'
             $before = (Get-FileHash -LiteralPath $resultPath -Algorithm SHA256).Hash
             $null = Assert-Throws { Set-CalibrationPilotRunState -Context $context -State 'running' } 'pilot_run_transition_invalid'
             $null = Assert-Throws { Set-CalibrationPilotAttemptState -Context $context -Ordinal 1 -State 'skipped' } 'pilot_attempt_run_terminal'
@@ -1027,7 +1031,7 @@ if (Test-Path -LiteralPath $implementationPath -PathType Leaf) {
             Assert-Equal (Get-CalibrationPilotClaimCount -Context $context).total 1
             $null = Assert-Throws { New-CalibrationPilotSlotClaim -Context $context -Ordinal 2 -Identity $openai } 'pilot_slot_prior_attempt_failed'
             Assert-False (Test-Path -LiteralPath (Join-Path $context.claims_path '02-openai-judge.claim'))
-            Set-CalibrationPilotRunState -Context $context -State 'stopped'
+            Set-CalibrationPilotRunState -Context $context -State 'stopped' -StopCode 'manual_abort'
             $null = Assert-Throws { New-CalibrationPilotSlotClaim -Context $context -Ordinal 2 -Identity $openai } 'pilot_slot_run_not_running'
         } finally {
             if ($null -ne $context) { Close-CalibrationPilotRun -Context $context }
