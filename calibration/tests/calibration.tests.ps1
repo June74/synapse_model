@@ -95,9 +95,32 @@ function New-TestDirectory {
 
 function Get-TestCalibrationObjectSha256 {
     param([Parameter(Mandatory)][object]$Value)
-    $text = $Value | ConvertTo-Json -Depth 100 -Compress
+    $text = ConvertTo-TestCalibrationCanonicalJson -Value $Value
     $bytes = [Text.Encoding]::UTF8.GetBytes($text)
     return [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes)).ToLowerInvariant()
+}
+
+function ConvertTo-TestCalibrationCanonicalJson {
+    param([AllowNull()][object]$Value)
+    if ($null -eq $Value) { return 'null' }
+    if ($Value -is [string] -or $Value -is [bool] -or $Value -is [ValueType]) { return ($Value | ConvertTo-Json -Compress) }
+    if ($Value -is [Collections.IDictionary]) {
+        $keys = [Collections.Generic.List[string]]::new()
+        foreach ($key in $Value.Keys) { $keys.Add([string]$key) }
+        $keys.Sort([StringComparer]::Ordinal)
+        return '{' + (($keys | ForEach-Object {
+            (ConvertTo-TestCalibrationCanonicalJson -Value $_) + ':' + (ConvertTo-TestCalibrationCanonicalJson -Value $Value[$_])
+        }) -join ',') + '}'
+    }
+    if ($Value -is [Collections.IEnumerable]) {
+        return '[' + ((@($Value | ForEach-Object { ConvertTo-TestCalibrationCanonicalJson -Value $_ }) -join ',')) + ']'
+    }
+    $names = [Collections.Generic.List[string]]::new()
+    foreach ($name in $Value.PSObject.Properties.Name) { $names.Add([string]$name) }
+    $names.Sort([StringComparer]::Ordinal)
+    return '{' + (($names | ForEach-Object {
+        (ConvertTo-TestCalibrationCanonicalJson -Value $_) + ':' + (ConvertTo-TestCalibrationCanonicalJson -Value $Value.$_)
+    }) -join ',') + '}'
 }
 
 function New-CalibrationResultsTestRoot {
@@ -110,9 +133,31 @@ function Get-CalibrationResultsTreeSnapshot {
     param([Parameter(Mandatory)][string]$Root)
     return @(
         Get-ChildItem -LiteralPath $Root -Force -Recurse |
-        ForEach-Object { $_.FullName.Substring($Root.Length) } |
+        Sort-Object FullName |
+        ForEach-Object {
+            $relative = $_.FullName.Substring($Root.Length)
+            if ($_.PSIsContainer) { "D|$relative" }
+            else { "F|$relative|$($_.Length)|$((Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant())" }
+        } |
         Sort-Object
     )
+}
+
+function Invoke-CalibrationCliCapture {
+    param([Parameter(Mandatory)][string[]]$Arguments)
+    $start = [Diagnostics.ProcessStartInfo]::new()
+    $start.FileName = (Get-Command pwsh -ErrorAction Stop).Source
+    $start.UseShellExecute = $false
+    $start.RedirectStandardOutput = $true
+    $start.RedirectStandardError = $true
+    foreach ($argument in $Arguments) { $null = $start.ArgumentList.Add($argument) }
+    $process = [Diagnostics.Process]::new()
+    $process.StartInfo = $start
+    $null = $process.Start()
+    $stdout = $process.StandardOutput.ReadToEnd()
+    $stderr = $process.StandardError.ReadToEnd()
+    $process.WaitForExit()
+    return [pscustomobject]@{ exit_code = $process.ExitCode; stdout = $stdout; stderr = $stderr }
 }
 
 function Write-TestPilotMatrix {
@@ -272,6 +317,58 @@ if (Test-Path -LiteralPath $implementationPath -PathType Leaf) {
         }
     }
 
+    Invoke-Assertion 'option 1 pilot rejects non-scalar bound identity fields and ordinal values' {
+        $temporary = New-TestDirectory
+        try {
+            $manifest = Get-Content -Raw -LiteralPath $pilotManifestPath | ConvertFrom-Json -Depth 100
+            $invalidScalars = @(
+                [pscustomobject]@{ value = [object[]]@('one-item-array') },
+                [pscustomobject]@{ value = [pscustomobject]@{ value = 'object' } },
+                [pscustomobject]@{ value = $null },
+                [pscustomobject]@{ value = 7 }
+            )
+            $matrixCases = @(
+                'route_id', 'tool', 'provider', 'model', 'effort', 'candidate_kind'
+            )
+            foreach ($field in $matrixCases) {
+                foreach ($invalidCase in $invalidScalars) {
+                    $invalid = $invalidCase.value
+                    $matrixPath = Write-TestPilotMatrix -Directory $temporary -Mutation { param($candidate) $candidate.$field = $invalid }
+                    $null = Assert-Throws {
+                        Test-CalibrationPilotManifestObject -Manifest $manifest -SchemaPath $pilotManifestSchemaPath `
+                            -CalibrationSetPath $setPath -RubricsRoot $rubricsRoot -MatrixPath $matrixPath | Out-Null
+                    } $null
+                }
+            }
+            foreach ($field in @('configuration_id', 'launcher', 'provider', 'model', 'effort')) {
+                foreach ($invalidCase in $invalidScalars) {
+                    $invalid = $invalidCase.value
+                    $profileRoot = Write-TestPilotProfileRoot -Directory $temporary -Mutation { param($profile) $profile.$field = $invalid }
+                    $null = Assert-Throws {
+                        Test-CalibrationPilotManifestObject -Manifest $manifest -SchemaPath $pilotManifestSchemaPath `
+                            -CalibrationSetPath $setPath -RubricsRoot $rubricsRoot -ProfilesRoot $profileRoot | Out-Null
+                    } $null
+                }
+            }
+            foreach ($invalidCase in @(
+                [pscustomobject]@{ value = [object[]]@(1) },
+                [pscustomobject]@{ value = [pscustomobject]@{ value = 1 } },
+                [pscustomobject]@{ value = $null },
+                [pscustomobject]@{ value = '1' }
+            )) {
+                $invalid = $invalidCase.value
+                $mutated = Copy-TestObject $manifest
+                $mutated.roles[0].ordinal = $invalid
+                $null = Assert-Throws {
+                    Test-CalibrationPilotManifestObject -Manifest $mutated -SchemaPath $pilotManifestSchemaPath `
+                        -CalibrationSetPath $setPath -RubricsRoot $rubricsRoot | Out-Null
+                } $null
+            }
+        } finally {
+            if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Recurse -Force }
+        }
+    }
+
     Invoke-Assertion 'calibration set validates and contains the exact approved coverage' {
         $loaded = Import-CalibrationSet -Path $setPath -RubricsRoot $rubricsRoot
         Assert-True $loaded.valid (($loaded.errors | ConvertTo-Json -Compress -Depth 20))
@@ -359,6 +456,36 @@ if (Test-Path -LiteralPath $implementationPath -PathType Leaf) {
         Assert-Equal ($first | ConvertTo-Json -Depth 100 -Compress) ($second | ConvertTo-Json -Depth 100 -Compress)
     }
 
+    Invoke-Assertion 'canonical pilot hashes ignore object insertion order but preserve array order and values' {
+        $left = [pscustomobject][ordered]@{ z = 1; a = @('first', 'second'); nested = [pscustomobject][ordered]@{ b = $true; a = $null } }
+        $right = [pscustomobject][ordered]@{ nested = [pscustomobject][ordered]@{ a = $null; b = $true }; a = @('first', 'second'); z = 1 }
+        $changedArray = [pscustomobject][ordered]@{ a = @('second', 'first'); nested = [pscustomobject][ordered]@{ a = $null; b = $true }; z = 1 }
+        Assert-Equal (Get-CalibrationObjectSha256 -Value $left) (Get-CalibrationObjectSha256 -Value $right)
+        Assert-False ((Get-CalibrationObjectSha256 -Value $left) -ceq (Get-CalibrationObjectSha256 -Value $changedArray))
+    }
+
+    Invoke-Assertion 'pilot source bundle rejects invalid response schemas and binds a plan to its parsed snapshot' {
+        $temporary = New-TestDirectory
+        try {
+            $responseSchemaPath = Join-Path $temporary 'response-schema.json'
+            Set-Content -LiteralPath $responseSchemaPath -Value '{"type":"unsupported"}' -Encoding utf8NoBOM
+            $null = Assert-Throws {
+                New-CalibrationPilotSourceBundle -PilotManifestPath $pilotManifestPath -PilotManifestSchemaPath $pilotManifestSchemaPath `
+                    -CalibrationSetPath $setPath -RubricsRoot $rubricsRoot -ResponseSchemaPath $responseSchemaPath | Out-Null
+            } 'response schema'
+
+            Copy-Item -LiteralPath (Join-Path $projectRoot 'pilot/shared/response_schema.json') -Destination $responseSchemaPath -Force
+            $bundle = New-CalibrationPilotSourceBundle -PilotManifestPath $pilotManifestPath -PilotManifestSchemaPath $pilotManifestSchemaPath `
+                -CalibrationSetPath $setPath -RubricsRoot $rubricsRoot -ResponseSchemaPath $responseSchemaPath
+            $before = $bundle.hashes.response_schema
+            Set-Content -LiteralPath $responseSchemaPath -Value '{"type":"object","properties":{}}' -Encoding utf8NoBOM
+            $plan = New-CalibrationPilotPlan -SourceBundle $bundle
+            Assert-Equal $plan.source_hashes.response_schema $before
+        } finally {
+            if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Recurse -Force }
+        }
+    }
+
     Invoke-Assertion 'non-pilot CLI failure envelope preserves the original three-property contract' {
         $output = & pwsh -NoProfile -File $implementationPath -Run -Route
         $exitCode = $LASTEXITCODE
@@ -383,11 +510,13 @@ if (Test-Path -LiteralPath $implementationPath -PathType Leaf) {
                 -CalibrationSetPath $setPath -RubricsRoot $rubricsRoot `
                 -CandidateInvoker $candidateSpy -JudgeInvoker $judgeSpy
             Assert-Equal $result.mode 'pilot-plan'
+            Assert-SequenceEqual @($result.PSObject.Properties.Name) @('artifact_version', 'pilot_id', 'mode', 'selection_mode', 'prompt', 'roles', 'limits', 'source_hashes', 'provider_calls', 'provider_side_requests', 'profile_promotion_allowed', 'profile_mutated', 'production_eligibility_changed')
             Assert-Equal $result.artifact_version 'calibration-pilot-plan/v1'
             Assert-Equal $result.pilot_id 'option1-three-launch-v1'
             Assert-Equal $result.selection_mode 'calibration_only_exact_pin'
             Assert-Equal $result.prompt.id 'extraction-low-general-v1'
             Assert-Equal $result.prompt.version '1.0.0'
+            Assert-SequenceEqual @($result.prompt.PSObject.Properties.Name) @('id', 'version')
             $expectedRoles = @(
                 [pscustomobject][ordered]@{ ordinal = 1; role = 'candidate'; family = 'google'; launcher = 'agy'; route_id = 'agy__gemini_3_7_flash_low__low'; configuration_id = 'gemini-3.7-flash-low__low'; model = 'gemini-3.7-flash-low'; effort = 'low' }
                 [pscustomobject][ordered]@{ ordinal = 2; role = 'judge_1'; family = 'openai'; launcher = 'codex'; route_id = 'codex__gpt_5_6_sol__max'; configuration_id = 'gpt-5.6-sol__max'; model = 'gpt-5.6-sol'; effort = 'max' }
@@ -405,11 +534,14 @@ if (Test-Path -LiteralPath $implementationPath -PathType Leaf) {
                 Assert-False ($actualRole.PSObject.Properties.Name -ccontains 'profile')
             }
             Assert-Equal $result.limits.total 3
+            Assert-SequenceEqual @($result.limits.PSObject.Properties.Name) @('total', 'provider_family', 'application_retries')
+            Assert-SequenceEqual @($result.limits.provider_family.PSObject.Properties.Name) @('google', 'openai', 'anthropic')
             Assert-Equal $result.limits.provider_family.google 1
             Assert-Equal $result.limits.provider_family.openai 1
             Assert-Equal $result.limits.provider_family.anthropic 1
             Assert-Equal $result.limits.application_retries 0
             Assert-Equal $result.provider_calls 0
+            Assert-SequenceEqual @($result.provider_side_requests.PSObject.Properties.Name) @('observable', 'count')
             Assert-False ([bool]$result.provider_side_requests.observable)
             Assert-Equal $result.provider_side_requests.count $null
             Assert-False ([bool]$result.profile_promotion_allowed)
@@ -436,6 +568,10 @@ if (Test-Path -LiteralPath $implementationPath -PathType Leaf) {
             }
             Assert-Equal $script:PilotCandidateCalls 0
             Assert-Equal $script:PilotJudgeCalls 0
+            $serializedPlan = $result | ConvertTo-Json -Depth 100 -Compress
+            foreach ($forbidden in @('"request_text"', '"grading"', '"profile":', '"candidate":', 'raw source text')) {
+                Assert-False $serializedPlan.Contains($forbidden, [StringComparison]::Ordinal)
+            }
             Assert-SequenceEqual (Get-CalibrationResultsTreeSnapshot -Root $resultsRoot) $before
         } finally {
             if (Test-Path -LiteralPath $resultsRoot) { Remove-Item -LiteralPath $resultsRoot -Recurse -Force }
@@ -477,6 +613,9 @@ if (Test-Path -LiteralPath $implementationPath -PathType Leaf) {
             foreach ($name in $originalFunctions.Keys) { Set-Item -Path ("Function:\$name") -Value $originalFunctions[$name] }
             if (Test-Path -LiteralPath $resultsRoot) { Remove-Item -LiteralPath $resultsRoot -Recurse -Force }
         }
+        foreach ($name in $originalFunctions.Keys) {
+            Assert-Equal (Get-Command -Name $name -CommandType Function -ErrorAction Stop).ScriptBlock.ToString() $originalFunctions[$name].ToString()
+        }
     }
 
     Invoke-Assertion 'pilot live CLI rejection is compact bounded and leaves results unchanged' {
@@ -494,6 +633,23 @@ if (Test-Path -LiteralPath $implementationPath -PathType Leaf) {
         Assert-Equal $envelope.message 'pilot_admission_failed'
         Assert-Equal $envelope.code 'pilot_admission_failed'
         Assert-False ([string]$output).Contains('pilot_live_not_implemented', [StringComparison]::Ordinal)
+        Assert-SequenceEqual $after $before
+    }
+
+    Invoke-Assertion 'pilot CLI success is one compact clean plan and preserves the results tree bytes' {
+        $resultsRoot = Join-Path $calibrationRoot 'results'
+        $before = Get-CalibrationResultsTreeSnapshot -Root $resultsRoot
+        $capture = Invoke-CalibrationCliCapture -Arguments @('-NoProfile', '-File', $implementationPath, '-Pilot')
+        $after = Get-CalibrationResultsTreeSnapshot -Root $resultsRoot
+        Assert-Equal $capture.exit_code 0
+        Assert-Equal $capture.stderr ''
+        $lines = @($capture.stdout -split "`r?`n" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+        Assert-Equal $lines.Count 1
+        $plan = $lines[0] | ConvertFrom-Json -Depth 100
+        Assert-SequenceEqual @($plan.PSObject.Properties.Name) @('artifact_version', 'pilot_id', 'mode', 'selection_mode', 'prompt', 'roles', 'limits', 'source_hashes', 'provider_calls', 'provider_side_requests', 'profile_promotion_allowed', 'profile_mutated', 'production_eligibility_changed')
+        Assert-Equal $plan.mode 'pilot-plan'
+        Assert-Equal $plan.provider_calls 0
+        Assert-Equal @($plan.roles).Count 3
         Assert-SequenceEqual $after $before
     }
 
@@ -515,6 +671,25 @@ if (Test-Path -LiteralPath $implementationPath -PathType Leaf) {
                     -RubricsRoot $rubricsRoot -CandidateInvoker $spy -JudgeInvoker $spy | Out-Null
             } 'Pilot calibration set validation failed'
             Assert-Equal $script:PilotValidationCalls 0
+            Assert-SequenceEqual (Get-CalibrationResultsTreeSnapshot -Root $resultsRoot) $before
+        } finally {
+            if (Test-Path -LiteralPath $resultsRoot) { Remove-Item -LiteralPath $resultsRoot -Recurse -Force }
+        }
+    }
+
+    Invoke-Assertion 'pilot source bundle rejects a malformed nonselected request before pinning the fixed prompt' {
+        $resultsRoot = New-CalibrationResultsTestRoot
+        try {
+            $sourceDirectory = Join-Path $resultsRoot 'sources'
+            New-Item -ItemType Directory -Path $sourceDirectory | Out-Null
+            $badSet = Copy-TestObject (Get-Content -Raw -LiteralPath $setPath | ConvertFrom-Json -Depth 100)
+            (@($badSet.prompts | Where-Object { $_.id -ceq 'general-low-biology-v1' })[0]).request.task_type = 'invalid-task-type'
+            $badSetPath = Join-Path $sourceDirectory 'bad-request-calibration-set.json'
+            $badSet | ConvertTo-Json -Depth 100 | Set-Content -LiteralPath $badSetPath -Encoding utf8NoBOM
+            $before = Get-CalibrationResultsTreeSnapshot -Root $resultsRoot
+            $null = Assert-Throws {
+                Invoke-Calibration -Pilot -ResultsRoot $resultsRoot -CalibrationSetPath $badSetPath -RubricsRoot $rubricsRoot | Out-Null
+            } 'Pilot calibration set validation failed'
             Assert-SequenceEqual (Get-CalibrationResultsTreeSnapshot -Root $resultsRoot) $before
         } finally {
             if (Test-Path -LiteralPath $resultsRoot) { Remove-Item -LiteralPath $resultsRoot -Recurse -Force }
