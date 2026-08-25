@@ -26,6 +26,7 @@
 | [SB-20260825-004903-task10-haiku-omitted-effort-preflight](incidents/2026-08-25T004903Z-task10-haiku-omitted-effort-preflight.md) | Task 10 Haiku preflight treated omitted effort as literal default | closed | 2026-08-25T00:49:03.892486Z | 2026-08-25T00:49:37.557659Z |
 | [SB-20260825-134119-calibration-rubric-path-assumption](incidents/2026-08-25T134119Z-calibration-rubric-path-assumption.md) | closed | 2026-08-25T13:41:19.481246Z | Option 1 implementation planning | Calibration rubric path assumed incorrectly during planning |
 | [SB-20260825-134552-plan-placeholder-scan-self-match](incidents/2026-08-25T134552Z-plan-placeholder-scan-self-match.md) | closed | 2026-08-25T13:45:52.451048Z | Option 1 implementation-plan verification | Plan placeholder verification matched its own scan command |
+| [SB-20260825-153736-parent-worktree-ignore-dubious-ownership](incidents/2026-08-25T153736Z-parent-worktree-ignore-dubious-ownership.md) | closed | 2026-08-25T15:37:36.292408Z | Option 1 subagent execution baseline | Parent checkout ignore verification rejected sandbox ownership |
 | SB-2026-08-19-001 | PowerShell DOCX paragraph extraction syntax error | closed | 2026-08-19 | 2026-08-19 |
 | SB-2026-08-19-002 | Current DOCX locked during full-document scan | closed | 2026-08-19 | 2026-08-19 |
 | SB-2026-08-19-003 | Skill path lookup mismatch | closed | 2026-08-19 | 2026-08-23 |
