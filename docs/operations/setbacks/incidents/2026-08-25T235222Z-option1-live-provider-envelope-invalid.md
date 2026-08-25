@@ -2,7 +2,7 @@
 
 - **Status:** contained
 - **First observed:** 2026-08-25T23:52:22.2693656Z
-- **Last observed:** 2026-08-25T23:53:40.1144919Z
+- **Last observed:** 2026-08-25T23:55:02.5686300Z
 - **Phase/task:** Task 9 approved live acceptance
 - **Environment:** Windows PowerShell, isolated Option 1 worktree
 - **Version/commit:** `98df9e955e51654c5e927229753901a585715e33`
@@ -37,6 +37,7 @@ Run the exact approved command once from the clean approved commit with RunId `o
 2. Executed the approved live command once; it stopped safely after the candidate slot.
 3. Inspected only bounded artifact structure, hashes, claims, terminal state, privacy fields, and visible process names; containment checks passed.
 4. Did not retry, substitute a provider, resume, or create another RunId.
+5. A final inspection report mislabeled the manifest hash as the execution commit. Reading `plan.json.git_commit` corrected the report and confirmed the approved execution commit exactly; no runtime artifact changed.
 
 ## Cause classification
 
@@ -59,3 +60,4 @@ The run directory contains only `.run.claim`, the exact candidate claim, `plan.j
 ## Recurrence history
 
 - 2026-08-25T23:52:22.2693656Z: First live occurrence; contained without retry.
+- 2026-08-25T23:55:02.5686300Z: Corrected a read-only verification label and reconfirmed the exact approved commit from the immutable plan.
