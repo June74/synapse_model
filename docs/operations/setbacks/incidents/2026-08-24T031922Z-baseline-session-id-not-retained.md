@@ -2,8 +2,8 @@
 
 - **Status:** closed
 - **First observed:** 2026-08-24T03:19:22.527505Z
-- **Last observed:** 2026-08-25
-- **Phase/task:** Task 4 atomic ledger follow-up verification
+- **Last observed:** 2026-08-25T21:31:26.0453209Z
+- **Phase/task:** Task 7 documentation specification review
 - **Environment:** Windows PowerShell, Codex desktop managed workspace
 - **Version/commit:** First observed at `12481f6`; Task 4 recurrence at `9d35707`
 
@@ -54,6 +54,7 @@ Run the full router PowerShell suite through an execution wrapper with a 30-seco
 - 2026-08-24T03:19:22.527505Z: First observed.
 - 2026-08-24T04:42:50Z: Project-owner-reported Task 7 handoff serialization recurrence; repository status and test state were re-established before work resumed.
 - 2026-08-24T05:14:03Z: Task 8 baseline wrapper again printed partial output without retaining the returned session identifier.
+- 2026-08-25T21:31:26.0453209Z: Task 7 documentation spec review repeated the 30-second wrapper/session-handle loss; a retained-handle rerun completed successfully.
 
 ## Recurrence: Task 7 handoff serialization
 
@@ -100,3 +101,13 @@ Run the full router PowerShell suite through an execution wrapper with a 30-seco
 - **Owner:** Codex.
 - **Next diagnostic step:** None for the wrapper recurrence; proceed with the observed Task 5 RED cycle.
 - **Verification:** The corrected session-aware run was polled to exit code 1 and reported exactly the intended missing Task 5 orchestration seam plus the superseded bounded-live error expectation.
+
+## Recurrence: Option 1 Task 7 documentation specification review
+
+- **Symptom:** The first functional-suite review command crossed the 30-second yield boundary and its wrapper discarded the returned continuation handle.
+- **Impact:** The partial output was discarded as acceptance evidence. No repository state, provider process, network request, or private data changed.
+- **Confirmed cause:** The review wrapper again projected command output before preserving the full execution result and continuation identifier.
+- **Known exclusions:** No product defect, live calibration path, native launcher, provider call, credential, prompt, or response was involved.
+- **Correction:** Confirmed no matching process remained, then reran with the complete execution result retained and polled the returned session handle to an explicit exit code.
+- **Prevention:** Run long PowerShell suites through direct session-aware calls and retain the full result object before inspecting output.
+- **Verification:** The retained-handle rerun completed with exit code 0 and all 48 functional assertions passed; the offline pilot plan separately returned zero provider calls and wrote no result artifact.
