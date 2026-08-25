@@ -11,7 +11,7 @@
 | [SB-20260824-033023-sqlite-test-connection-not-closed](incidents/2026-08-24T033023Z-sqlite-test-connection-not-closed.md) | SQLite test reader left Windows file handles open | closed | 2026-08-24 | 2026-08-24 |
 | [SB-20260824-035416-sqlite-schema-admission-atomicity](incidents/2026-08-24T035416Z-sqlite-schema-admission-atomicity.md) | SQLite schema admission was not exact or atomic | closed | 2026-08-24 | 2026-08-24 |
 | [SB-20260824-044250-sqlite-trace-quality-review](incidents/2026-08-24T044250Z-sqlite-trace-quality-review.md) | SQLite trace admission and bridge durability gaps | closed | 2026-08-24 | 2026-08-24 |
-| [SB-20260824-051403-python-alias-unavailable](incidents/2026-08-24T051403Z-python-alias-unavailable.md) | Python alias unavailable during storage baseline | closed | 2026-08-24 | 2026-08-24 |
+| [SB-20260824-051403-python-alias-unavailable](incidents/2026-08-24T051403Z-python-alias-unavailable.md) | Python alias unavailable during storage baseline | closed | 2026-08-24 | 2026-08-25 |
 | [SB-20260824-052419-nullable-trace-id-diagnostic](incidents/2026-08-24T052419Z-nullable-trace-id-diagnostic.md) | Nullable trace ID test expected a leaf diagnostic | closed | 2026-08-24 | 2026-08-24 |
 | [SB-20260824-052700-patch-tool-call-omitted](incidents/2026-08-24T052700Z-patch-tool-call-omitted.md) | Pricing patch text was not sent to the edit tool | closed | 2026-08-24 | 2026-08-24 |
 | [SB-20260824-052823-router-test-assert-helper](incidents/2026-08-24T052823Z-router-test-assert-helper.md) | Task 8 pricing test used an unavailable assertion helper | closed | 2026-08-24 | 2026-08-24 |
@@ -27,6 +27,8 @@
 | [SB-20260825-134119-calibration-rubric-path-assumption](incidents/2026-08-25T134119Z-calibration-rubric-path-assumption.md) | closed | 2026-08-25T13:41:19.481246Z | Option 1 implementation planning | Calibration rubric path assumed incorrectly during planning |
 | [SB-20260825-134552-plan-placeholder-scan-self-match](incidents/2026-08-25T134552Z-plan-placeholder-scan-self-match.md) | closed | 2026-08-25T13:45:52.451048Z | Option 1 implementation-plan verification | Plan placeholder verification matched its own scan command |
 | [SB-20260825-153736-parent-worktree-ignore-dubious-ownership](incidents/2026-08-25T153736Z-parent-worktree-ignore-dubious-ownership.md) | closed | 2026-08-25T15:37:36.292408Z | Option 1 subagent execution baseline | Parent checkout ignore verification rejected sandbox ownership |
+| [SB-20260825-184420-calibration-hook-restore-reference](incidents/2026-08-25T184420Z-calibration-hook-restore-reference.md) | closed | 2026-08-25T18:56:55Z | Task 4 quality review verification | Calibration hook restoration retained a live function reference |
+| [SB-20260825-184646-calibration-state-contract-intermittent](incidents/2026-08-25T184646Z-calibration-state-contract-intermittent.md) | closed | 2026-08-25T18:52:00Z | Task 4 quality review final verification | Calibration state-machine assertion intermittently fails contract validation |
 | SB-2026-08-19-001 | PowerShell DOCX paragraph extraction syntax error | closed | 2026-08-19 | 2026-08-19 |
 | SB-2026-08-19-002 | Current DOCX locked during full-document scan | closed | 2026-08-19 | 2026-08-19 |
 | SB-2026-08-19-003 | Skill path lookup mismatch | closed | 2026-08-19 | 2026-08-23 |

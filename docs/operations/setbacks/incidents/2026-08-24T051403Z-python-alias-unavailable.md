@@ -2,7 +2,7 @@
 
 - **Status:** closed
 - **First observed:** 2026-08-24T05:14:03Z
-- **Last observed:** 2026-08-24T18:44:54Z
+- **Last observed:** 2026-08-25T18:44:00Z
 - **Phase/task:** Task 8 pre-implementation baseline
 - **Environment:** Windows PowerShell, Codex desktop managed workspace
 - **Version/commit:** `50ca437`
@@ -50,6 +50,8 @@ Invoke `python` from the Task 8 managed PowerShell environment without resolving
 The bundled interpreter completed all 52 storage tests with exit code 0 in 15.598 seconds. On recurrence during Task 8 quality verification, it completed all 53 current storage tests with exit code 0 in 15.222 seconds.
 
 ## Recurrence history
+
+- 2026-08-25T18:44:00Z: The unavailable `python` and `py` aliases recurred while invoking the setback helper. The installed Python 3.12 executable was resolved explicitly and the helper completed after the required scoped execution approval.
 
 - 2026-08-24T05:14:03Z: First observed and closed.
 - 2026-08-24T18:44:54Z: The unavailable alias recurred once; the documented bundled-interpreter path completed all 53 current tests.
