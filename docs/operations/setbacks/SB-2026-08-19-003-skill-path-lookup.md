@@ -4,8 +4,8 @@
 - Title: Skill path lookup mismatch
 - Status: closed
 - First observed: 2026-08-19
-- Last observed: 2026-08-25T21:21:13.2998235Z
-- Phase/task: Task 7 SQLite trace storage preflight
+- Last observed: 2026-08-25T23:53:40.1144919Z
+- Phase/task: Task 9 live acceptance incident logging
 - Environment: Windows PowerShell, Codex desktop
 - Version/commit: Not applicable
 
@@ -85,3 +85,12 @@ The `scope-gate` and `setback-logger` instructions were read successfully from t
 - Correction: enumerate the skill directory, read the exact helper path, resolve Python through `Resolve-RouterPythonExecutable`, and search explicit directories without a literal Windows wildcard path.
 - Prevention: resolve every relative skill resource against the loaded `SKILL.md` directory, invoke `.py` helpers through the resolved Python executable, and use `rg` directory roots or `Get-ChildItem` for Windows wildcard expansion.
 - Verification: the exact helper source and `--help` completed through the resolved Python runtime; the explicit incident and index searches completed without using the invalid wildcard path.
+
+### 2026-08-25 - Task 9 setback-helper and resolver-scope recurrence
+
+- Symptom: live-incident logging again looked for `scripts/new_setback.py` beneath the repository setback directory and called `Resolve-RouterPythonExecutable` without first loading its defining module.
+- Impact: one read-only lookup command failed before incident creation. No runtime artifact, provider process, tracked product file, credential, prompt, or response was modified or exposed.
+- Confirmed cause: the command repeated the repository-relative helper assumption and treated a module-scoped resolver as globally available.
+- Correction: enumerated repository files, updated this recurrence, and created the bounded live incident manually because the repository contains no local helper script.
+- Prevention: resolve skill-owned resources against the loaded skill directory and load a function's defining module before calling it; otherwise use the documented manual incident contract.
+- Verification: the existing incident was found by exact path, the new live incident and index row were created with bounded evidence only, and no live command was repeated.

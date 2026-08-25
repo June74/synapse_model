@@ -39,9 +39,10 @@
 | [SB-20260825-202324-task6-parallel-suite-result-lock](incidents/2026-08-25T202324Z-task6-parallel-suite-result-lock.md) | Parallel calibration suites contended on a run claim | closed | 2026-08-25T20:23:24.5926183Z | 2026-08-25T20:26:10.4121215Z |
 | [SB-20260825-210716-task6-post-launch-ledger-recovery](incidents/2026-08-25T210716Z-task6-post-launch-ledger-recovery.md) | Post-launch ledger failure escaped durable recovery | closed | 2026-08-25T21:07:16.6369573Z | 2026-08-25T21:11:34.0598216Z |
 | [SB-20260825-212139-task7-live-runid-plan-mismatch](incidents/2026-08-25T212139Z-task7-live-runid-plan-mismatch.md) | Task 7 live RunId disagreed with frozen acceptance packet | closed | 2026-08-25T21:21:39.286903Z | 2026-08-25T21:25:03.8356342Z |
+| [SB-20260825-235222-option1-live-provider-envelope-invalid](incidents/2026-08-25T235222Z-option1-live-provider-envelope-invalid.md) | Option 1 live candidate returned an invalid provider envelope | contained | 2026-08-25T23:52:22.2693656Z | 2026-08-25T23:53:40.1144919Z |
 | SB-2026-08-19-001 | PowerShell DOCX paragraph extraction syntax error | closed | 2026-08-19 | 2026-08-19 |
 | SB-2026-08-19-002 | Current DOCX locked during full-document scan | closed | 2026-08-19 | 2026-08-19 |
-| SB-2026-08-19-003 | Skill path lookup mismatch | closed | 2026-08-19 | 2026-08-25T21:21:13.2998235Z |
+| SB-2026-08-19-003 | Skill path lookup mismatch | closed | 2026-08-19 | 2026-08-25T23:53:40.1144919Z |
 | SB-2026-08-19-004 | Claude CLI smoke test did not return within timeout | contained | 2026-08-19 | 2026-08-19 |
 | SB-2026-08-19-005 | Antigravity CLI authentication unavailable in sandbox | contained | 2026-08-19 | 2026-08-19 |
 | SB-2026-08-19-006 | Git index unavailable to sandbox | contained | 2026-08-19 | 2026-08-25T21:59:39Z |
