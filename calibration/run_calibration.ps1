@@ -1154,27 +1154,74 @@ function Write-CalibrationCreateNewJson {
         $bytes = [Text.Encoding]::UTF8.GetBytes($json)
     } catch { throw 'pilot_json_value_invalid' }
     $stream = $null
+    $fileCreated = $false
+    $postCreateFailure = $false
     try {
-        $stream = [IO.File]::Open([IO.Path]::GetFullPath($Path), [IO.FileMode]::CreateNew,
-            [IO.FileAccess]::Write, [IO.FileShare]::None)
-        $stream.Write($bytes, 0, $bytes.Length)
-        $stream.Flush($true)
-    } catch [IO.IOException] {
-        throw 'pilot_create_new_collision'
+        try {
+            $stream = Open-CalibrationCreateNewFileStream -Path ([IO.Path]::GetFullPath($Path))
+            $fileCreated = $true
+        } catch {
+            if (Test-CalibrationCreateNewCollisionException -Exception $_.Exception) { throw 'pilot_create_new_collision' }
+            throw 'pilot_create_new_failed'
+        }
+        try {
+            Invoke-CalibrationPilotAfterCreateNewOpenHook -Path ([IO.Path]::GetFullPath($Path))
+            $stream.Write($bytes, 0, $bytes.Length)
+            $stream.Flush($true)
+        } catch {
+            $postCreateFailure = $true
+        } finally {
+            if ($null -ne $stream) {
+                try { $stream.Dispose() } catch { $postCreateFailure = $true }
+                $stream = $null
+            }
+        }
     } catch {
-        throw 'pilot_create_new_failed'
-    } finally {
-        if ($null -ne $stream) { $stream.Dispose() }
+        if ($fileCreated) {
+            if ($null -ne $stream) {
+                try { $stream.Dispose() } catch { }
+                $stream = $null
+            }
+            throw 'pilot_create_new_persistence_indeterminate'
+        }
+        throw
     }
+    if ($postCreateFailure) { throw 'pilot_create_new_persistence_indeterminate' }
 }
+
+function Test-CalibrationCreateNewCollisionException {
+    param([Parameter(Mandatory)][Exception]$Exception)
+    $current = $Exception
+    while ($null -ne $current) {
+        if ($current -is [IO.IOException]) {
+            $nativeCode = $current.HResult -band 0xffff
+            return $nativeCode -eq 80 -or $nativeCode -eq 183
+        }
+        $current = $current.InnerException
+    }
+    return $false
+}
+
+function Open-CalibrationCreateNewFileStream {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [IO.FileAccess]$Access = [IO.FileAccess]::Write
+    )
+    return [IO.File]::Open($Path, [IO.FileMode]::CreateNew, $Access, [IO.FileShare]::None)
+}
+
+function Invoke-CalibrationPilotAfterCreateNewOpenHook { param([string]$Path) }
+function Close-CalibrationPilotResultTempStream { param([Parameter(Mandatory)][IO.FileStream]$Stream) $Stream.Dispose() }
+function Invoke-CalibrationPilotBeforeSlotClaimHook { param([object]$Context, [int]$Ordinal) }
+function Invoke-CalibrationPilotAfterSlotClaimCreateHook { param([string]$Path) }
+function Invoke-CalibrationPilotAfterSlotClaimHook { param([object]$Context, [int]$Ordinal) }
 
 function Write-CalibrationPilotClaimCreateNewJson {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$Path,
         [Parameter(Mandatory)][object]$Value,
-        [Parameter(Mandatory)][string]$AllowedRunRoot,
-        [AllowNull()][scriptblock]$AfterCreateNew
+        [Parameter(Mandatory)][string]$AllowedRunRoot
     )
     Assert-CalibrationWriteBoundary -Path $Path -AllowedRunRoot $AllowedRunRoot
     $fullRunRoot = [IO.Path]::GetFullPath($AllowedRunRoot)
@@ -1192,14 +1239,15 @@ function Write-CalibrationPilotClaimCreateNewJson {
     $postCreateFailure = $false
     try {
         try {
-            $stream = [IO.File]::Open([IO.Path]::GetFullPath($Path), [IO.FileMode]::CreateNew,
-                [IO.FileAccess]::Write, [IO.FileShare]::None)
+            $stream = Open-CalibrationCreateNewFileStream -Path ([IO.Path]::GetFullPath($Path))
             $claimCreated = $true
-        } catch [IO.IOException] { throw 'pilot_create_new_collision' }
-        catch { throw 'pilot_create_new_failed' }
+        } catch {
+            if (Test-CalibrationCreateNewCollisionException -Exception $_.Exception) { throw 'pilot_create_new_collision' }
+            throw 'pilot_create_new_failed'
+        }
 
         try {
-            if ($null -ne $AfterCreateNew) { & $AfterCreateNew }
+            Invoke-CalibrationPilotAfterSlotClaimCreateHook -Path ([IO.Path]::GetFullPath($Path))
             $stream.Write($bytes, 0, $bytes.Length)
             $stream.Flush($true)
         } catch {
@@ -1268,28 +1316,62 @@ function Write-CalibrationAtomicResultJson {
     Assert-CalibrationWriteBoundary -Path $tempPath -AllowedRunRoot $fullRunRoot
     $stream = $null
     $ownsTemp = $false
+    $tempPersistenceFailed = $false
+    $tempDisposeFailed = $false
+    $tempCleanupFailed = $false
     try {
         try {
-            $stream = [IO.File]::Open($tempPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+            $stream = Open-CalibrationCreateNewFileStream -Path $tempPath
             $ownsTemp = $true
-        } catch [IO.IOException] { throw 'pilot_result_temp_collision' }
-        $stream.Write($bytes, 0, $bytes.Length)
-        $stream.Flush($true)
-        $stream.Dispose()
-        $stream = $null
-        Assert-CalibrationWriteBoundary -Path $fullPath -AllowedRunRoot $fullRunRoot
-        Assert-CalibrationWriteBoundary -Path $tempPath -AllowedRunRoot $fullRunRoot
+        } catch {
+            if (Test-CalibrationCreateNewCollisionException -Exception $_.Exception) { throw 'pilot_result_temp_collision' }
+            throw 'pilot_result_temp_create_failed'
+        }
+        try {
+            try {
+                $stream.Write($bytes, 0, $bytes.Length)
+                $stream.Flush($true)
+            } catch { $tempPersistenceFailed = $true }
+            finally {
+                if ($null -ne $stream) {
+                    try { Close-CalibrationPilotResultTempStream -Stream $stream }
+                    catch {
+                        $tempDisposeFailed = $true
+                        try { $stream.Dispose() } catch { }
+                    } finally { $stream = $null }
+                }
+            }
+            if (-not $tempPersistenceFailed -and -not $tempDisposeFailed) {
+                try {
+                    Assert-CalibrationWriteBoundary -Path $fullPath -AllowedRunRoot $fullRunRoot
+                    Assert-CalibrationWriteBoundary -Path $tempPath -AllowedRunRoot $fullRunRoot
+                } catch { $tempPersistenceFailed = $true }
+            }
+        } finally {
+            if (($tempPersistenceFailed -or $tempDisposeFailed) -and $ownsTemp) {
+                try {
+                    Remove-CalibrationOwnedResultTemp -Path $tempPath -AllowedRunRoot $fullRunRoot
+                    $ownsTemp = $false
+                } catch { $tempCleanupFailed = $true }
+            }
+        }
     } catch {
-        $operationFailure = $_
-        if ($null -ne $stream) { $stream.Dispose(); $stream = $null }
-        if ($ownsTemp) {
+        if (-not $ownsTemp) { throw }
+        $tempPersistenceFailed = $true
+        try {
+            if ($null -ne $stream) {
+                try { $stream.Dispose() } catch { $tempDisposeFailed = $true }
+                $stream = $null
+            }
+        } finally {
             try {
                 Remove-CalibrationOwnedResultTemp -Path $tempPath -AllowedRunRoot $fullRunRoot
                 $ownsTemp = $false
-            } catch { throw 'pilot_result_temp_cleanup_indeterminate' }
+            } catch { $tempCleanupFailed = $true }
         }
-        throw $operationFailure
     }
+    if ($tempCleanupFailed) { throw 'pilot_result_temp_cleanup_indeterminate' }
+    if ($tempPersistenceFailed -or $tempDisposeFailed) { throw 'pilot_result_temp_persistence_indeterminate' }
     $replaceFailed = $false
     $cleanupFailed = $false
     try {
@@ -1474,6 +1556,15 @@ function Assert-CalibrationPilotResultContract {
                     $null -eq $attempt.completed_at) { throw $errorCode }
             }
         }
+    }
+    if ($Result.run_state -cin @('planned', 'preflight_passed') -and
+        @($Result.attempts | Where-Object { $_.state -cne 'planned' }).Count -gt 0) { throw $errorCode }
+    if ($Result.run_state -ceq 'completed' -and
+        @($Result.attempts | Where-Object { $_.state -cne 'succeeded' }).Count -gt 0) { throw $errorCode }
+    $priorAttemptSucceeded = $true
+    foreach ($attempt in $Result.attempts) {
+        if (-not $priorAttemptSucceeded -and $attempt.state -cne 'planned') { throw $errorCode }
+        $priorAttemptSucceeded = ($attempt.state -ceq 'succeeded')
     }
     foreach ($counterName in @('slots_consumed', 'launcher_processes_started')) {
         $counter = $Result.$counterName
@@ -1733,6 +1824,7 @@ function Set-CalibrationPilotAttemptState {
         if ($Context.result.run_state -cin @('completed', 'stopped', 'indeterminate')) {
             throw 'pilot_attempt_run_terminal'
         }
+        if ($Context.result.run_state -cne 'running') { throw 'pilot_attempt_run_not_running' }
         $index = [int]$Ordinal - 1
         $current = [string]$Context.result.attempts[$index].state
         if (-not $script:PilotAttemptTransitions.ContainsKey($current) -or
@@ -1765,10 +1857,7 @@ function New-CalibrationPilotSlotClaim {
     param(
         [Parameter(Mandatory)][object]$Context,
         [Parameter(Mandatory)][object]$Ordinal,
-        [Parameter(Mandatory)][object]$Identity,
-        [AllowNull()][scriptblock]$BeforeSlotClaim,
-        [AllowNull()][scriptblock]$AfterSlotClaimCreate,
-        [AllowNull()][scriptblock]$AfterSlotClaim
+        [Parameter(Mandatory)][object]$Identity
     )
     if (-not ($Ordinal -is [byte] -or $Ordinal -is [int16] -or $Ordinal -is [int32] -or $Ordinal -is [int64]) -or
         [int64]$Ordinal -lt 1 -or [int64]$Ordinal -gt 3) { throw 'pilot_slot_ordinal_invalid' }
@@ -1796,12 +1885,13 @@ function New-CalibrationPilotSlotClaim {
             $Context.result.attempts[$index].state -cne 'planned') { throw 'pilot_slot_limit_reached' }
         for ($previous = 0; $previous -lt $index; $previous++) {
             $previousPath = Join-Path $Context.claims_path $script:PilotClaimFileNames[$previous]
+            if ($Context.result.attempts[$previous].state -ceq 'failed') { throw 'pilot_slot_prior_attempt_failed' }
             if (-not (Test-Path -LiteralPath $previousPath -PathType Leaf) -or
                 $Context.result.attempts[$previous].state -cne 'succeeded') {
                 throw 'pilot_slot_previous_incomplete'
             }
         }
-        if ($null -ne $BeforeSlotClaim) { & $BeforeSlotClaim }
+        Invoke-CalibrationPilotBeforeSlotClaimHook -Context $Context -Ordinal ([int]$Ordinal)
         Assert-CalibrationPilotResultContract -Context $Context -Result $Context.result
         if ($Context.result.run_state -cne 'running') { throw 'pilot_slot_run_not_running' }
         $claimedAt = [DateTimeOffset]::UtcNow.ToString('o')
@@ -1818,10 +1908,9 @@ function New-CalibrationPilotSlotClaim {
             claimed_at = $claimedAt
         }
         $claimPath = Join-Path $Context.claims_path $script:PilotClaimFileNames[$index]
-        Write-CalibrationPilotClaimCreateNewJson -Path $claimPath -Value $claimValue -AllowedRunRoot $Context.run_root `
-            -AfterCreateNew $AfterSlotClaimCreate
+        Write-CalibrationPilotClaimCreateNewJson -Path $claimPath -Value $claimValue -AllowedRunRoot $Context.run_root
         try {
-            if ($null -ne $AfterSlotClaim) { & $AfterSlotClaim }
+            Invoke-CalibrationPilotAfterSlotClaimHook -Context $Context -Ordinal ([int]$Ordinal)
             Assert-CalibrationPilotResultContract -Context $Context -Result $Context.result -SkipClaimCounterCheck
             $next = Copy-CalibrationJsonValue $Context.result
             $next.attempts[$index].state = 'slot_reserved'

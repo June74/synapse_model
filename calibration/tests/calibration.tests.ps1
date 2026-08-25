@@ -57,7 +57,7 @@ function Invoke-Assertion {
 
 function Copy-TestObject {
     param([object]$Value)
-    return $Value | ConvertTo-Json -Depth 100 | ConvertFrom-Json -Depth 100
+    return $Value | ConvertTo-Json -Depth 100 | ConvertFrom-Json -Depth 100 -DateKind String
 }
 
 function Get-ObjectStringsAndKeys {
@@ -809,15 +809,33 @@ if (Test-Path -LiteralPath $implementationPath -PathType Leaf) {
         $input = New-TestCalibrationPilotLedgerInput
         $context = $null
         try {
+            $timestampCopy = Copy-TestObject ([pscustomobject]@{ timestamp = '2026-08-25T18:46:10.1234560+00:00' })
+            Assert-True ($timestampCopy.timestamp -is [string]) 'Test JSON copies must preserve durable timestamp strings.'
             $context = New-CalibrationPilotRun -ResultsRoot $input.results_root -RunId 'ledger-test-002' -Plan $input.plan
             $resultPath = $context.result_path
+            $before = (Get-FileHash -LiteralPath $resultPath -Algorithm SHA256).Hash
+            $null = Assert-Throws {
+                Set-CalibrationPilotAttemptState -Context $context -Ordinal 1 -State 'skipped'
+            } 'pilot_attempt_run_not_running'
+            Assert-Equal (Get-FileHash -LiteralPath $resultPath -Algorithm SHA256).Hash $before
             Set-CalibrationPilotRunState -Context $context -State 'preflight_passed'
             Assert-Equal $context.result.run_state 'preflight_passed'
             $before = (Get-FileHash -LiteralPath $resultPath -Algorithm SHA256).Hash
+            $null = Assert-Throws {
+                Set-CalibrationPilotAttemptState -Context $context -Ordinal 1 -State 'skipped'
+            } 'pilot_attempt_run_not_running'
+            Assert-Equal (Get-FileHash -LiteralPath $resultPath -Algorithm SHA256).Hash $before
+            $crossState = Copy-TestObject $context.result
+            $crossState.attempts[0].state = 'skipped'
+            $crossState.attempts[0].completed_at = [DateTimeOffset]::UtcNow.ToString('o')
+            $null = Assert-Throws {
+                Assert-CalibrationPilotResultContract -Context $context -Result $crossState `
+                    -SkipClaimCounterCheck -SkipPersistedResultMatch
+            } 'pilot_result_contract_invalid'
             $context.result.stop_reason = 'arbitrary exception text must not persist'
             $null = Assert-Throws { Set-CalibrationPilotRunState -Context $context -State 'running' } 'pilot_result_contract_invalid'
             Assert-Equal (Get-FileHash -LiteralPath $resultPath -Algorithm SHA256).Hash $before
-            $context.result = Get-Content -Raw -LiteralPath $resultPath | ConvertFrom-Json -Depth 100
+            $context.result = Get-Content -Raw -LiteralPath $resultPath | ConvertFrom-Json -Depth 100 -DateKind String
             $null = Assert-Throws { Set-CalibrationPilotRunState -Context $context -State 'completed' } 'pilot_run_transition_invalid'
             Assert-Equal (Get-FileHash -LiteralPath $resultPath -Algorithm SHA256).Hash $before
             Set-CalibrationPilotRunState -Context $context -State 'running'
@@ -846,7 +864,7 @@ if (Test-Path -LiteralPath $implementationPath -PathType Leaf) {
             $before = (Get-FileHash -LiteralPath $resultPath -Algorithm SHA256).Hash
             $null = Assert-Throws { Set-CalibrationPilotRunState -Context $context -State 'stopped' } 'pilot_result_contract_invalid'
             Assert-Equal (Get-FileHash -LiteralPath $resultPath -Algorithm SHA256).Hash $before
-            $context.result = Get-Content -Raw -LiteralPath $resultPath | ConvertFrom-Json -Depth 100
+            $context.result = Get-Content -Raw -LiteralPath $resultPath | ConvertFrom-Json -Depth 100 -DateKind String
             Set-CalibrationPilotRunState -Context $context -State 'stopped'
             $before = (Get-FileHash -LiteralPath $resultPath -Algorithm SHA256).Hash
             $null = Assert-Throws { Set-CalibrationPilotRunState -Context $context -State 'running' } 'pilot_run_transition_invalid'
@@ -883,7 +901,10 @@ if (Test-Path -LiteralPath $implementationPath -PathType Leaf) {
             Set-CalibrationPilotAttemptState -Context $context -Ordinal 1 -State 'failed'
             Assert-True (Test-Path -LiteralPath $first.claim_path -PathType Leaf)
             Assert-Equal (Get-CalibrationPilotClaimCount -Context $context).total 1
-            $null = Assert-Throws { New-CalibrationPilotSlotClaim -Context $context -Ordinal 2 -Identity $openai } 'pilot_slot_previous_incomplete'
+            $null = Assert-Throws { New-CalibrationPilotSlotClaim -Context $context -Ordinal 2 -Identity $openai } 'pilot_slot_prior_attempt_failed'
+            Assert-False (Test-Path -LiteralPath (Join-Path $context.claims_path '02-openai-judge.claim'))
+            Set-CalibrationPilotRunState -Context $context -State 'stopped'
+            $null = Assert-Throws { New-CalibrationPilotSlotClaim -Context $context -Ordinal 2 -Identity $openai } 'pilot_slot_run_not_running'
         } finally {
             if ($null -ne $context) { Close-CalibrationPilotRun -Context $context }
             Remove-TestCalibrationPilotLedgerRoot -Path $input.results_root

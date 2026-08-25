@@ -355,6 +355,73 @@ Invoke-Assertion 'atomic result replacement cleans only its owned temp after rep
     }
 }
 
+Invoke-Assertion 'create-new initialization failure after open is indeterminate and non-refundable' {
+    $caseData = New-SecurityPilotLedgerInput
+    $runId = 'ledger-security-012'
+    $runRoot = Join-Path $caseData.results_root $runId
+    $originalHook = (Get-Command -Name Invoke-CalibrationPilotAfterCreateNewOpenHook -CommandType Function -ErrorAction Stop).ScriptBlock
+    $originalOpen = (Get-Command -Name Open-CalibrationCreateNewFileStream -CommandType Function -ErrorAction Stop).ScriptBlock
+    try {
+        Set-Item -Path Function:\Invoke-CalibrationPilotAfterCreateNewOpenHook -Value {
+            param([string]$Path)
+            if ([IO.Path]::GetFileName($Path) -ceq 'plan.json') { throw 'forced raw initialization writer failure' }
+        }
+        $null = Assert-Throws {
+            New-CalibrationPilotRun -ResultsRoot $caseData.results_root -RunId $runId -Plan $caseData.plan | Out-Null
+        } 'pilot_create_new_persistence_indeterminate'
+        $planPath = Join-Path $runRoot 'plan.json'
+        Assert-True (Test-Path -LiteralPath $planPath -PathType Leaf) 'Partial initialization artifact was refunded.'
+        Assert-True (Test-Path -LiteralPath (Join-Path $runRoot '.run.claim') -PathType Leaf)
+        $planHash = (Get-FileHash -LiteralPath $planPath -Algorithm SHA256).Hash
+        $openFailurePath = Join-Path (Join-Path $runRoot 'raw') 'open-failure.json'
+        Set-Item -Path Function:\Open-CalibrationCreateNewFileStream -Value {
+            throw [IO.IOException]::new('forced raw non-collision open failure')
+        }
+        $null = Assert-Throws {
+            Write-CalibrationCreateNewJson -Path $openFailurePath -Value ([pscustomobject]@{ safe = $true }) `
+                -AllowedRunRoot $runRoot
+        } 'pilot_create_new_failed'
+        Assert-False (Test-Path -LiteralPath $openFailurePath)
+        $null = Assert-Throws {
+            New-CalibrationPilotRun -ResultsRoot $caseData.results_root -RunId $runId -Plan $caseData.plan | Out-Null
+        } 'pilot_run_collision'
+        Assert-Equal (Get-FileHash -LiteralPath $planPath -Algorithm SHA256).Hash $planHash
+        Assert-False (Test-Path -LiteralPath (Join-Path $runRoot 'result.json'))
+        Assert-Equal @(Get-ChildItem -LiteralPath $runRoot -Force -Recurse -Filter '.result-*.tmp').Count 0
+    } finally {
+        Set-Item -Path Function:\Invoke-CalibrationPilotAfterCreateNewOpenHook -Value $originalHook
+        Set-Item -Path Function:\Open-CalibrationCreateNewFileStream -Value $originalOpen
+        Remove-SecurityPilotLedgerRoot -Path $caseData.results_root
+    }
+}
+
+Invoke-Assertion 'result temp disposal failure is bounded and cleans the exact owned temp' {
+    $caseData = New-SecurityPilotLedgerInput
+    $context = $null
+    $originalHook = (Get-Command -Name Close-CalibrationPilotResultTempStream -CommandType Function -ErrorAction Stop).ScriptBlock
+    $originalBytes = $null
+    try {
+        $context = New-CalibrationPilotRun -ResultsRoot $caseData.results_root -RunId 'ledger-security-013' -Plan $caseData.plan
+        $originalBytes = [IO.File]::ReadAllBytes($context.result_path)
+        $originalHash = (Get-FileHash -LiteralPath $context.result_path -Algorithm SHA256).Hash
+        $replacement = $context.result | ConvertTo-Json -Depth 100 | ConvertFrom-Json -Depth 100
+        $replacement.run_state = 'preflight_passed'
+        $tempPath = Join-Path $context.run_root ('.result-{0}.tmp' -f [guid]::NewGuid().ToString('N'))
+        Set-Item -Path Function:\Close-CalibrationPilotResultTempStream -Value { throw 'forced raw temp disposal failure' }
+        $null = Assert-Throws {
+            Write-CalibrationAtomicResultJson -Path $context.result_path -Value $replacement `
+                -AllowedRunRoot $context.run_root -TemporaryPath $tempPath
+        } 'pilot_result_temp_persistence_indeterminate'
+        Assert-False (Test-Path -LiteralPath $tempPath) 'Owned result temp survived disposal failure.'
+        Assert-Equal (Get-FileHash -LiteralPath $context.result_path -Algorithm SHA256).Hash $originalHash
+    } finally {
+        Set-Item -Path Function:\Close-CalibrationPilotResultTempStream -Value $originalHook
+        if ($null -ne $context -and $null -ne $originalBytes) { [IO.File]::WriteAllBytes($context.result_path, $originalBytes) }
+        if ($null -ne $context) { Close-CalibrationPilotRun -Context $context }
+        Remove-SecurityPilotLedgerRoot -Path $caseData.results_root
+    }
+}
+
 Invoke-Assertion 'pilot run accepts the calibration results boundary as its explicit root' {
     $plan = Invoke-Calibration -Pilot -CalibrationSetPath $setPath -RubricsRoot $rubricsRoot
     $runId = 'ledger-default-{0}' -f [guid]::NewGuid().ToString('N')
@@ -501,16 +568,18 @@ Invoke-Assertion 'pilot claim persists before an indeterminate result update and
 Invoke-Assertion 'post-claim validation drift is classified as persistence indeterminate' {
     $caseData = New-SecurityPilotLedgerInput
     $context = $null
+    $originalHook = (Get-Command -Name Invoke-CalibrationPilotAfterSlotClaimHook -CommandType Function -ErrorAction Stop).ScriptBlock
     try {
         $context = New-CalibrationPilotRun -ResultsRoot $caseData.results_root -RunId 'ledger-security-009' -Plan $caseData.plan
         Set-CalibrationPilotRunState -Context $context -State 'preflight_passed'
         Set-CalibrationPilotRunState -Context $context -State 'running'
         $resultHash = (Get-FileHash -LiteralPath $context.result_path -Algorithm SHA256).Hash
+        Set-Item -Path Function:\Invoke-CalibrationPilotAfterSlotClaimHook -Value {
+            param([object]$Context, [int]$Ordinal)
+            $context.result.stop_reason = 'forced post-claim context drift'
+        }
         $null = Assert-Throws {
-            New-CalibrationPilotSlotClaim -Context $context -Ordinal 1 -Identity $caseData.plan.roles[0] `
-                -AfterSlotClaim {
-                    $context.result.stop_reason = 'forced post-claim context drift'
-                } | Out-Null
+            New-CalibrationPilotSlotClaim -Context $context -Ordinal 1 -Identity $caseData.plan.roles[0] | Out-Null
         } 'pilot_claim_persistence_indeterminate'
         $claimPath = Join-Path $context.claims_path '01-google-candidate.claim'
         Assert-True (Test-Path -LiteralPath $claimPath -PathType Leaf) 'Post-claim validation failure refunded the claim.'
@@ -522,6 +591,7 @@ Invoke-Assertion 'post-claim validation drift is classified as persistence indet
         $null = Assert-Throws { Get-CalibrationPilotClaimCount -Context $context | Out-Null } 'pilot_claim_counter_mismatch'
         Assert-True (Test-Path -LiteralPath $claimPath -PathType Leaf) 'Counter mismatch handling refunded the immutable claim.'
     } finally {
+        Set-Item -Path Function:\Invoke-CalibrationPilotAfterSlotClaimHook -Value $originalHook
         if ($null -ne $context) { Close-CalibrationPilotRun -Context $context }
         Remove-SecurityPilotLedgerRoot -Path $caseData.results_root
     }
@@ -530,15 +600,18 @@ Invoke-Assertion 'post-claim validation drift is classified as persistence indet
 Invoke-Assertion 'claim write failure after create-new is persistence indeterminate and non-refundable' {
     $caseData = New-SecurityPilotLedgerInput
     $context = $null
+    $originalHook = (Get-Command -Name Invoke-CalibrationPilotAfterSlotClaimCreateHook -CommandType Function -ErrorAction Stop).ScriptBlock
     try {
         $context = New-CalibrationPilotRun -ResultsRoot $caseData.results_root -RunId 'ledger-security-011' -Plan $caseData.plan
         Set-CalibrationPilotRunState -Context $context -State 'preflight_passed'
         Set-CalibrationPilotRunState -Context $context -State 'running'
         $resultHash = (Get-FileHash -LiteralPath $context.result_path -Algorithm SHA256).Hash
         $claimPath = Join-Path $context.claims_path '01-google-candidate.claim'
+        Set-Item -Path Function:\Invoke-CalibrationPilotAfterSlotClaimCreateHook -Value {
+            throw 'forced raw claim writer failure'
+        }
         $null = Assert-Throws {
-            New-CalibrationPilotSlotClaim -Context $context -Ordinal 1 -Identity $caseData.plan.roles[0] `
-                -AfterSlotClaimCreate { throw 'forced raw claim writer failure' } | Out-Null
+            New-CalibrationPilotSlotClaim -Context $context -Ordinal 1 -Identity $caseData.plan.roles[0] | Out-Null
         } 'pilot_claim_persistence_indeterminate'
 
         Assert-True (Test-Path -LiteralPath $claimPath -PathType Leaf) 'Created claim was refunded after its writer failed.'
@@ -567,6 +640,7 @@ Invoke-Assertion 'claim write failure after create-new is persistence indetermin
             'result.json'
         )
     } finally {
+        Set-Item -Path Function:\Invoke-CalibrationPilotAfterSlotClaimCreateHook -Value $originalHook
         if ($null -ne $context) { Close-CalibrationPilotRun -Context $context }
         Remove-SecurityPilotLedgerRoot -Path $caseData.results_root
     }
@@ -590,10 +664,12 @@ Invoke-Assertion 'close serializes with reservation and is idempotent after rele
         $null = $reservationPowerShell.AddScript({
             param($ImplementationPath, $RunContext, $Identity, $EnteredEvent, $ReleaseEvent)
             . $ImplementationPath
-            New-CalibrationPilotSlotClaim -Context $RunContext -Ordinal 1 -Identity $Identity -BeforeSlotClaim {
+            function Invoke-CalibrationPilotBeforeSlotClaimHook {
+                param([object]$Context, [int]$Ordinal)
                 $null = $EnteredEvent.Set()
                 if (-not $ReleaseEvent.WaitOne(10000)) { throw 'test_reservation_gate_timeout' }
             }
+            New-CalibrationPilotSlotClaim -Context $RunContext -Ordinal 1 -Identity $Identity
         }).AddArgument($implementationPath).AddArgument($context).AddArgument($caseData.plan.roles[0]).AddArgument($entered).AddArgument($release)
         $reservationAsync = $reservationPowerShell.BeginInvoke()
         Assert-True $entered.WaitOne(10000) 'Reservation did not reach the coordinated pre-claim gate.'
