@@ -355,9 +355,12 @@ function Invoke-SecurityPilotFailureCase {
         [scriptblock]$ArtifactWriter,
         [scriptblock]$EnvelopeMutation,
         [scriptblock]$GraderMutation,
-        [scriptblock]$WrapperMutation
+        [scriptblock]$WrapperMutation,
+        [switch]$SwallowGuardFailure,
+        [scriptblock]$GuardFailureMutation
     )
     $input = New-SecurityPilotLedgerInput
+    $resultsRootForGuardMutation = [string]$input.results_root
     $calls = [Collections.Generic.List[string]]::new()
     $candidate = {
         param($Candidate, $Prompt, $LaunchGuard, $RunId)
@@ -365,7 +368,14 @@ function Invoke-SecurityPilotFailureCase {
         if ($FailureRole -ceq 'candidate' -and $FailureMode -ceq 'preclaim_throw') {
             throw (@($Sentinels) -join '|')
         }
-        & $LaunchGuard $Candidate (New-SecurityPilotCommand -Candidate $Candidate -Prompt $Prompt)
+        try {
+            & $LaunchGuard $Candidate (New-SecurityPilotCommand -Candidate $Candidate -Prompt $Prompt)
+        } catch {
+            if (-not $SwallowGuardFailure) { throw }
+            if ($null -ne $GuardFailureMutation) { & $GuardFailureMutation $resultsRootForGuardMutation $RunId 1 }
+            return New-SecurityPilotExecution -Candidate $Candidate -RunId $RunId -Answer $null `
+                -FailureCode 'process_start_failed' -ProcessStarted:$false -Sentinels $Sentinels
+        }
         if ($FailureRole -ceq 'candidate' -and $FailureMode -ceq 'postclaim_throw') {
             throw (@($Sentinels) -join '|')
         }
@@ -381,7 +391,19 @@ function Invoke-SecurityPilotFailureCase {
         $role = if ($JudgeProfileId -ceq 'gpt-5.6-sol__max') { 'judge_1' } else { 'judge_2' }
         $calls.Add($role)
         $resolved = Get-CalibrationProfileAndCandidate -ConfigurationId $JudgeProfileId
-        & $LaunchGuard $resolved.candidate (New-SecurityPilotCommand -Candidate $resolved.candidate -Prompt 'safe judge payload')
+        try {
+            & $LaunchGuard $resolved.candidate (New-SecurityPilotCommand -Candidate $resolved.candidate -Prompt 'safe judge payload')
+        } catch {
+            if (-not $SwallowGuardFailure) { throw }
+            $ordinal = if ($role -ceq 'judge_1') { 2 } else { 3 }
+            if ($null -ne $GuardFailureMutation) { & $GuardFailureMutation $resultsRootForGuardMutation $RunId $ordinal }
+            return [pscustomobject]@{
+                pilot_execution = New-SecurityPilotExecution -Candidate $resolved.candidate -RunId $RunId `
+                    -Answer $null -FailureCode 'process_start_failed' -ProcessStarted:$false -Sentinels $Sentinels
+                decision = $null
+                stop_code = $null
+            }
+        }
         if ($FailureRole -ceq $role) {
             $execution = New-SecurityPilotExecution -Candidate $resolved.candidate -RunId $RunId `
                 -Answer '{"decision":"pass","rationale":"bounded safe evidence"}' `
@@ -426,6 +448,7 @@ function Invoke-SecurityPilotFailureCase {
         $result = Invoke-Calibration @parameters
         return [pscustomobject]@{ input = $input; result = $result; calls = @($calls) }
     } catch {
+        $_.Exception.Data['pilot_test_calls'] = @($calls)
         Remove-SecurityPilotLedgerRoot -Path $input.results_root
         throw
     }
@@ -452,6 +475,10 @@ function Test-SecurityPilotLedgerFaultStage {
     switch ($Stage) {
         'slot_reservation' {
             return $Value.run_state -ceq 'running' -and $Value.attempts[0].state -ceq 'slot_reserved'
+        }
+        'judge_slot_reservation' {
+            return $Value.run_state -ceq 'running' -and $Value.attempts[0].state -ceq 'succeeded' -and
+                $Value.attempts[1].state -ceq 'slot_reserved'
         }
         'process_start_record' {
             return $Value.run_state -ceq 'running' -and $Value.attempts[0].state -ceq 'process_started'
@@ -1364,6 +1391,106 @@ Invoke-Assertion 'every post-launch ledger transition recovers one-shot persiste
         }
     }
     Assert-Equal (Get-Command -Name Write-CalibrationAtomicResultJson -CommandType Function -ErrorAction Stop).ScriptBlock.ToString() $originalWriterText
+}
+
+Invoke-Assertion 'swallowed launch-guard persistence failures recover exact candidate and judge claims' {
+    $cases = @(
+        [pscustomobject]@{ stage = 'slot_reservation'; calls = @('candidate'); claims = 1; starts = 0; states = @('failed', 'skipped', 'skipped') },
+        [pscustomobject]@{ stage = 'judge_slot_reservation'; calls = @('candidate', 'judge_1'); claims = 2; starts = 1; states = @('succeeded', 'failed', 'skipped') }
+    )
+    $originalWriterText = (Get-Command -Name Write-CalibrationAtomicResultJson -CommandType Function -ErrorAction Stop).ScriptBlock.ToString()
+    $immutableWriter = [scriptblock]::Create($originalWriterText)
+    foreach ($case in $cases) {
+        $fault = [pscustomobject]@{ armed = $true; injected = 0 }
+        Set-Item -Path Function:\Write-CalibrationAtomicResultJson -Value {
+            param($Path, $Value, $AllowedRunRoot, $TemporaryPath)
+            if ($fault.armed -and (Test-SecurityPilotLedgerFaultStage -Stage $case.stage -Value $Value)) {
+                $fault.armed = $false
+                $fault.injected++
+                throw 'SWALLOWED_GUARD_RESULT_WRITE_SENTINEL'
+            }
+            & $immutableWriter -Path $Path -Value $Value -AllowedRunRoot $AllowedRunRoot -TemporaryPath $TemporaryPath
+        }.GetNewClosure()
+        $execution = $null
+        try {
+            $execution = Invoke-SecurityPilotFailureCase -FailureRole candidate -FailureCode '' -SwallowGuardFailure
+            Assert-Equal $fault.injected 1
+            Assert-SequenceEqual @($execution.calls) @($case.calls)
+            Assert-Equal $execution.result.run_state 'indeterminate'
+            Assert-Equal $execution.result.stop_reason 'artifact_persistence_failed'
+            Assert-Equal $execution.result.slots_consumed.total $case.claims
+            Assert-Equal $execution.result.launcher_processes_started.total $case.starts
+            Assert-SequenceEqual @($execution.result.attempts.state) @($case.states)
+            $runRoot = Join-Path $execution.input.results_root 'option1-live-20260825-001'
+            Assert-Equal @(Get-ChildItem -LiteralPath (Join-Path $runRoot 'claims') -File -Force).Count $case.claims
+            $persisted = Get-Content -Raw -LiteralPath (Join-Path $runRoot 'result.json') | ConvertFrom-Json -Depth 100
+            Assert-Equal $persisted.run_state 'indeterminate'
+            Assert-Equal $persisted.slots_consumed.total $case.claims
+            Assert-Equal $persisted.launcher_processes_started.total $case.starts
+            Assert-SequenceEqual @($persisted.attempts.state) @($case.states)
+            $resumeCalls = [pscustomobject]@{ count = 0 }
+            $resumeSpy = { $resumeCalls.count++; throw 'resume reached invoker' }.GetNewClosure()
+            $null = Assert-Throws {
+                Invoke-Calibration -Pilot -Run -RunId 'option1-live-20260825-001' `
+                    -ResultsRoot $execution.input.results_root -CalibrationSetPath $setPath -RubricsRoot $rubricsRoot `
+                    -CandidateInvoker $resumeSpy -JudgeInvoker $resumeSpy `
+                    -PilotGitInvoker { [pscustomobject]@{ clean = $true; commit = ('d' * 40) } } | Out-Null
+            } 'pilot_run_collision'
+            Assert-Equal $resumeCalls.count 0
+        } finally {
+            Set-Item -Path Function:\Write-CalibrationAtomicResultJson -Value $immutableWriter
+            if ($null -ne $execution) { Remove-SecurityPilotLedgerRoot -Path $execution.input.results_root }
+        }
+    }
+}
+
+Invoke-Assertion 'swallowed launch-guard recovery rejects malformed mismatched and extra claim artifacts without later calls' {
+    $cases = @(
+        [pscustomobject]@{ mutation = 'malformed'; stage = 'slot_reservation'; calls = @('candidate') },
+        [pscustomobject]@{ mutation = 'extra'; stage = 'slot_reservation'; calls = @('candidate') },
+        [pscustomobject]@{ mutation = 'missing_prior'; stage = 'judge_slot_reservation'; calls = @('candidate', 'judge_1') }
+    )
+    foreach ($case in $cases) {
+        $originalWriterText = (Get-Command -Name Write-CalibrationAtomicResultJson -CommandType Function -ErrorAction Stop).ScriptBlock.ToString()
+        $immutableWriter = [scriptblock]::Create($originalWriterText)
+        $fault = [pscustomobject]@{ armed = $true }
+        Set-Item -Path Function:\Write-CalibrationAtomicResultJson -Value {
+            param($Path, $Value, $AllowedRunRoot, $TemporaryPath)
+            if ($fault.armed -and (Test-SecurityPilotLedgerFaultStage -Stage $case.stage -Value $Value)) {
+                $fault.armed = $false
+                throw 'SWALLOWED_GUARD_RESULT_WRITE_SENTINEL'
+            }
+            & $immutableWriter -Path $Path -Value $Value -AllowedRunRoot $AllowedRunRoot -TemporaryPath $TemporaryPath
+        }.GetNewClosure()
+        $execution = $null
+        try {
+            $guardMutation = {
+                param($ResultsRoot, $RunId, $Ordinal)
+                $claims = Join-Path (Join-Path $ResultsRoot $RunId) 'claims'
+                if ($case.mutation -ceq 'malformed') {
+                    Set-Content -LiteralPath (Join-Path $claims '01-google-candidate.claim') -Value '{}' -Encoding utf8NoBOM
+                } elseif ($case.mutation -ceq 'extra') {
+                    Set-Content -LiteralPath (Join-Path $claims 'unexpected.claim') -Value '{}' -Encoding utf8NoBOM
+                } else {
+                    Remove-Item -LiteralPath (Join-Path $claims '01-google-candidate.claim') -Force
+                }
+            }.GetNewClosure()
+            $thrown = Assert-Throws {
+                $execution = Invoke-SecurityPilotFailureCase -FailureRole candidate -FailureCode '' `
+                    -SwallowGuardFailure -GuardFailureMutation $guardMutation
+            } $null
+            Assert-True $thrown.Message.Contains('pilot_claim_artifact_invalid', [StringComparison]::Ordinal) `
+                "$($case.mutation) recovery returned '$($thrown.Message)'."
+            Assert-False $thrown.Message.Contains('pilot_claim_counter_mismatch', [StringComparison]::Ordinal)
+            Assert-SequenceEqual @($thrown.Data['pilot_test_calls']) @($case.calls)
+        } finally {
+            Set-Item -Path Function:\Write-CalibrationAtomicResultJson -Value $immutableWriter
+            $root = Join-Path $resultsRoot 'option1-live-20260825-001'
+            foreach ($owned in @(Get-ChildItem -LiteralPath $resultsRoot -Directory -Filter 'pilot-ledger-security-*' -ErrorAction SilentlyContinue)) {
+                Remove-SecurityPilotLedgerRoot -Path $owned.FullName
+            }
+        }
+    }
 }
 
 Invoke-Assertion 'option 1 failure artifacts exclude unsafe fields and do not mutate sources or routing traces' {

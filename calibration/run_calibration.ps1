@@ -2524,6 +2524,42 @@ function Complete-CalibrationPilotClaimPersistenceFailure {
     } finally { [Threading.Monitor]::Exit($syncRoot) }
 }
 
+function Complete-CalibrationPilotPendingDurableClaim {
+    param(
+        [Parameter(Mandatory)][object]$Context,
+        [Parameter(Mandatory)][ValidateRange(1, 3)][int]$Ordinal
+    )
+    $syncRoot = Get-CalibrationPilotSyncRoot -Context $Context
+    [Threading.Monitor]::Enter($syncRoot)
+    try {
+        $counts = Get-CalibrationPilotClaimCount -Context $Context -SkipResultCounterCheck
+        $index = $Ordinal - 1
+        for ($prior = 0; $prior -lt $index; $prior++) {
+            $priorPath = Join-Path $Context.claims_path $script:PilotClaimFileNames[$prior]
+            if (-not (Test-Path -LiteralPath $priorPath -PathType Leaf)) { throw 'pilot_claim_artifact_invalid' }
+        }
+        for ($later = $index + 1; $later -lt $script:PilotClaimFileNames.Count; $later++) {
+            $laterPath = Join-Path $Context.claims_path $script:PilotClaimFileNames[$later]
+            if (Test-Path -LiteralPath $laterPath) { throw 'pilot_claim_artifact_invalid' }
+        }
+        $claimPath = Join-Path $Context.claims_path $script:PilotClaimFileNames[$index]
+        if (-not (Test-Path -LiteralPath $claimPath -PathType Leaf)) {
+            if ([int64]$counts.total -ne ($Ordinal - 1)) { throw 'pilot_claim_artifact_invalid' }
+            return $null
+        }
+        if ([int64]$counts.total -ne $Ordinal) { throw 'pilot_claim_artifact_invalid' }
+        try {
+            return Complete-CalibrationPilotClaimPersistenceFailure -Context $Context -Ordinal $Ordinal
+        } catch {
+            if ($_.Exception.Message -ceq 'pilot_claim_counter_mismatch' -or
+                $_.Exception.Message -ceq 'pilot_claim_recovery_count_invalid') {
+                throw 'pilot_claim_artifact_invalid'
+            }
+            throw
+        }
+    } finally { [Threading.Monitor]::Exit($syncRoot) }
+}
+
 function New-CalibrationPilotSlotClaim {
     [CmdletBinding()]
     param(
@@ -2841,6 +2877,8 @@ function Invoke-CalibrationPilotRun {
                 -Indeterminate:$candidateStartUncertain
         }
         if ($context.result.attempts[0].state -cne 'slot_reserved') {
+            $recovered = Complete-CalibrationPilotPendingDurableClaim -Context $context -Ordinal 1
+            if ($null -ne $recovered) { return $recovered }
             return Complete-CalibrationPilotFailure -Context $context -Ordinal 1 -StopCode 'budget_invariant_failed'
         }
         $candidateEnvelope = Test-CalibrationPilotExecutionEnvelope -Execution $candidateExecution
@@ -2927,6 +2965,8 @@ function Invoke-CalibrationPilotRun {
                     -Indeterminate:$judgeStartUncertain
             }
             if ($context.result.attempts[$index].state -cne 'slot_reserved') {
+                $recovered = Complete-CalibrationPilotPendingDurableClaim -Context $context -Ordinal ($index + 1)
+                if ($null -ne $recovered) { return $recovered }
                 return Complete-CalibrationPilotFailure -Context $context -Ordinal ($index + 1) `
                     -StopCode 'budget_invariant_failed'
             }
