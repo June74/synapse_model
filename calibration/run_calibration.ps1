@@ -2476,10 +2476,12 @@ function Complete-CalibrationPilotClaimPersistenceFailure {
     [Threading.Monitor]::Enter($syncRoot)
     try {
         Assert-CalibrationPilotContext -Context $Context
-        Assert-CalibrationPilotResultContract -Context $Context -Result $Context.result -SkipClaimCounterCheck
+        Assert-CalibrationPilotResultContract -Context $Context -Result $Context.result `
+            -SkipClaimCounterCheck -SkipPersistedResultMatch
         if ($Context.result.run_state -cne 'running') { throw 'pilot_claim_recovery_run_not_running' }
         $index = $Ordinal - 1
         if ($Context.result.attempts[$index].state -cne 'planned') { throw 'pilot_claim_recovery_attempt_invalid' }
+        $preReservation = Copy-CalibrationJsonValue $Context.result
         $counts = Get-CalibrationPilotClaimCount -Context $Context -SkipResultCounterCheck
         if ([int64]$counts.total -ne $Ordinal) { throw 'pilot_claim_recovery_count_invalid' }
         for ($prior = 0; $prior -lt $index; $prior++) {
@@ -2501,14 +2503,41 @@ function Complete-CalibrationPilotClaimPersistenceFailure {
             if ($claim.$name -isnot [string] -or $claim.$name -cne $role.$name) { throw 'pilot_claim_artifact_invalid' }
         }
 
+        $postReservation = Copy-CalibrationJsonValue $preReservation
+        $postReservation.attempts[$index].state = 'slot_reserved'
+        $postReservation.attempts[$index].slot_claimed_at = [string]$claim.claimed_at
+        $postReservation.slots_consumed.total = [int64]$postReservation.slots_consumed.total + 1
+        $postReservation.slots_consumed.provider_family.([string]$role.family) =
+            [int64]$postReservation.slots_consumed.provider_family.([string]$role.family) + 1
+        Assert-CalibrationPilotResultContract -Context $Context -Result $postReservation `
+            -SkipPersistedResultMatch
+
+        try {
+            Assert-CalibrationNoReparseComponents -Path $Context.result_path
+            $persistedResult = Get-Content -Raw -LiteralPath $Context.result_path -ErrorAction Stop |
+                ConvertFrom-Json -Depth 100 -DateKind String -ErrorAction Stop
+            Assert-CalibrationPilotResultContract -Context $Context -Result $persistedResult `
+                -SkipClaimCounterCheck -SkipPersistedResultMatch
+            $persistedHash = Get-CalibrationObjectSha256 -Value (ConvertTo-CalibrationPilotComparableResult $persistedResult)
+            $preReservationHash = Get-CalibrationObjectSha256 -Value (ConvertTo-CalibrationPilotComparableResult $preReservation)
+            $postReservationHash = Get-CalibrationObjectSha256 -Value (ConvertTo-CalibrationPilotComparableResult $postReservation)
+            if ($persistedHash -cne $preReservationHash -and $persistedHash -cne $postReservationHash) {
+                throw 'pilot_claim_artifact_invalid'
+            }
+        } catch { throw 'pilot_claim_artifact_invalid' }
+
+        $reservationAlreadyPersisted = $persistedHash -ceq $postReservationHash
+        $Context.result = Copy-CalibrationJsonValue $persistedResult
         $next = Copy-CalibrationJsonValue $Context.result
         $now = [DateTimeOffset]::UtcNow.ToString('o')
         $next.attempts[$index].state = 'failed'
-        $next.attempts[$index].slot_claimed_at = [string]$claim.claimed_at
+        if (-not $reservationAlreadyPersisted) {
+            $next.attempts[$index].slot_claimed_at = [string]$claim.claimed_at
+            $next.slots_consumed.total = [int64]$next.slots_consumed.total + 1
+            $next.slots_consumed.provider_family.([string]$role.family) =
+                [int64]$next.slots_consumed.provider_family.([string]$role.family) + 1
+        }
         $next.attempts[$index].completed_at = $now
-        $next.slots_consumed.total = [int64]$next.slots_consumed.total + 1
-        $next.slots_consumed.provider_family.([string]$role.family) =
-            [int64]$next.slots_consumed.provider_family.([string]$role.family) + 1
         for ($later = $index + 1; $later -lt 3; $later++) {
             if ($next.attempts[$later].state -cne 'planned') { throw 'pilot_claim_recovery_later_attempt_invalid' }
             $next.attempts[$later].state = 'skipped'
