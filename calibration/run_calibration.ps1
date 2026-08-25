@@ -1168,6 +1168,20 @@ function Write-CalibrationCreateNewJson {
     }
 }
 
+function Remove-CalibrationOwnedResultTemp {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$AllowedRunRoot
+    )
+    Assert-CalibrationWriteBoundary -Path $Path -AllowedRunRoot $AllowedRunRoot
+    if (-not (Test-Path -LiteralPath $Path)) { return }
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+    if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw 'pilot_result_temp_cleanup_reparse'
+    }
+    Remove-Item -LiteralPath $Path -Force -ErrorAction Stop
+}
+
 function Write-CalibrationAtomicResultJson {
     [CmdletBinding()]
     param(
@@ -1211,18 +1225,33 @@ function Write-CalibrationAtomicResultJson {
         Assert-CalibrationWriteBoundary -Path $fullPath -AllowedRunRoot $fullRunRoot
         Assert-CalibrationWriteBoundary -Path $tempPath -AllowedRunRoot $fullRunRoot
     } catch {
+        $operationFailure = $_
         if ($null -ne $stream) { $stream.Dispose(); $stream = $null }
-        if ($ownsTemp -and (Test-Path -LiteralPath $tempPath -PathType Leaf)) {
-            Remove-Item -LiteralPath $tempPath -Force -ErrorAction SilentlyContinue
+        if ($ownsTemp) {
+            try {
+                Remove-CalibrationOwnedResultTemp -Path $tempPath -AllowedRunRoot $fullRunRoot
+                $ownsTemp = $false
+            } catch { throw 'pilot_result_temp_cleanup_indeterminate' }
         }
-        throw
+        throw $operationFailure
     }
+    $replaceFailed = $false
+    $cleanupFailed = $false
     try {
         [IO.File]::Move($tempPath, $fullPath, $true)
         $ownsTemp = $false
     } catch {
-        throw 'pilot_result_replace_indeterminate'
+        $replaceFailed = $true
+    } finally {
+        if ($replaceFailed -and $ownsTemp) {
+            try {
+                Remove-CalibrationOwnedResultTemp -Path $tempPath -AllowedRunRoot $fullRunRoot
+                $ownsTemp = $false
+            } catch { $cleanupFailed = $true }
+        }
     }
+    if ($cleanupFailed) { throw 'pilot_result_temp_cleanup_indeterminate' }
+    if ($replaceFailed) { throw 'pilot_result_replace_indeterminate' }
 }
 
 function New-CalibrationPilotInitialResult {
@@ -1310,6 +1339,15 @@ function Assert-CalibrationPilotContext {
         if ((Get-CalibrationObjectSha256 -Value $persistedPlan) -cne
             (Get-CalibrationObjectSha256 -Value $Context.plan)) { throw 'pilot_run_context_invalid' }
     } catch { throw 'pilot_run_context_invalid' }
+}
+
+function Get-CalibrationPilotSyncRoot {
+    param([AllowNull()][object]$Context)
+    if ($null -eq $Context -or -not (Test-CalibrationProperty $Context 'sync_root') -or
+        $null -eq $Context.sync_root -or $Context.sync_root.GetType() -ne [object]) {
+        throw 'pilot_run_context_invalid'
+    }
+    return $Context.sync_root
 }
 
 function Assert-CalibrationPilotResultContract {
@@ -1524,11 +1562,15 @@ function New-CalibrationPilotRun {
 function Close-CalibrationPilotRun {
     [CmdletBinding()]
     param([Parameter(Mandatory)][object]$Context)
-    if ($null -ne $Context.claim_stream) {
-        $Context.claim_stream.Dispose()
+    $syncRoot = Get-CalibrationPilotSyncRoot -Context $Context
+    [Threading.Monitor]::Enter($syncRoot)
+    try {
+        if ($Context.is_closed -eq $true) { return }
+        Assert-CalibrationPilotContext -Context $Context
+        try { $Context.claim_stream.Dispose() } catch { throw 'pilot_run_close_failed' }
         $Context.claim_stream = $null
-    }
-    $Context.is_closed = $true
+        $Context.is_closed = $true
+    } finally { [Threading.Monitor]::Exit($syncRoot) }
 }
 
 function Get-CalibrationPilotClaimCount {
@@ -1537,46 +1579,50 @@ function Get-CalibrationPilotClaimCount {
         [Parameter(Mandatory)][object]$Context,
         [AllowNull()][object]$Result
     )
-    Assert-CalibrationPilotContext -Context $Context
-    Assert-CalibrationNoReparseComponents -Path $Context.claims_path
-    $counts = [pscustomobject][ordered]@{
-        total = 0
-        provider_family = [pscustomobject][ordered]@{ google = 0; openai = 0; anthropic = 0 }
-    }
-    $items = @(Get-ChildItem -LiteralPath $Context.claims_path -Force -ErrorAction Stop)
-    foreach ($item in $items) {
-        if ($item.PSIsContainer -or $script:PilotClaimFileNames -cnotcontains $item.Name -or
-            ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'pilot_claim_artifact_invalid' }
-    }
-    for ($index = 0; $index -lt 3; $index++) {
-        $path = Join-Path $Context.claims_path $script:PilotClaimFileNames[$index]
-        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { continue }
-        try { $claim = Get-Content -Raw -LiteralPath $path -ErrorAction Stop | ConvertFrom-Json -Depth 30 -DateKind String -ErrorAction Stop }
-        catch { throw 'pilot_claim_artifact_invalid' }
-        Assert-CalibrationExactProperties -Value $claim -Names @(
-            'run_id', 'ordinal', 'role', 'family', 'launcher', 'route_id', 'configuration_id', 'model', 'effort', 'claimed_at'
-        ) -ErrorCode 'pilot_claim_artifact_invalid'
-        $role = $Context.plan.roles[$index]
-        if ($claim.run_id -isnot [string] -or $claim.run_id -cne $Context.run_id -or
-            -not (Test-CalibrationPilotOrdinal $claim.ordinal ($index + 1)) -or
-            -not (Test-CalibrationPilotTimestamp $claim.claimed_at)) {
-            throw 'pilot_claim_artifact_invalid'
+    $syncRoot = Get-CalibrationPilotSyncRoot -Context $Context
+    [Threading.Monitor]::Enter($syncRoot)
+    try {
+        Assert-CalibrationPilotContext -Context $Context
+        Assert-CalibrationNoReparseComponents -Path $Context.claims_path
+        $counts = [pscustomobject][ordered]@{
+            total = 0
+            provider_family = [pscustomobject][ordered]@{ google = 0; openai = 0; anthropic = 0 }
         }
-        foreach ($name in @('role', 'family', 'launcher', 'route_id', 'configuration_id', 'model', 'effort')) {
-            if ($claim.$name -isnot [string] -or $claim.$name -cne $role.$name) { throw 'pilot_claim_artifact_invalid' }
+        $items = @(Get-ChildItem -LiteralPath $Context.claims_path -Force -ErrorAction Stop)
+        foreach ($item in $items) {
+            if ($item.PSIsContainer -or $script:PilotClaimFileNames -cnotcontains $item.Name -or
+                ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'pilot_claim_artifact_invalid' }
         }
-        $counts.total++
-        $counts.provider_family.($role.family)++
-    }
-    $resultToVerify = if ($null -ne $Result) { $Result } else { $Context.result }
-    if ($null -ne $resultToVerify -and
-        ([int64]$resultToVerify.slots_consumed.total -ne $counts.total -or
-        [int64]$resultToVerify.slots_consumed.provider_family.google -ne $counts.provider_family.google -or
-        [int64]$resultToVerify.slots_consumed.provider_family.openai -ne $counts.provider_family.openai -or
-        [int64]$resultToVerify.slots_consumed.provider_family.anthropic -ne $counts.provider_family.anthropic)) {
-        throw 'pilot_claim_counter_mismatch'
-    }
-    return $counts
+        for ($index = 0; $index -lt 3; $index++) {
+            $path = Join-Path $Context.claims_path $script:PilotClaimFileNames[$index]
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { continue }
+            try { $claim = Get-Content -Raw -LiteralPath $path -ErrorAction Stop | ConvertFrom-Json -Depth 30 -DateKind String -ErrorAction Stop }
+            catch { throw 'pilot_claim_artifact_invalid' }
+            Assert-CalibrationExactProperties -Value $claim -Names @(
+                'run_id', 'ordinal', 'role', 'family', 'launcher', 'route_id', 'configuration_id', 'model', 'effort', 'claimed_at'
+            ) -ErrorCode 'pilot_claim_artifact_invalid'
+            $role = $Context.plan.roles[$index]
+            if ($claim.run_id -isnot [string] -or $claim.run_id -cne $Context.run_id -or
+                -not (Test-CalibrationPilotOrdinal $claim.ordinal ($index + 1)) -or
+                -not (Test-CalibrationPilotTimestamp $claim.claimed_at)) {
+                throw 'pilot_claim_artifact_invalid'
+            }
+            foreach ($name in @('role', 'family', 'launcher', 'route_id', 'configuration_id', 'model', 'effort')) {
+                if ($claim.$name -isnot [string] -or $claim.$name -cne $role.$name) { throw 'pilot_claim_artifact_invalid' }
+            }
+            $counts.total++
+            $counts.provider_family.($role.family)++
+        }
+        $resultToVerify = if ($null -ne $Result) { $Result } else { $Context.result }
+        if ($null -ne $resultToVerify -and
+            ([int64]$resultToVerify.slots_consumed.total -ne $counts.total -or
+            [int64]$resultToVerify.slots_consumed.provider_family.google -ne $counts.provider_family.google -or
+            [int64]$resultToVerify.slots_consumed.provider_family.openai -ne $counts.provider_family.openai -or
+            [int64]$resultToVerify.slots_consumed.provider_family.anthropic -ne $counts.provider_family.anthropic)) {
+            throw 'pilot_claim_counter_mismatch'
+        }
+        return $counts
+    } finally { [Threading.Monitor]::Exit($syncRoot) }
 }
 
 function Set-CalibrationPilotRunState {
@@ -1585,9 +1631,10 @@ function Set-CalibrationPilotRunState {
         [Parameter(Mandatory)][object]$Context,
         [Parameter(Mandatory)][string]$State
     )
-    Assert-CalibrationPilotContext -Context $Context
-    [Threading.Monitor]::Enter($Context.sync_root)
+    $syncRoot = Get-CalibrationPilotSyncRoot -Context $Context
+    [Threading.Monitor]::Enter($syncRoot)
     try {
+        Assert-CalibrationPilotContext -Context $Context
         Assert-CalibrationPilotResultContract -Context $Context -Result $Context.result
         $current = [string]$Context.result.run_state
         if (-not $script:PilotRunTransitions.ContainsKey($current) -or
@@ -1609,7 +1656,7 @@ function Set-CalibrationPilotRunState {
         Assert-CalibrationPilotResultContract -Context $Context -Result $next -SkipPersistedResultMatch
         Write-CalibrationAtomicResultJson -Path $Context.result_path -Value $next -AllowedRunRoot $Context.run_root
         $Context.result = $next
-    } finally { [Threading.Monitor]::Exit($Context.sync_root) }
+    } finally { [Threading.Monitor]::Exit($syncRoot) }
 }
 
 function Set-CalibrationPilotAttemptState {
@@ -1619,13 +1666,14 @@ function Set-CalibrationPilotAttemptState {
         [Parameter(Mandatory)][object]$Ordinal,
         [Parameter(Mandatory)][string]$State
     )
-    Assert-CalibrationPilotContext -Context $Context
     if (-not ($Ordinal -is [byte] -or $Ordinal -is [int16] -or $Ordinal -is [int32] -or $Ordinal -is [int64]) -or
         [int64]$Ordinal -lt 1 -or [int64]$Ordinal -gt 3) {
         throw 'pilot_attempt_ordinal_invalid'
     }
-    [Threading.Monitor]::Enter($Context.sync_root)
+    $syncRoot = Get-CalibrationPilotSyncRoot -Context $Context
+    [Threading.Monitor]::Enter($syncRoot)
     try {
+        Assert-CalibrationPilotContext -Context $Context
         Assert-CalibrationPilotResultContract -Context $Context -Result $Context.result
         if ($Context.result.run_state -cin @('completed', 'stopped', 'indeterminate')) {
             throw 'pilot_attempt_run_terminal'
@@ -1654,7 +1702,7 @@ function Set-CalibrationPilotAttemptState {
         Assert-CalibrationPilotResultContract -Context $Context -Result $next -SkipPersistedResultMatch
         Write-CalibrationAtomicResultJson -Path $Context.result_path -Value $next -AllowedRunRoot $Context.run_root
         $Context.result = $next
-    } finally { [Threading.Monitor]::Exit($Context.sync_root) }
+    } finally { [Threading.Monitor]::Exit($syncRoot) }
 }
 
 function New-CalibrationPilotSlotClaim {
@@ -1662,13 +1710,16 @@ function New-CalibrationPilotSlotClaim {
     param(
         [Parameter(Mandatory)][object]$Context,
         [Parameter(Mandatory)][object]$Ordinal,
-        [Parameter(Mandatory)][object]$Identity
+        [Parameter(Mandatory)][object]$Identity,
+        [AllowNull()][scriptblock]$BeforeSlotClaim,
+        [AllowNull()][scriptblock]$AfterSlotClaim
     )
-    Assert-CalibrationPilotContext -Context $Context
     if (-not ($Ordinal -is [byte] -or $Ordinal -is [int16] -or $Ordinal -is [int32] -or $Ordinal -is [int64]) -or
         [int64]$Ordinal -lt 1 -or [int64]$Ordinal -gt 3) { throw 'pilot_slot_ordinal_invalid' }
-    [Threading.Monitor]::Enter($Context.sync_root)
+    $syncRoot = Get-CalibrationPilotSyncRoot -Context $Context
+    [Threading.Monitor]::Enter($syncRoot)
     try {
+        Assert-CalibrationPilotContext -Context $Context
         Assert-CalibrationPilotResultContract -Context $Context -Result $Context.result
         if ($Context.result.run_state -cne 'running') { throw 'pilot_slot_run_not_running' }
         $index = [int]$Ordinal - 1
@@ -1694,6 +1745,9 @@ function New-CalibrationPilotSlotClaim {
                 throw 'pilot_slot_previous_incomplete'
             }
         }
+        if ($null -ne $BeforeSlotClaim) { & $BeforeSlotClaim }
+        Assert-CalibrationPilotResultContract -Context $Context -Result $Context.result
+        if ($Context.result.run_state -cne 'running') { throw 'pilot_slot_run_not_running' }
         $claimedAt = [DateTimeOffset]::UtcNow.ToString('o')
         $claimValue = [pscustomobject][ordered]@{
             run_id = $Context.run_id
@@ -1709,21 +1763,23 @@ function New-CalibrationPilotSlotClaim {
         }
         $claimPath = Join-Path $Context.claims_path $script:PilotClaimFileNames[$index]
         Write-CalibrationCreateNewJson -Path $claimPath -Value $claimValue -AllowedRunRoot $Context.run_root
-        $next = Copy-CalibrationJsonValue $Context.result
-        $next.attempts[$index].state = 'slot_reserved'
-        $next.attempts[$index].slot_claimed_at = $claimedAt
-        $next.slots_consumed.total = [int64]$next.slots_consumed.total + 1
-        $next.slots_consumed.provider_family.($expected.family) = [int64]$next.slots_consumed.provider_family.($expected.family) + 1
-        Assert-CalibrationPilotResultContract -Context $Context -Result $next -SkipClaimCounterCheck -SkipPersistedResultMatch
         try {
+            if ($null -ne $AfterSlotClaim) { & $AfterSlotClaim }
+            Assert-CalibrationPilotResultContract -Context $Context -Result $Context.result -SkipClaimCounterCheck
+            $next = Copy-CalibrationJsonValue $Context.result
+            $next.attempts[$index].state = 'slot_reserved'
+            $next.attempts[$index].slot_claimed_at = $claimedAt
+            $next.slots_consumed.total = [int64]$next.slots_consumed.total + 1
+            $next.slots_consumed.provider_family.($expected.family) = [int64]$next.slots_consumed.provider_family.($expected.family) + 1
+            Assert-CalibrationPilotResultContract -Context $Context -Result $next -SkipClaimCounterCheck -SkipPersistedResultMatch
             Write-CalibrationAtomicResultJson -Path $Context.result_path -Value $next -AllowedRunRoot $Context.run_root
+            $Context.result = $next
+            $null = Get-CalibrationPilotClaimCount -Context $Context -Result $next
+            return [pscustomobject][ordered]@{ claim_path = $claimPath; ordinal = $expected.ordinal; family = [string]$expected.family }
         } catch {
             throw 'pilot_claim_persistence_indeterminate'
         }
-        $Context.result = $next
-        $null = Get-CalibrationPilotClaimCount -Context $Context -Result $next
-        return [pscustomobject][ordered]@{ claim_path = $claimPath; ordinal = $expected.ordinal; family = [string]$expected.family }
-    } finally { [Threading.Monitor]::Exit($Context.sync_root) }
+    } finally { [Threading.Monitor]::Exit($syncRoot) }
 }
 
 function New-CalibrationRunId {
