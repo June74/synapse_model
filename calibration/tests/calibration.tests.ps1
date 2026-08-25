@@ -166,12 +166,17 @@ function New-TestCalibrationPilotExecution {
     return [pscustomobject][ordered]@{
         run_id = $RunId
         candidate = $Candidate
-        process = [pscustomobject]@{ exit_code = 0; duration_ms = 1; timed_out = $false; cleanup_failed = $false; cleanup_status = 'not-needed'; process_exited = $true }
+        process = [pscustomobject]@{ exit_code = 0; duration_ms = 1; timed_out = $false; cleanup_failed = $false; cleanup_status = 'not_required'; process_exited = $true }
         canonical = [pscustomobject]@{ status = 'success'; answer = $Answer; error = $null }
         failure = $null
         diagnostic_note = 'completed'
         latency_ms = 1
-        usage = $null
+        usage = [pscustomobject][ordered]@{
+            actual_input_tokens = 12
+            visible_output_tokens = 4
+            reasoning_tokens = 0
+            complete = $true
+        }
         cli_reported_cost_usd = $null
         record = [pscustomobject]@{ diagnostic_note = 'completed' }
     }
@@ -716,6 +721,24 @@ if (Test-Path -LiteralPath $implementationPath -PathType Leaf) {
         }
     }
 
+    Invoke-Assertion 'pilot admission binds its exact ordered judges to the google calibration pair' {
+        $original = (Get-Command -Name Get-CalibrationJudgePair -CommandType Function -ErrorAction Stop).ScriptBlock
+        try {
+            Set-Item -Path Function:\Get-CalibrationJudgePair -Value {
+                param([string]$CandidateFamily)
+                if ($CandidateFamily -ceq 'google') { return @('claude-opus-5__max', 'gpt-5.6-sol__max') }
+                throw 'unexpected family'
+            }
+            $null = Assert-Throws {
+                New-CalibrationPilotSourceBundle -PilotManifestPath $pilotManifestPath `
+                    -PilotManifestSchemaPath $pilotManifestSchemaPath -CalibrationSetPath $setPath `
+                    -RubricsRoot $rubricsRoot | Out-Null
+            } 'Pilot judge pair differs from calibration policy'
+        } finally {
+            Set-Item -Path Function:\Get-CalibrationJudgePair -Value $original
+        }
+    }
+
     Invoke-Assertion 'canonical pilot hashes ignore object insertion order but preserve array order and values' {
         $left = [pscustomobject][ordered]@{ z = 1; a = @('first', 'second'); nested = [pscustomobject][ordered]@{ b = $true; a = $null } }
         $right = [pscustomobject][ordered]@{ nested = [pscustomobject][ordered]@{ a = $null; b = $true }; a = @('first', 'second'); z = 1 }
@@ -906,13 +929,16 @@ if (Test-Path -LiteralPath $implementationPath -PathType Leaf) {
                 Assert-SequenceEqual @($attempt.PSObject.Properties.Name) @(
                     'ordinal', 'role', 'family', 'launcher', 'route_id', 'configuration_id', 'model', 'effort',
                     'state', 'slot_claimed_at', 'process_started_at', 'completed_at', 'exit_code',
+                    'duration_ms', 'timed_out', 'cleanup_failed', 'cleanup_status', 'process_exited', 'usage',
                     'transport_status', 'contract_status', 'decision'
                 )
                 foreach ($name in @('ordinal', 'role', 'family', 'launcher', 'route_id', 'configuration_id', 'model', 'effort')) {
                     Assert-Equal $attempt.$name $role.$name
                 }
                 Assert-Equal $attempt.state 'planned'
-                foreach ($name in @('slot_claimed_at', 'process_started_at', 'completed_at', 'exit_code', 'transport_status', 'contract_status', 'decision')) {
+                foreach ($name in @('slot_claimed_at', 'process_started_at', 'completed_at', 'exit_code',
+                        'duration_ms', 'timed_out', 'cleanup_failed', 'cleanup_status', 'process_exited', 'usage',
+                        'transport_status', 'contract_status', 'decision')) {
                     Assert-True ($null -eq $attempt.$name) "Expected initial attempt '$name' to be null."
                 }
             }
@@ -1109,6 +1135,28 @@ if (Test-Path -LiteralPath $implementationPath -PathType Leaf) {
             Assert-False $result.profile_promotion_allowed
             Assert-False $result.profile_mutated
             Assert-False $result.production_eligibility_changed
+            foreach ($attempt in $result.attempts) {
+                Assert-SequenceEqual @($attempt.PSObject.Properties.Name) @(
+                    'ordinal', 'role', 'family', 'launcher', 'route_id', 'configuration_id', 'model', 'effort', 'state',
+                    'slot_claimed_at', 'process_started_at', 'completed_at', 'exit_code', 'duration_ms', 'timed_out',
+                    'cleanup_failed', 'cleanup_status', 'process_exited', 'usage', 'transport_status', 'contract_status', 'decision'
+                )
+                Assert-Equal $attempt.exit_code 0
+                Assert-Equal $attempt.duration_ms 1
+                Assert-False $attempt.timed_out
+                Assert-False $attempt.cleanup_failed
+                Assert-Equal $attempt.cleanup_status 'not_required'
+                Assert-True $attempt.process_exited
+                Assert-SequenceEqual @($attempt.usage.PSObject.Properties.Name) @(
+                    'actual_input_tokens', 'visible_output_tokens', 'reasoning_tokens', 'complete'
+                )
+                Assert-Equal $attempt.usage.actual_input_tokens 12
+                Assert-Equal $attempt.usage.visible_output_tokens 4
+                Assert-Equal $attempt.usage.reasoning_tokens 0
+                Assert-True $attempt.usage.complete
+                Assert-Equal $attempt.transport_status 'success'
+                Assert-Equal $attempt.contract_status 'success'
+            }
             $runRoot = Join-Path $execution.input.results_root 'option1-live-20260825-001'
             $plan = Get-Content -Raw -LiteralPath (Join-Path $runRoot 'plan.json') | ConvertFrom-Json -Depth 100
             Assert-Equal $plan.git_commit ('a' * 40)
@@ -1324,6 +1372,60 @@ if (Test-Path -LiteralPath $implementationPath -PathType Leaf) {
         Assert-SequenceEqual $after $before
     }
 
+    Invoke-Assertion 'public pilot CLI rejects external calibration and rubric copies before writes' {
+        $temporary = New-TestDirectory
+        $resultsRoot = New-CalibrationResultsTestRoot
+        try {
+            $externalSet = Join-Path $temporary 'calibration-set-v1.json'
+            $externalRubrics = Join-Path $temporary 'rubrics'
+            Copy-Item -LiteralPath $setPath -Destination $externalSet
+            Copy-Item -LiteralPath $rubricsRoot -Destination $externalRubrics -Recurse
+            $before = Get-CalibrationResultsTreeSnapshot -Root $resultsRoot
+            foreach ($arguments in @(
+                @('-NoProfile', '-File', $implementationPath, '-Pilot', '-CalibrationSetPath', $externalSet, '-ResultsRoot', $resultsRoot),
+                @('-NoProfile', '-File', $implementationPath, '-Pilot', '-RubricsRoot', $externalRubrics, '-ResultsRoot', $resultsRoot),
+                @('-NoProfile', '-File', $implementationPath, '-Pilot', '-Run', '-RunId', 'option1-live-20260825-001', '-CalibrationSetPath', $externalSet, '-ResultsRoot', $resultsRoot)
+            )) {
+                $capture = Invoke-CalibrationCliCapture -Arguments $arguments
+                Assert-Equal $capture.exit_code 1
+                Assert-Equal $capture.stderr ''
+                Assert-SequenceEqual (Get-CalibrationResultsTreeSnapshot -Root $resultsRoot) $before
+            }
+        } finally {
+            if (Test-Path -LiteralPath $resultsRoot) { Remove-Item -LiteralPath $resultsRoot -Recurse -Force }
+            if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Recurse -Force }
+        }
+    }
+
+    Invoke-Assertion 'public pilot function rejects external sources before fake calls while test seam remains explicit' {
+        $temporary = New-TestDirectory
+        $resultsRoot = New-CalibrationResultsTestRoot
+        try {
+            $externalSet = Join-Path $temporary 'calibration-set-v1.json'
+            $externalRubrics = Join-Path $temporary 'rubrics'
+            Copy-Item -LiteralPath $setPath -Destination $externalSet
+            Copy-Item -LiteralPath $rubricsRoot -Destination $externalRubrics -Recurse
+            $calls = [pscustomobject]@{ count = 0 }
+            $spy = { $calls.count++; throw 'external source reached provider seam' }.GetNewClosure()
+            $before = Get-CalibrationResultsTreeSnapshot -Root $resultsRoot
+            $null = Assert-Throws {
+                Invoke-Calibration -Pilot -Run -RunId 'option1-live-20260825-001' -ResultsRoot $resultsRoot `
+                    -CalibrationSetPath $externalSet -RubricsRoot $externalRubrics `
+                    -CandidateInvoker $spy -JudgeInvoker $spy -PilotGitInvoker $spy | Out-Null
+            } 'pilot_source_path_not_canonical'
+            Assert-Equal $calls.count 0
+            Assert-SequenceEqual (Get-CalibrationResultsTreeSnapshot -Root $resultsRoot) $before
+
+            $plan = Invoke-Calibration -Pilot -CalibrationSetPath $externalSet -RubricsRoot $externalRubrics `
+                -AllowPilotSourceOverridesForTest
+            Assert-Equal $plan.mode 'pilot-plan'
+            Assert-Equal $plan.provider_calls 0
+        } finally {
+            if (Test-Path -LiteralPath $resultsRoot) { Remove-Item -LiteralPath $resultsRoot -Recurse -Force }
+            if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Recurse -Force }
+        }
+    }
+
     Invoke-Assertion 'pilot validates all 24 calibration prompts before fixed-prompt selection without calls or writes' {
         $resultsRoot = New-CalibrationResultsTestRoot
         try {
@@ -1339,7 +1441,8 @@ if (Test-Path -LiteralPath $implementationPath -PathType Leaf) {
             $spy = { $script:PilotValidationCalls++; throw 'pilot validation executed a provider' }
             $null = Assert-Throws {
                 Invoke-Calibration -Pilot -ResultsRoot $resultsRoot -CalibrationSetPath $badSetPath `
-                    -RubricsRoot $rubricsRoot -CandidateInvoker $spy -JudgeInvoker $spy | Out-Null
+                    -RubricsRoot $rubricsRoot -CandidateInvoker $spy -JudgeInvoker $spy `
+                    -AllowPilotSourceOverridesForTest | Out-Null
             } 'Pilot calibration set validation failed'
             Assert-Equal $script:PilotValidationCalls 0
             Assert-SequenceEqual (Get-CalibrationResultsTreeSnapshot -Root $resultsRoot) $before
@@ -1359,7 +1462,8 @@ if (Test-Path -LiteralPath $implementationPath -PathType Leaf) {
             $badSet | ConvertTo-Json -Depth 100 | Set-Content -LiteralPath $badSetPath -Encoding utf8NoBOM
             $before = Get-CalibrationResultsTreeSnapshot -Root $resultsRoot
             $null = Assert-Throws {
-                Invoke-Calibration -Pilot -ResultsRoot $resultsRoot -CalibrationSetPath $badSetPath -RubricsRoot $rubricsRoot | Out-Null
+                Invoke-Calibration -Pilot -ResultsRoot $resultsRoot -CalibrationSetPath $badSetPath -RubricsRoot $rubricsRoot `
+                    -AllowPilotSourceOverridesForTest | Out-Null
             } 'Pilot calibration set validation failed'
             Assert-SequenceEqual (Get-CalibrationResultsTreeSnapshot -Root $resultsRoot) $before
         } finally {
@@ -1416,7 +1520,8 @@ if (Test-Path -LiteralPath $implementationPath -PathType Leaf) {
                 $spy = { $script:PilotParityCalls++; throw 'pilot parity validation invoked work' }
                 $null = Assert-Throws {
                     Invoke-Calibration -Pilot -ResultsRoot $resultsRoot -CalibrationSetPath $casePath -RubricsRoot $rubricsRoot `
-                        -CandidateInvoker $spy -JudgeInvoker $spy -RouterInvoker $spy | Out-Null
+                        -CandidateInvoker $spy -JudgeInvoker $spy -RouterInvoker $spy `
+                        -AllowPilotSourceOverridesForTest | Out-Null
                 } ("Pilot calibration set validation failed: {0}" -f $case.expected)
                 Assert-Equal $script:PilotParityCalls 0
                 Assert-SequenceEqual (Get-CalibrationResultsTreeSnapshot -Root $resultsRoot) $before

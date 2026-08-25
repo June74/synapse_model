@@ -311,7 +311,11 @@ function New-SecurityPilotExecution {
             duration_ms = 1
             timed_out = ($FailureCode -ceq 'timeout')
             cleanup_failed = ($FailureCode -ceq 'cleanup_failed')
-            cleanup_status = 'test-only'
+            cleanup_status = if ($FailureCode -ceq 'timeout') {
+                'timeout_cleanup_complete'
+            } elseif ($FailureCode -ceq 'cleanup_failed') {
+                'timeout_cleanup_failed'
+            } else { 'not_required' }
             process_exited = $true
         }
     } else { $null }
@@ -326,6 +330,13 @@ function New-SecurityPilotExecution {
         failure = if (-not $hasFailure) { $null } else { 'arbitrary unsafe failure text' }
         failure_code = if ($hasFailure) { $FailureCode } else { $null }
         diagnostic_note = if (-not $hasFailure) { 'completed' } else { 'unsafe diagnostic' }
+        usage = [pscustomobject][ordered]@{
+            actual_input_tokens = 21
+            visible_output_tokens = 5
+            reasoning_tokens = 2
+            complete = $true
+            raw_provider_usage = @($Sentinels) -join '|'
+        }
         unsafe_environment = @($Sentinels)
         unsafe_arguments = @($Sentinels)
         stdout = @($Sentinels) -join '|'
@@ -439,6 +450,9 @@ function Get-SecurityFileHashes {
 function Test-SecurityPilotLedgerFaultStage {
     param([Parameter(Mandatory)][string]$Stage, [Parameter(Mandatory)][object]$Value)
     switch ($Stage) {
+        'slot_reservation' {
+            return $Value.run_state -ceq 'running' -and $Value.attempts[0].state -ceq 'slot_reserved'
+        }
         'process_start_record' {
             return $Value.run_state -ceq 'running' -and $Value.attempts[0].state -ceq 'process_started'
         }
@@ -1172,6 +1186,45 @@ Invoke-Assertion 'option 1 technical failures stop at each exact role and durabl
             $persisted = Get-Content -Raw -LiteralPath (Join-Path $runRoot 'result.json') | ConvertFrom-Json -Depth 100
             Assert-Equal $persisted.stop_reason $case.code
             Assert-SequenceEqual @($persisted.attempts.state) @($case.states)
+            $failed = @($execution.result.attempts | Where-Object { $_.state -ceq 'failed' })[0]
+            Assert-Equal $failed.duration_ms 1
+            Assert-True ($failed.timed_out -is [bool])
+            Assert-True ($failed.cleanup_failed -is [bool])
+            Assert-True ($failed.process_exited -is [bool])
+            Assert-SequenceEqual @($failed.usage.PSObject.Properties.Name) @(
+                'actual_input_tokens', 'visible_output_tokens', 'reasoning_tokens', 'complete'
+            )
+            Assert-False (($failed | ConvertTo-Json -Depth 20 -Compress).Contains('raw_provider_usage', [StringComparison]::Ordinal))
+        } finally { Remove-SecurityPilotLedgerRoot -Path $execution.input.results_root }
+    }
+}
+
+Invoke-Assertion 'option 1 persists normalized timeout cleanup and nonzero-exit evidence without raw provider data' {
+    foreach ($case in @(
+        [pscustomobject]@{ code = 'timeout'; exit = 17; timed_out = $true; cleanup_failed = $false; cleanup_status = 'timeout_cleanup_complete' },
+        [pscustomobject]@{ code = 'cleanup_failed'; exit = 17; timed_out = $false; cleanup_failed = $true; cleanup_status = 'timeout_cleanup_failed' },
+        [pscustomobject]@{ code = 'nonzero_exit'; exit = 17; timed_out = $false; cleanup_failed = $false; cleanup_status = 'not_required' }
+    )) {
+        $sentinel = "RAW_PROVIDER_USAGE_$($case.code)"
+        $execution = Invoke-SecurityPilotFailureCase -FailureRole candidate -FailureCode $case.code -Sentinels @($sentinel)
+        try {
+            $attempt = $execution.result.attempts[0]
+            Assert-Equal $attempt.state 'failed'
+            Assert-Equal $attempt.exit_code $case.exit
+            Assert-Equal $attempt.duration_ms 1
+            Assert-Equal $attempt.timed_out $case.timed_out
+            Assert-Equal $attempt.cleanup_failed $case.cleanup_failed
+            Assert-Equal $attempt.cleanup_status $case.cleanup_status
+            Assert-True $attempt.process_exited
+            Assert-Equal $attempt.transport_status 'failed'
+            Assert-Equal $attempt.contract_status 'not_evaluated'
+            Assert-Equal $attempt.usage.actual_input_tokens 21
+            $runRoot = Join-Path $execution.input.results_root 'option1-live-20260825-001'
+            $persistedText = @(Get-ChildItem -LiteralPath $runRoot -File -Recurse | ForEach-Object {
+                Get-Content -Raw -LiteralPath $_.FullName
+            }) -join "`n"
+            Assert-False $persistedText.Contains($sentinel, [StringComparison]::Ordinal)
+            Assert-False $persistedText.Contains('raw_provider_usage', [StringComparison]::Ordinal)
         } finally { Remove-SecurityPilotLedgerRoot -Path $execution.input.results_root }
     }
 }
@@ -1240,6 +1293,7 @@ Invoke-Assertion 'option 1 artifact failure after confirmed start becomes indete
 
 Invoke-Assertion 'every post-launch ledger transition recovers one-shot persistence failure durably' {
     $cases = @(
+        [pscustomobject]@{ stage = 'slot_reservation'; calls = @('candidate'); claims = 1; starts = 0; states = @('failed', 'skipped', 'skipped'); deterministic = $false; decisions = 0; outcome = $null },
         [pscustomobject]@{ stage = 'process_start_record'; calls = @('candidate'); claims = 1; starts = 1; states = @('failed', 'skipped', 'skipped'); deterministic = $false; decisions = 0; outcome = $null },
         [pscustomobject]@{ stage = 'candidate_attempt_completion'; calls = @('candidate'); claims = 1; starts = 1; states = @('failed', 'skipped', 'skipped'); deterministic = $false; decisions = 0; outcome = $null },
         [pscustomobject]@{ stage = 'deterministic_result_setter'; calls = @('candidate'); claims = 1; starts = 1; states = @('succeeded', 'skipped', 'skipped'); deterministic = $false; decisions = 0; outcome = $null },

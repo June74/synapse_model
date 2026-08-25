@@ -43,6 +43,11 @@ $script:CalibrationPilotAllowedStopCodes = @(
     'artifact_persistence_failed', 'sensitive_output_detected', 'budget_invariant_failed',
     'manual_abort'
 )
+$script:CalibrationPilotMaximumDurationMilliseconds = [int64]3600000
+$script:CalibrationPilotMaximumTokenCount = [decimal]9007199254740991
+$script:CalibrationPilotCleanupStatuses = @(
+    'not_required', 'timeout_cleanup_complete', 'timeout_cleanup_failed', 'output_drain_timeout'
+)
 
 if (-not (Get-Command Invoke-RouterRun -ErrorAction SilentlyContinue)) {
     . $script:CalibrationRouterPath
@@ -314,6 +319,38 @@ function Test-CalibrationSetObject {
         }
     }
     return [pscustomobject]@{ valid = $errors.Count -eq 0; set = $set; errors = @($errors); rubrics = $loadedRubrics }
+}
+
+function Assert-CalibrationPilotCanonicalSourcePaths {
+    param(
+        [Parameter(Mandatory)][string]$CalibrationSetPath,
+        [Parameter(Mandatory)][string]$RubricsRoot,
+        [Parameter(Mandatory)][string]$PilotManifestPath,
+        [Parameter(Mandatory)][string]$PilotManifestSchemaPath
+    )
+    $approved = [ordered]@{
+        CalibrationSetPath = Join-Path $script:CalibrationRoot 'calibration-set-v1.json'
+        RubricsRoot = Join-Path $script:CalibrationRoot 'rubrics'
+        PilotManifestPath = Join-Path $script:CalibrationRoot 'pilots/option1-three-launch-v1.json'
+        PilotManifestSchemaPath = Join-Path $script:CalibrationRoot 'pilots/option1-three-launch-manifest.schema.json'
+    }
+    $actual = [ordered]@{
+        CalibrationSetPath = $CalibrationSetPath
+        RubricsRoot = $RubricsRoot
+        PilotManifestPath = $PilotManifestPath
+        PilotManifestSchemaPath = $PilotManifestSchemaPath
+    }
+    foreach ($name in $approved.Keys) {
+        $value = [string]$actual[$name]
+        $trimmedValue = $value.TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+        $normalizedValue = [IO.Path]::GetFullPath($value).TrimEnd(
+            [IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+        if (-not [IO.Path]::IsPathFullyQualified($value) -or $trimmedValue -cne $normalizedValue -or
+            $normalizedValue -cne
+            [IO.Path]::GetFullPath([string]$approved[$name]).TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)) {
+            throw 'pilot_source_path_not_canonical'
+        }
+    }
 }
 
 function New-CalibrationRubricEntriesFromFiles {
@@ -794,6 +831,12 @@ function New-CalibrationPilotSourceBundle {
     $prompts = @($set.prompts | Where-Object { $_.id -ceq $manifest.prompt.id -and $_.version -ceq $manifest.prompt.version })
     if ($prompts.Count -ne 1 -or $prompts[0].grading.deterministic_grader.type -cne 'exact_fields' -or
         -not $setValidation.rubrics.ContainsKey($prompts[0].grading.rubric_ref)) { throw 'Pilot fixed prompt is invalid.' }
+    $approvedJudgePair = @($resolvedRoles[1].configuration_id, $resolvedRoles[2].configuration_id)
+    $policyJudgePair = @(Get-CalibrationJudgePair -CandidateFamily ([string]$resolvedRoles[0].family))
+    if ($policyJudgePair.Count -ne 2 -or $approvedJudgePair.Count -ne 2 -or
+        $policyJudgePair[0] -cne $approvedJudgePair[0] -or $policyJudgePair[1] -cne $approvedJudgePair[1]) {
+        throw 'Pilot judge pair differs from calibration policy.'
+    }
     return [pscustomobject][ordered]@{
         manifest = $manifest; calibration_set = $set; prompt = $prompts[0]; rubric = $setValidation.rubrics[$prompts[0].grading.rubric_ref]
         roles = @($resolvedRoles); hashes = [pscustomobject][ordered]@{
@@ -1120,6 +1163,91 @@ function Test-CalibrationPilotExactPropertySet {
     return $true
 }
 
+function Test-CalibrationPilotSafeTokenCount {
+    param([AllowNull()][object]$Value, [switch]$AllowNull)
+    if ($null -eq $Value) { return [bool]$AllowNull }
+    $isInteger = $Value -is [byte] -or $Value -is [int16] -or $Value -is [int32] -or
+        $Value -is [int64] -or ($Value -is [decimal] -and $Value -eq [decimal]::Truncate($Value))
+    if (-not $isInteger) { return $false }
+    $number = [decimal]$Value
+    return $number -ge 0 -and $number -le $script:CalibrationPilotMaximumTokenCount
+}
+
+function ConvertTo-CalibrationPilotSafeUsage {
+    param([AllowNull()][object]$Usage)
+    if ($null -eq $Usage) { return $null }
+    if ($Usage -is [string] -or $Usage -is [Collections.IDictionary] -or $Usage -is [Collections.IList]) {
+        throw 'pilot_usage_metadata_invalid'
+    }
+    foreach ($name in @('actual_input_tokens', 'visible_output_tokens', 'reasoning_tokens', 'complete')) {
+        if (-not (Test-CalibrationProperty $Usage $name)) { throw 'pilot_usage_metadata_invalid' }
+    }
+    if ($Usage.complete -isnot [bool]) { throw 'pilot_usage_metadata_invalid' }
+    $values = [ordered]@{}
+    foreach ($name in @('actual_input_tokens', 'visible_output_tokens', 'reasoning_tokens')) {
+        if (-not (Test-CalibrationPilotSafeTokenCount -Value $Usage.$name -AllowNull) -or
+            ([bool]$Usage.complete -and $null -eq $Usage.$name)) { throw 'pilot_usage_metadata_invalid' }
+        $values[$name] = if ($null -eq $Usage.$name) { $null } else { [int64]$Usage.$name }
+    }
+    return [pscustomobject][ordered]@{
+        actual_input_tokens = $values.actual_input_tokens
+        visible_output_tokens = $values.visible_output_tokens
+        reasoning_tokens = $values.reasoning_tokens
+        complete = [bool]$Usage.complete
+    }
+}
+
+function Get-CalibrationPilotExecutionEvidence {
+    param(
+        [Parameter(Mandatory)][object]$Execution,
+        [Parameter(Mandatory)][object]$Envelope
+    )
+    if (-not [bool]$Envelope.valid -or -not [bool]$Envelope.process_started) {
+        throw 'pilot_execution_evidence_invalid'
+    }
+    $process = $Execution.process
+    $usage = if (Test-CalibrationProperty $Execution 'usage') {
+        ConvertTo-CalibrationPilotSafeUsage -Usage $Execution.usage
+    } else { $null }
+    $transportStatus = if ((Test-CalibrationPilotExactInteger -Value $process.exit_code -Expected 0) -and
+        -not [bool]$process.timed_out -and -not [bool]$process.cleanup_failed -and
+        [bool]$process.process_exited) { 'success' } else { 'failed' }
+    $contractStatus = if ($transportStatus -cne 'success') {
+        'not_evaluated'
+    } elseif ($null -ne $Execution.canonical) {
+        'success'
+    } else { 'failed' }
+    return [pscustomobject][ordered]@{
+        exit_code = if ($null -eq $process.exit_code) { $null } else { [int64]$process.exit_code }
+        duration_ms = [int64]$process.duration_ms
+        timed_out = [bool]$process.timed_out
+        cleanup_failed = [bool]$process.cleanup_failed
+        cleanup_status = [string]$process.cleanup_status
+        process_exited = [bool]$process.process_exited
+        usage = $usage
+        transport_status = $transportStatus
+        contract_status = $contractStatus
+    }
+}
+
+function Set-CalibrationPilotAttemptExecutionEvidence {
+    param(
+        [Parameter(Mandatory)][object]$Attempt,
+        [Parameter(Mandatory)][object]$Execution,
+        [Parameter(Mandatory)][object]$Envelope,
+        [switch]$ContractFailed
+    )
+    $evidence = Get-CalibrationPilotExecutionEvidence -Execution $Execution -Envelope $Envelope
+    foreach ($name in @('exit_code', 'duration_ms', 'timed_out', 'cleanup_failed', 'cleanup_status',
+            'process_exited', 'usage', 'transport_status', 'contract_status')) {
+        $Attempt.$name = Copy-CalibrationJsonValue $evidence.$name
+    }
+    if ($ContractFailed) {
+        if ($Attempt.transport_status -cne 'success') { throw 'pilot_execution_evidence_invalid' }
+        $Attempt.contract_status = 'failed'
+    }
+}
+
 function Test-CalibrationPilotExecutionEnvelope {
     param([AllowNull()][object]$Execution)
     $processPropertyPresent = $null -ne $Execution -and (Test-CalibrationProperty $Execution 'process')
@@ -1173,10 +1301,15 @@ function Test-CalibrationPilotExecutionEnvelope {
                 -not (Test-CalibrationPilotExactInteger $Execution.process.exit_code)) -or
             -not (Test-CalibrationPilotExactInteger $Execution.process.duration_ms) -or
             ([int64]$Execution.process.duration_ms).CompareTo([int64]0) -lt 0 -or
+            [int64]$Execution.process.duration_ms -gt $script:CalibrationPilotMaximumDurationMilliseconds -or
             $Execution.process.timed_out -isnot [bool] -or
             $Execution.process.cleanup_failed -isnot [bool] -or
-            ($null -ne $Execution.process.cleanup_status -and $Execution.process.cleanup_status -isnot [string]) -or
+            $Execution.process.cleanup_status -isnot [string] -or
+            $Execution.process.cleanup_status -cnotin $script:CalibrationPilotCleanupStatuses -or
             $Execution.process.process_exited -isnot [bool]) { return $invalid }
+        if ((Test-CalibrationProperty $Execution 'usage') -and $null -ne $Execution.usage) {
+            try { $null = ConvertTo-CalibrationPilotSafeUsage -Usage $Execution.usage } catch { return $invalid }
+        }
     }
 
     if ($null -ne $Execution.canonical) {
@@ -1649,6 +1782,12 @@ function New-CalibrationPilotInitialResult {
                 process_started_at = $null
                 completed_at = $null
                 exit_code = $null
+                duration_ms = $null
+                timed_out = $null
+                cleanup_failed = $null
+                cleanup_status = $null
+                process_exited = $null
+                usage = $null
                 transport_status = $null
                 contract_status = $null
                 decision = $null
@@ -1760,8 +1899,8 @@ function Assert-CalibrationPilotResultContract {
         $role = $Context.plan.roles[$index]
         Assert-CalibrationExactProperties -Value $attempt -Names @(
             'ordinal', 'role', 'family', 'launcher', 'route_id', 'configuration_id', 'model', 'effort', 'state',
-            'slot_claimed_at', 'process_started_at', 'completed_at', 'exit_code', 'transport_status',
-            'contract_status', 'decision'
+            'slot_claimed_at', 'process_started_at', 'completed_at', 'exit_code', 'duration_ms', 'timed_out',
+            'cleanup_failed', 'cleanup_status', 'process_exited', 'usage', 'transport_status', 'contract_status', 'decision'
         ) -ErrorCode $errorCode
         if (-not (Test-CalibrationPilotOrdinal $attempt.ordinal ($index + 1)) -or
             $attempt.state -isnot [string] -or -not $script:PilotAttemptTransitions.ContainsKey([string]$attempt.state)) { throw $errorCode }
@@ -1771,18 +1910,47 @@ function Assert-CalibrationPilotResultContract {
         foreach ($name in @('slot_claimed_at', 'process_started_at', 'completed_at')) {
             if (-not (Test-CalibrationPilotTimestamp $attempt.$name -AllowNull)) { throw $errorCode }
         }
-        if (($null -ne $attempt.exit_code -and -not (Test-CalibrationPilotCounter $attempt.exit_code)) -or
-            $attempt.transport_status -cnotin @($null, 'success') -or
-            $attempt.contract_status -cnotin @($null, 'success') -or
+        $evidenceNames = @('exit_code', 'duration_ms', 'timed_out', 'cleanup_failed', 'cleanup_status',
+            'process_exited', 'usage', 'transport_status', 'contract_status')
+        $evidencePresent = @($evidenceNames | Where-Object { $null -ne $attempt.$_ }).Count -gt 0
+        if (($null -ne $attempt.exit_code -and (-not (Test-CalibrationPilotExactInteger $attempt.exit_code) -or
+                [int64]$attempt.exit_code -lt [int32]::MinValue -or [int64]$attempt.exit_code -gt [int32]::MaxValue)) -or
+            ($null -ne $attempt.duration_ms -and (-not (Test-CalibrationPilotExactInteger $attempt.duration_ms) -or
+                [int64]$attempt.duration_ms -lt 0 -or
+                [int64]$attempt.duration_ms -gt $script:CalibrationPilotMaximumDurationMilliseconds)) -or
+            ($null -ne $attempt.timed_out -and $attempt.timed_out -isnot [bool]) -or
+            ($null -ne $attempt.cleanup_failed -and $attempt.cleanup_failed -isnot [bool]) -or
+            ($null -ne $attempt.cleanup_status -and ($attempt.cleanup_status -isnot [string] -or
+                $attempt.cleanup_status -cnotin $script:CalibrationPilotCleanupStatuses)) -or
+            ($null -ne $attempt.process_exited -and $attempt.process_exited -isnot [bool]) -or
+            $attempt.transport_status -cnotin @($null, 'success', 'failed') -or
+            $attempt.contract_status -cnotin @($null, 'success', 'failed', 'not_evaluated') -or
             $attempt.decision -cnotin @($null, 'pass', 'fail')) { throw $errorCode }
+        if ($null -ne $attempt.usage) {
+            if (-not (Test-CalibrationPilotExactPropertySet -Value $attempt.usage -Names @(
+                        'actual_input_tokens', 'visible_output_tokens', 'reasoning_tokens', 'complete'))) { throw $errorCode }
+            try { $null = ConvertTo-CalibrationPilotSafeUsage -Usage $attempt.usage } catch { throw $errorCode }
+        }
+        if ($evidencePresent) {
+            foreach ($requiredEvidence in @('duration_ms', 'timed_out', 'cleanup_failed', 'cleanup_status',
+                    'process_exited', 'transport_status', 'contract_status')) {
+                if ($null -eq $attempt.$requiredEvidence) { throw $errorCode }
+            }
+            $expectedTransport = if ((Test-CalibrationPilotExactInteger -Value $attempt.exit_code -Expected 0) -and
+                -not [bool]$attempt.timed_out -and -not [bool]$attempt.cleanup_failed -and
+                [bool]$attempt.process_exited) { 'success' } else { 'failed' }
+            if ($attempt.transport_status -cne $expectedTransport -or
+                ($expectedTransport -ceq 'failed' -and $attempt.contract_status -cne 'not_evaluated') -or
+                ($expectedTransport -ceq 'success' -and $attempt.contract_status -cnotin @('success', 'failed'))) { throw $errorCode }
+        }
         switch ([string]$attempt.state) {
             'planned' {
                 if ($null -ne $attempt.slot_claimed_at -or $null -ne $attempt.process_started_at -or
-                    $null -ne $attempt.completed_at) { throw $errorCode }
+                    $null -ne $attempt.completed_at -or $evidencePresent) { throw $errorCode }
             }
             'slot_reserved' {
                 if ($null -eq $attempt.slot_claimed_at -or $null -ne $attempt.process_started_at -or
-                    $null -ne $attempt.completed_at) { throw $errorCode }
+                    $null -ne $attempt.completed_at -or $evidencePresent) { throw $errorCode }
             }
             'process_started' {
                 if ($null -eq $attempt.slot_claimed_at -or $null -eq $attempt.process_started_at -or
@@ -1790,14 +1958,16 @@ function Assert-CalibrationPilotResultContract {
             }
             'succeeded' {
                 if ($null -eq $attempt.slot_claimed_at -or $null -eq $attempt.process_started_at -or
-                    $null -eq $attempt.completed_at) { throw $errorCode }
+                    $null -eq $attempt.completed_at -or
+                    ((Test-CalibrationProperty $Context.plan 'git_commit') -and (-not $evidencePresent -or
+                        $attempt.transport_status -cne 'success' -or $attempt.contract_status -cne 'success'))) { throw $errorCode }
             }
             'failed' {
                 if ($null -eq $attempt.slot_claimed_at -or $null -eq $attempt.completed_at) { throw $errorCode }
             }
             'skipped' {
                 if ($null -ne $attempt.slot_claimed_at -or $null -ne $attempt.process_started_at -or
-                    $null -eq $attempt.completed_at) { throw $errorCode }
+                    $null -eq $attempt.completed_at -or $evidencePresent) { throw $errorCode }
             }
         }
     }
@@ -2025,7 +2195,8 @@ function Get-CalibrationPilotClaimCount {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][object]$Context,
-        [AllowNull()][object]$Result
+        [AllowNull()][object]$Result,
+        [switch]$SkipResultCounterCheck
     )
     $syncRoot = Get-CalibrationPilotSyncRoot -Context $Context
     [Threading.Monitor]::Enter($syncRoot)
@@ -2061,7 +2232,7 @@ function Get-CalibrationPilotClaimCount {
             $counts.total++
             $counts.provider_family.($role.family)++
         }
-        $resultToVerify = if ($null -ne $Result) { $Result } else { $Context.result }
+        $resultToVerify = if ($SkipResultCounterCheck) { $null } elseif ($null -ne $Result) { $Result } else { $Context.result }
         if ($null -ne $resultToVerify -and
             ([int64]$resultToVerify.slots_consumed.total -ne $counts.total -or
             [int64]$resultToVerify.slots_consumed.provider_family.google -ne $counts.provider_family.google -or
@@ -2173,7 +2344,10 @@ function Complete-CalibrationPilotFailure {
         [Parameter(Mandatory)][ValidateRange(1, 3)][int]$Ordinal,
         [Parameter(Mandatory)][string]$StopCode,
         [bool]$ProcessStarted = $false,
-        [switch]$Indeterminate
+        [switch]$Indeterminate,
+        [AllowNull()][object]$Execution,
+        [AllowNull()][object]$ExecutionEnvelope,
+        [switch]$ContractFailed
     )
     $safeStopCode = Resolve-CalibrationPilotStopCode $StopCode
     $syncRoot = Get-CalibrationPilotSyncRoot -Context $Context
@@ -2202,6 +2376,10 @@ function Complete-CalibrationPilotFailure {
         } else {
             $next.attempts[$index].state = 'failed'
         }
+        if ($null -ne $Execution -and $null -ne $ExecutionEnvelope) {
+            Set-CalibrationPilotAttemptExecutionEvidence -Attempt $next.attempts[$index] `
+                -Execution $Execution -Envelope $ExecutionEnvelope -ContractFailed:$ContractFailed
+        }
         $next.attempts[$index].completed_at = $now
         for ($laterIndex = $index + 1; $laterIndex -lt 3; $laterIndex++) {
             if ($next.attempts[$laterIndex].state -cne 'planned') { throw 'pilot_failure_later_attempt_invalid' }
@@ -2223,7 +2401,9 @@ function Complete-CalibrationPilotPersistenceFailure {
     param(
         [Parameter(Mandatory)][object]$Context,
         [Parameter(Mandatory)][ValidateRange(1, 3)][int]$BoundaryOrdinal,
-        [bool]$ProcessStarted = $false
+        [bool]$ProcessStarted = $false,
+        [AllowNull()][object]$Execution,
+        [AllowNull()][object]$ExecutionEnvelope
     )
     $syncRoot = Get-CalibrationPilotSyncRoot -Context $Context
     [Threading.Monitor]::Enter($syncRoot)
@@ -2265,12 +2445,74 @@ function Complete-CalibrationPilotPersistenceFailure {
             }
             'succeeded' { }
         }
+        if ($null -ne $Execution -and $null -ne $ExecutionEnvelope -and $current -cne 'succeeded') {
+            Set-CalibrationPilotAttemptExecutionEvidence -Attempt $next.attempts[$index] `
+                -Execution $Execution -Envelope $ExecutionEnvelope
+        }
         for ($laterIndex = $index + 1; $laterIndex -lt 3; $laterIndex++) {
             $laterState = [string]$next.attempts[$laterIndex].state
             if ($laterState -ceq 'planned') {
                 $next.attempts[$laterIndex].state = 'skipped'
                 $next.attempts[$laterIndex].completed_at = $now
             } elseif ($laterState -cne 'succeeded') { throw 'pilot_persistence_failure_later_attempt_invalid' }
+        }
+        $next.run_state = 'indeterminate'
+        $next.stop_reason = 'artifact_persistence_failed'
+        $next.finished_at = $now
+        Assert-CalibrationPilotResultContract -Context $Context -Result $next -SkipPersistedResultMatch
+        Write-CalibrationAtomicResultJson -Path $Context.result_path -Value $next -AllowedRunRoot $Context.run_root
+        $Context.result = $next
+        return Copy-CalibrationJsonValue $next
+    } finally { [Threading.Monitor]::Exit($syncRoot) }
+}
+
+function Complete-CalibrationPilotClaimPersistenceFailure {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][object]$Context,
+        [Parameter(Mandatory)][ValidateRange(1, 3)][int]$Ordinal
+    )
+    $syncRoot = Get-CalibrationPilotSyncRoot -Context $Context
+    [Threading.Monitor]::Enter($syncRoot)
+    try {
+        Assert-CalibrationPilotContext -Context $Context
+        Assert-CalibrationPilotResultContract -Context $Context -Result $Context.result -SkipClaimCounterCheck
+        if ($Context.result.run_state -cne 'running') { throw 'pilot_claim_recovery_run_not_running' }
+        $index = $Ordinal - 1
+        if ($Context.result.attempts[$index].state -cne 'planned') { throw 'pilot_claim_recovery_attempt_invalid' }
+        $counts = Get-CalibrationPilotClaimCount -Context $Context -SkipResultCounterCheck
+        if ([int64]$counts.total -ne $Ordinal) { throw 'pilot_claim_recovery_count_invalid' }
+        for ($prior = 0; $prior -lt $index; $prior++) {
+            if ($Context.result.attempts[$prior].state -cne 'succeeded') { throw 'pilot_claim_recovery_order_invalid' }
+        }
+        $claimPath = Join-Path $Context.claims_path $script:PilotClaimFileNames[$index]
+        try {
+            $claim = Get-Content -Raw -LiteralPath $claimPath -ErrorAction Stop |
+                ConvertFrom-Json -Depth 30 -DateKind String -ErrorAction Stop
+        } catch { throw 'pilot_claim_artifact_invalid' }
+        Assert-CalibrationExactProperties -Value $claim -Names @(
+            'run_id', 'ordinal', 'role', 'family', 'launcher', 'route_id', 'configuration_id', 'model', 'effort', 'claimed_at'
+        ) -ErrorCode 'pilot_claim_artifact_invalid'
+        $role = $Context.plan.roles[$index]
+        if ($claim.run_id -isnot [string] -or $claim.run_id -cne $Context.run_id -or
+            -not (Test-CalibrationPilotOrdinal $claim.ordinal $Ordinal) -or
+            -not (Test-CalibrationPilotTimestamp $claim.claimed_at)) { throw 'pilot_claim_artifact_invalid' }
+        foreach ($name in @('role', 'family', 'launcher', 'route_id', 'configuration_id', 'model', 'effort')) {
+            if ($claim.$name -isnot [string] -or $claim.$name -cne $role.$name) { throw 'pilot_claim_artifact_invalid' }
+        }
+
+        $next = Copy-CalibrationJsonValue $Context.result
+        $now = [DateTimeOffset]::UtcNow.ToString('o')
+        $next.attempts[$index].state = 'failed'
+        $next.attempts[$index].slot_claimed_at = [string]$claim.claimed_at
+        $next.attempts[$index].completed_at = $now
+        $next.slots_consumed.total = [int64]$next.slots_consumed.total + 1
+        $next.slots_consumed.provider_family.([string]$role.family) =
+            [int64]$next.slots_consumed.provider_family.([string]$role.family) + 1
+        for ($later = $index + 1; $later -lt 3; $later++) {
+            if ($next.attempts[$later].state -cne 'planned') { throw 'pilot_claim_recovery_later_attempt_invalid' }
+            $next.attempts[$later].state = 'skipped'
+            $next.attempts[$later].completed_at = $now
         }
         $next.run_state = 'indeterminate'
         $next.stop_reason = 'artifact_persistence_failed'
@@ -2470,6 +2712,8 @@ function Complete-CalibrationPilotAttempt {
     param(
         [Parameter(Mandatory)][object]$Context,
         [Parameter(Mandatory)][int]$Ordinal,
+        [Parameter(Mandatory)][object]$Execution,
+        [Parameter(Mandatory)][object]$ExecutionEnvelope,
         [AllowNull()][object]$JudgeDecision
     )
     $syncRoot = Get-CalibrationPilotSyncRoot -Context $Context
@@ -2488,9 +2732,10 @@ function Complete-CalibrationPilotAttempt {
         $next = Copy-CalibrationJsonValue $Context.result
         $next.attempts[$index].state = 'succeeded'
         $next.attempts[$index].completed_at = [DateTimeOffset]::UtcNow.ToString('o')
-        $next.attempts[$index].exit_code = 0
-        $next.attempts[$index].transport_status = 'success'
-        $next.attempts[$index].contract_status = 'success'
+        Set-CalibrationPilotAttemptExecutionEvidence -Attempt $next.attempts[$index] `
+            -Execution $Execution -Envelope $ExecutionEnvelope
+        if ($next.attempts[$index].transport_status -cne 'success' -or
+            $next.attempts[$index].contract_status -cne 'success') { throw 'pilot_attempt_execution_invalid' }
         if ($null -ne $JudgeDecision) {
             $safeDecision = Copy-CalibrationCredentialSafeValue -Value $JudgeDecision
             $next.attempts[$index].decision = [string]$safeDecision.decision
@@ -2587,6 +2832,9 @@ function Invoke-CalibrationPilotRun {
         try {
             $candidateExecution = & $CandidateInvoker $candidateResolved.candidate $prompt.request.request_text $candidateGuard $RunId
         } catch {
+            if ($_.Exception.Message -ceq 'pilot_claim_persistence_indeterminate') {
+                return Complete-CalibrationPilotClaimPersistenceFailure -Context $context -Ordinal 1
+            }
             $candidateStartUncertain = $context.result.attempts[0].state -ceq 'slot_reserved'
             return Complete-CalibrationPilotFailure -Context $context -Ordinal 1 `
                 -StopCode (Resolve-CalibrationPilotStopCode $_.Exception.Message) `
@@ -2601,7 +2849,8 @@ function Invoke-CalibrationPilotRun {
                 Set-CalibrationPilotAttemptState -Context $context -Ordinal 1 -State 'process_started'
             } catch {
                 return Complete-CalibrationPilotPersistenceFailure -Context $context `
-                    -BoundaryOrdinal 1 -ProcessStarted $true
+                    -BoundaryOrdinal 1 -ProcessStarted $true -Execution $candidateExecution `
+                    -ExecutionEnvelope $candidateEnvelope
             }
         }
         if (-not $candidateEnvelope.valid) {
@@ -2611,7 +2860,8 @@ function Invoke-CalibrationPilotRun {
         }
         if (-not $candidateEnvelope.success) {
             return Complete-CalibrationPilotFailure -Context $context -Ordinal 1 `
-                -StopCode ([string]$candidateEnvelope.stop_code)
+                -StopCode ([string]$candidateEnvelope.stop_code) -Execution $candidateExecution `
+                -ExecutionEnvelope $candidateEnvelope
         }
         $candidateAnswer = [string]$candidateExecution.canonical.answer
         try {
@@ -2623,12 +2873,15 @@ function Invoke-CalibrationPilotRun {
             })
         } catch {
             return Complete-CalibrationPilotFailure -Context $context -Ordinal 1 `
-                -StopCode 'artifact_persistence_failed' -Indeterminate
+                -StopCode 'artifact_persistence_failed' -Indeterminate -Execution $candidateExecution `
+                -ExecutionEnvelope $candidateEnvelope
         }
         try {
-            Complete-CalibrationPilotAttempt -Context $context -Ordinal 1
+            Complete-CalibrationPilotAttempt -Context $context -Ordinal 1 -Execution $candidateExecution `
+                -ExecutionEnvelope $candidateEnvelope
         } catch {
-            return Complete-CalibrationPilotPersistenceFailure -Context $context -BoundaryOrdinal 1
+            return Complete-CalibrationPilotPersistenceFailure -Context $context -BoundaryOrdinal 1 `
+                -Execution $candidateExecution -ExecutionEnvelope $candidateEnvelope
         }
 
         try {
@@ -2665,6 +2918,9 @@ function Invoke-CalibrationPilotRun {
             try {
                 $rawDecision = & $JudgeInvoker $role.configuration_id $payload $prompt $guard $RunId
             } catch {
+                if ($_.Exception.Message -ceq 'pilot_claim_persistence_indeterminate') {
+                    return Complete-CalibrationPilotClaimPersistenceFailure -Context $context -Ordinal ($index + 1)
+                }
                 $judgeStartUncertain = $context.result.attempts[$index].state -ceq 'slot_reserved'
                 return Complete-CalibrationPilotFailure -Context $context -Ordinal ($index + 1) `
                     -StopCode (Resolve-CalibrationPilotStopCode $_.Exception.Message) `
@@ -2689,7 +2945,8 @@ function Invoke-CalibrationPilotRun {
                     Set-CalibrationPilotAttemptState -Context $context -Ordinal ($index + 1) -State 'process_started'
                 } catch {
                     return Complete-CalibrationPilotPersistenceFailure -Context $context `
-                        -BoundaryOrdinal ($index + 1) -ProcessStarted $true
+                        -BoundaryOrdinal ($index + 1) -ProcessStarted $true -Execution $judgeExecution `
+                        -ExecutionEnvelope $judgeEnvelope
                 }
             }
             if (-not $judgeEnvelope.valid) {
@@ -2701,7 +2958,8 @@ function Invoke-CalibrationPilotRun {
                 ((Test-CalibrationProperty $rawDecision 'stop_code') -and
                     $null -ne $rawDecision.stop_code -and $rawDecision.stop_code -isnot [string])) {
                 return Complete-CalibrationPilotFailure -Context $context -Ordinal ($index + 1) `
-                    -StopCode 'provider_envelope_invalid'
+                    -StopCode 'provider_envelope_invalid' -Execution $judgeExecution `
+                    -ExecutionEnvelope $judgeEnvelope -ContractFailed
             }
             $decisionValue = $rawDecision.decision
             if ((Test-CalibrationProperty $rawDecision 'stop_code') -and $null -ne $rawDecision.stop_code) {
@@ -2711,13 +2969,17 @@ function Invoke-CalibrationPilotRun {
                 $stopCode = if ($null -ne $judgeStopCode) {
                     Resolve-CalibrationPilotStopCode $judgeStopCode
                 } else { [string]$judgeEnvelope.stop_code }
-                return Complete-CalibrationPilotFailure -Context $context -Ordinal ($index + 1) -StopCode $stopCode
+                return Complete-CalibrationPilotFailure -Context $context -Ordinal ($index + 1) -StopCode $stopCode `
+                    -Execution $judgeExecution -ExecutionEnvelope $judgeEnvelope `
+                    -ContractFailed:([bool]$judgeEnvelope.success -and
+                        $stopCode -cin @('provider_envelope_invalid', 'response_contract_invalid'))
             }
             try {
                 $decision = ConvertTo-CalibrationJudgeDecision -Value $decisionValue -JudgeProfileId $role.configuration_id
             } catch {
                 return Complete-CalibrationPilotFailure -Context $context -Ordinal ($index + 1) `
-                    -StopCode 'response_contract_invalid'
+                    -StopCode 'response_contract_invalid' -Execution $judgeExecution `
+                    -ExecutionEnvelope $judgeEnvelope -ContractFailed
             }
             $normalizedDecisions.Add($decision)
             try {
@@ -2728,13 +2990,15 @@ function Invoke-CalibrationPilotRun {
                 })
             } catch {
                 return Complete-CalibrationPilotFailure -Context $context -Ordinal ($index + 1) `
-                    -StopCode 'artifact_persistence_failed' -Indeterminate
+                    -StopCode 'artifact_persistence_failed' -Indeterminate -Execution $judgeExecution `
+                    -ExecutionEnvelope $judgeEnvelope
             }
             try {
-                Complete-CalibrationPilotAttempt -Context $context -Ordinal ($index + 1) -JudgeDecision $decision
+                Complete-CalibrationPilotAttempt -Context $context -Ordinal ($index + 1) `
+                    -Execution $judgeExecution -ExecutionEnvelope $judgeEnvelope -JudgeDecision $decision
             } catch {
                 return Complete-CalibrationPilotPersistenceFailure -Context $context `
-                    -BoundaryOrdinal ($index + 1)
+                    -BoundaryOrdinal ($index + 1) -Execution $judgeExecution -ExecutionEnvelope $judgeEnvelope
             }
         }
         $proposal = Get-CalibrationCategoryProposal -ExternalCategory unknown `
@@ -2771,6 +3035,7 @@ function Invoke-Calibration {
         [string]$ResultsRoot = $script:CalibrationResultsRoot,
         [string]$PilotManifestPath = (Join-Path $script:CalibrationRoot 'pilots/option1-three-launch-v1.json'),
         [string]$PilotManifestSchemaPath = (Join-Path $script:CalibrationRoot 'pilots/option1-three-launch-manifest.schema.json'),
+        [switch]$AllowPilotSourceOverridesForTest,
         [scriptblock]$CandidateInvoker,
         [scriptblock]$PilotGitInvoker,
         [scriptblock]$PilotArtifactWriter,
@@ -2789,6 +3054,11 @@ function Invoke-Calibration {
         throw 'Pilot RunId requires Run.'
     }
     if ($Pilot) {
+        if (-not $AllowPilotSourceOverridesForTest) {
+            Assert-CalibrationPilotCanonicalSourcePaths -CalibrationSetPath $CalibrationSetPath `
+                -RubricsRoot $RubricsRoot -PilotManifestPath $PilotManifestPath `
+                -PilotManifestSchemaPath $PilotManifestSchemaPath
+        }
         $sourceBundle = New-CalibrationPilotSourceBundle -PilotManifestPath $PilotManifestPath `
             -PilotManifestSchemaPath $PilotManifestSchemaPath -CalibrationSetPath $CalibrationSetPath -RubricsRoot $RubricsRoot
         $pilotPlan = New-CalibrationPilotPlan -SourceBundle $sourceBundle
