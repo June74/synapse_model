@@ -33,6 +33,39 @@ function Invoke-Assertion {
     }
 }
 
+function Assert-Throws {
+    param([scriptblock]$Script, [AllowNull()][string]$ExpectedMessageFragment)
+    $threw = $false
+    $exception = $null
+    try { & $Script } catch { $threw = $true; $exception = $_.Exception }
+    if (-not $threw) { throw 'Expected script to throw.' }
+    if (-not [string]::IsNullOrWhiteSpace($ExpectedMessageFragment) -and
+        $exception.Message.IndexOf($ExpectedMessageFragment, [StringComparison]::Ordinal) -lt 0) {
+        throw "Expected error containing '$ExpectedMessageFragment' but got '$($exception.Message)'."
+    }
+    return $exception
+}
+
+function New-SecurityPilotLedgerInput {
+    $leaf = 'pilot-ledger-security-{0}' -f [guid]::NewGuid().ToString('N')
+    return [pscustomobject]@{
+        results_root = Join-Path (Join-Path $calibrationRoot 'results') $leaf
+        plan = Invoke-Calibration -Pilot -CalibrationSetPath $setPath -RubricsRoot $rubricsRoot
+    }
+}
+
+function Remove-SecurityPilotLedgerRoot {
+    param([Parameter(Mandatory)][string]$Path)
+    $fullPath = [IO.Path]::GetFullPath($Path)
+    $boundary = [IO.Path]::GetFullPath((Join-Path $calibrationRoot 'results')).TrimEnd(
+        [IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+    Assert-True ($fullPath.StartsWith(($boundary + [IO.Path]::DirectorySeparatorChar), [StringComparison]::OrdinalIgnoreCase)) `
+        'Refusing to clean outside calibration/results.'
+    Assert-True ([IO.Path]::GetFileName($fullPath) -match '^pilot-ledger-security-[0-9a-f]{32}$') `
+        'Refusing to clean a root not owned by this security test.'
+    if (Test-Path -LiteralPath $fullPath) { Remove-Item -LiteralPath $fullPath -Recurse -Force }
+}
+
 function Get-RecursiveKeysAndStrings {
     param([AllowNull()][object]$Value)
     $found = [Collections.Generic.List[string]]::new()
@@ -224,6 +257,219 @@ Invoke-Assertion 'an atomic run claim rejects collisions before artifact writes'
     } finally {
         if ($null -ne $claim -and $null -ne $claim.stream) { $claim.stream.Dispose() }
         Remove-TestPath -Path $runDirectory
+    }
+}
+
+Invoke-Assertion 'pilot run plan and claim artifacts use create-new semantics and result replacement is isolated' {
+    $caseData = New-SecurityPilotLedgerInput
+    $context = $null
+    try {
+        $context = New-CalibrationPilotRun -ResultsRoot $caseData.results_root -RunId 'ledger-security-001' -Plan $caseData.plan
+        $planHash = (Get-FileHash -LiteralPath $context.plan_path -Algorithm SHA256).Hash
+        $resultHash = (Get-FileHash -LiteralPath $context.result_path -Algorithm SHA256).Hash
+
+        $null = Assert-Throws {
+            New-CalibrationPilotRun -ResultsRoot $caseData.results_root -RunId 'ledger-security-001' -Plan $caseData.plan | Out-Null
+        } 'pilot_run_collision'
+        $null = Assert-Throws {
+            Write-CalibrationCreateNewJson -Path $context.plan_path -Value ([pscustomobject]@{ changed = $true }) `
+                -AllowedRunRoot $context.run_root
+        } 'pilot_create_new_collision'
+        Assert-Equal (Get-FileHash -LiteralPath $context.plan_path -Algorithm SHA256).Hash $planHash
+
+        Set-CalibrationPilotRunState -Context $context -State 'preflight_passed'
+        Assert-False ((Get-FileHash -LiteralPath $context.result_path -Algorithm SHA256).Hash -ceq $resultHash)
+        Assert-Equal (Get-FileHash -LiteralPath $context.plan_path -Algorithm SHA256).Hash $planHash
+        Assert-Equal (Get-Item -LiteralPath $context.claim_path -Force).Length 0
+
+        $tempPath = Join-Path $context.run_root ('.result-{0}.tmp' -f [guid]::NewGuid().ToString('N'))
+        [IO.File]::WriteAllText($tempPath, 'owned collision probe', [Text.UTF8Encoding]::new($false))
+        $before = (Get-FileHash -LiteralPath $context.result_path -Algorithm SHA256).Hash
+        $null = Assert-Throws {
+            Write-CalibrationAtomicResultJson -Path $context.result_path -Value $context.result `
+                -AllowedRunRoot $context.run_root -TemporaryPath $tempPath
+        } 'pilot_result_temp_collision'
+        Assert-Equal (Get-FileHash -LiteralPath $context.result_path -Algorithm SHA256).Hash $before
+        Assert-Equal (Get-Content -Raw -LiteralPath $tempPath) 'owned collision probe'
+        Remove-Item -LiteralPath $tempPath -Force
+    } finally {
+        if ($null -ne $context) { Close-CalibrationPilotRun -Context $context }
+        Remove-SecurityPilotLedgerRoot -Path $caseData.results_root
+    }
+}
+
+Invoke-Assertion 'pilot run accepts the calibration results boundary as its explicit root' {
+    $plan = Invoke-Calibration -Pilot -CalibrationSetPath $setPath -RubricsRoot $rubricsRoot
+    $runId = 'ledger-default-{0}' -f [guid]::NewGuid().ToString('N')
+    $runRoot = Join-Path $resultsRoot $runId
+    $context = $null
+    try {
+        $context = New-CalibrationPilotRun -ResultsRoot $resultsRoot -RunId $runId -Plan $plan
+        Assert-Equal $context.run_root ([IO.Path]::GetFullPath($runRoot))
+    } finally {
+        if ($null -ne $context) { Close-CalibrationPilotRun -Context $context }
+        $fullRunRoot = [IO.Path]::GetFullPath($runRoot)
+        $fullBoundary = [IO.Path]::GetFullPath($resultsRoot).TrimEnd([IO.Path]::DirectorySeparatorChar)
+        Assert-True ($fullRunRoot.StartsWith(($fullBoundary + [IO.Path]::DirectorySeparatorChar), [StringComparison]::OrdinalIgnoreCase))
+        Assert-True ([IO.Path]::GetFileName($fullRunRoot) -match '^ledger-default-[0-9a-f]{32}$')
+        if (Test-Path -LiteralPath $fullRunRoot) { Remove-Item -LiteralPath $fullRunRoot -Recurse -Force }
+    }
+}
+
+Invoke-Assertion 'pilot context detects immutable plan drift before any result replacement' {
+    $caseData = New-SecurityPilotLedgerInput
+    $context = $null
+    try {
+        $badPlan = $caseData.plan | ConvertTo-Json -Depth 100 | ConvertFrom-Json -Depth 100
+        $badPlan.source_hashes | Add-Member -NotePropertyName raw_source -NotePropertyValue ('a' * 64)
+        $null = Assert-Throws {
+            New-CalibrationPilotRun -ResultsRoot $caseData.results_root -RunId 'ledger-security-bad-plan' -Plan $badPlan | Out-Null
+        } 'pilot_plan_contract_invalid'
+        Assert-False (Test-Path -LiteralPath $caseData.results_root)
+
+        $context = New-CalibrationPilotRun -ResultsRoot $caseData.results_root -RunId 'ledger-security-005' -Plan $caseData.plan
+        $before = (Get-FileHash -LiteralPath $context.result_path -Algorithm SHA256).Hash
+        $context.plan.roles[0].family = 'openai'
+        $null = Assert-Throws {
+            Set-CalibrationPilotRunState -Context $context -State 'preflight_passed'
+        } 'pilot_run_context_invalid'
+        Assert-Equal (Get-FileHash -LiteralPath $context.result_path -Algorithm SHA256).Hash $before
+    } finally {
+        if ($null -ne $context) { Close-CalibrationPilotRun -Context $context }
+        Remove-SecurityPilotLedgerRoot -Path $caseData.results_root
+    }
+}
+
+Invoke-Assertion 'pilot context rejects a released run lock and stale persisted result' {
+    $caseData = New-SecurityPilotLedgerInput
+    $context = $null
+    try {
+        $context = New-CalibrationPilotRun -ResultsRoot $caseData.results_root -RunId 'ledger-security-006' -Plan $caseData.plan
+        $context.claim_stream.Dispose()
+        $null = Assert-Throws {
+            Set-CalibrationPilotRunState -Context $context -State 'preflight_passed'
+        } 'pilot_run_context_invalid'
+        Close-CalibrationPilotRun -Context $context
+        $context = $null
+
+        $context = New-CalibrationPilotRun -ResultsRoot $caseData.results_root -RunId 'ledger-security-007' -Plan $caseData.plan
+        $persisted = Get-Content -Raw -LiteralPath $context.result_path | ConvertFrom-Json -Depth 100
+        $persisted.run_state = 'stopped'
+        $persisted.stop_reason = 'pilot_stopped'
+        $persisted.finished_at = [DateTimeOffset]::UtcNow.ToString('o')
+        $persisted | ConvertTo-Json -Depth 100 | Set-Content -LiteralPath $context.result_path -Encoding utf8NoBOM
+        $before = (Get-FileHash -LiteralPath $context.result_path -Algorithm SHA256).Hash
+        $null = Assert-Throws {
+            Set-CalibrationPilotRunState -Context $context -State 'preflight_passed'
+        } 'pilot_result_contract_invalid'
+        Assert-Equal (Get-FileHash -LiteralPath $context.result_path -Algorithm SHA256).Hash $before
+    } finally {
+        if ($null -ne $context) { Close-CalibrationPilotRun -Context $context }
+        Remove-SecurityPilotLedgerRoot -Path $caseData.results_root
+    }
+}
+
+Invoke-Assertion 'pilot ledger rejects unsafe roots run ids writes and counter drift' {
+    $caseData = New-SecurityPilotLedgerInput
+    $context = $null
+    try {
+        foreach ($unsafeRunId in @('../escape', '..', 'C:\absolute', 'bad/name', 'bad\name')) {
+            $null = Assert-Throws {
+                New-CalibrationPilotRun -ResultsRoot $caseData.results_root -RunId $unsafeRunId -Plan $caseData.plan | Out-Null
+            } 'pilot_run_id_invalid'
+        }
+        $outsideRoot = Join-Path ([IO.Path]::GetTempPath()) ('pilot-ledger-outside-{0}' -f [guid]::NewGuid().ToString('N'))
+        $null = Assert-Throws {
+            New-CalibrationPilotRun -ResultsRoot $outsideRoot -RunId 'ledger-security-outside' -Plan $caseData.plan | Out-Null
+        } 'pilot_results_root_invalid'
+        Assert-False (Test-Path -LiteralPath $outsideRoot)
+
+        $context = New-CalibrationPilotRun -ResultsRoot $caseData.results_root -RunId 'ledger-security-002' -Plan $caseData.plan
+        $outsideFile = Join-Path ([IO.Path]::GetTempPath()) ('pilot-ledger-outside-{0}.json' -f [guid]::NewGuid().ToString('N'))
+        $null = Assert-Throws {
+            Write-CalibrationCreateNewJson -Path $outsideFile -Value ([pscustomobject]@{ safe = $true }) `
+                -AllowedRunRoot $context.run_root
+        } 'Calibration write path escaped'
+        Assert-False (Test-Path -LiteralPath $outsideFile)
+
+        Set-CalibrationPilotRunState -Context $context -State 'preflight_passed'
+        Set-CalibrationPilotRunState -Context $context -State 'running'
+        $claim = New-CalibrationPilotSlotClaim -Context $context -Ordinal 1 -Identity $caseData.plan.roles[0]
+        $context.result.slots_consumed.total = 0
+        $before = (Get-FileHash -LiteralPath $context.result_path -Algorithm SHA256).Hash
+        $null = Assert-Throws { Get-CalibrationPilotClaimCount -Context $context | Out-Null } 'pilot_claim_counter_mismatch'
+        Assert-Equal (Get-FileHash -LiteralPath $context.result_path -Algorithm SHA256).Hash $before
+        Assert-True (Test-Path -LiteralPath $claim.claim_path -PathType Leaf)
+    } finally {
+        if ($null -ne $context) { Close-CalibrationPilotRun -Context $context }
+        Remove-SecurityPilotLedgerRoot -Path $caseData.results_root
+    }
+}
+
+Invoke-Assertion 'pilot claim persists before an indeterminate result update and is never refunded' {
+    $caseData = New-SecurityPilotLedgerInput
+    $context = $null
+    $originalWriter = $null
+    try {
+        $context = New-CalibrationPilotRun -ResultsRoot $caseData.results_root -RunId 'ledger-security-004' -Plan $caseData.plan
+        Set-CalibrationPilotRunState -Context $context -State 'preflight_passed'
+        Set-CalibrationPilotRunState -Context $context -State 'running'
+        $originalWriter = (Get-Command -Name Write-CalibrationAtomicResultJson -CommandType Function -ErrorAction Stop).ScriptBlock
+        Set-Item -Path Function:\Write-CalibrationAtomicResultJson -Value { throw 'forced result persistence failure' }
+        $null = Assert-Throws {
+            New-CalibrationPilotSlotClaim -Context $context -Ordinal 1 -Identity $caseData.plan.roles[0] | Out-Null
+        } 'pilot_claim_persistence_indeterminate'
+        Set-Item -Path Function:\Write-CalibrationAtomicResultJson -Value $originalWriter
+        $originalWriter = $null
+
+        $claimPath = Join-Path $context.claims_path '01-google-candidate.claim'
+        Assert-True (Test-Path -LiteralPath $claimPath -PathType Leaf) 'The non-refundable claim was removed after persistence uncertainty.'
+        Assert-Equal $context.result.attempts[0].state 'planned'
+        Assert-Equal $context.result.slots_consumed.total 0
+        $persisted = Get-Content -Raw -LiteralPath $context.result_path | ConvertFrom-Json -Depth 100
+        Assert-Equal $persisted.attempts[0].state 'planned'
+        Assert-Equal $persisted.slots_consumed.total 0
+        $null = Assert-Throws { Get-CalibrationPilotClaimCount -Context $context | Out-Null } 'pilot_claim_counter_mismatch'
+        Assert-True (Test-Path -LiteralPath $claimPath -PathType Leaf) 'Claim-count verification refunded the claim.'
+    } finally {
+        if ($null -ne $originalWriter) { Set-Item -Path Function:\Write-CalibrationAtomicResultJson -Value $originalWriter }
+        if ($null -ne $context) { Close-CalibrationPilotRun -Context $context }
+        Remove-SecurityPilotLedgerRoot -Path $caseData.results_root
+    }
+}
+
+Invoke-Assertion 'pilot ledger rejects reparse ancestors and descendants without outside writes' {
+    $caseData = New-SecurityPilotLedgerInput
+    $outside = Join-Path ([IO.Path]::GetTempPath()) ('pilot-ledger-junction-outside-{0}' -f [guid]::NewGuid().ToString('N'))
+    $context = $null
+    New-Item -ItemType Directory -Path $outside | Out-Null
+    try {
+        New-Item -ItemType Directory -Path $caseData.results_root | Out-Null
+        $ancestorJunction = Join-Path $caseData.results_root 'ancestor-link'
+        try {
+            New-Item -ItemType Junction -Path $ancestorJunction -Target $outside -ErrorAction Stop | Out-Null
+        } catch {
+            Write-Host 'SKIP pilot ledger junction regression: privilege or filesystem support unavailable.'
+            return
+        }
+        $null = Assert-Throws {
+            New-CalibrationPilotRun -ResultsRoot $ancestorJunction -RunId 'ledger-security-junction' -Plan $caseData.plan | Out-Null
+        } 'reparse'
+        Assert-Equal @(Get-ChildItem -LiteralPath $outside -Force).Count 0
+
+        Remove-Item -LiteralPath $ancestorJunction -Force
+        $context = New-CalibrationPilotRun -ResultsRoot $caseData.results_root -RunId 'ledger-security-003' -Plan $caseData.plan
+        Remove-Item -LiteralPath $context.raw_path -Force
+        New-Item -ItemType Junction -Path $context.raw_path -Target $outside -ErrorAction Stop | Out-Null
+        $null = Assert-Throws {
+            Write-CalibrationCreateNewJson -Path (Join-Path $context.raw_path 'escape.json') `
+                -Value ([pscustomobject]@{ safe = $true }) -AllowedRunRoot $context.run_root
+        } 'reparse'
+        Assert-Equal @(Get-ChildItem -LiteralPath $outside -Force).Count 0
+    } finally {
+        if ($null -ne $context) { Close-CalibrationPilotRun -Context $context }
+        Remove-SecurityPilotLedgerRoot -Path $caseData.results_root
+        if (Test-Path -LiteralPath $outside) { Remove-Item -LiteralPath $outside -Recurse -Force }
     }
 }
 

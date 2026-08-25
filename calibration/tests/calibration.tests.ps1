@@ -129,6 +129,26 @@ function New-CalibrationResultsTestRoot {
     return $path
 }
 
+function New-TestCalibrationPilotLedgerInput {
+    $leaf = 'pilot-ledger-{0}' -f [guid]::NewGuid().ToString('N')
+    return [pscustomobject]@{
+        results_root = Join-Path (Join-Path $calibrationRoot 'results') $leaf
+        plan = Invoke-Calibration -Pilot -CalibrationSetPath $setPath -RubricsRoot $rubricsRoot
+    }
+}
+
+function Remove-TestCalibrationPilotLedgerRoot {
+    param([Parameter(Mandatory)][string]$Path)
+    $fullPath = [IO.Path]::GetFullPath($Path)
+    $boundary = [IO.Path]::GetFullPath((Join-Path $calibrationRoot 'results')).TrimEnd(
+        [IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+    $leaf = [IO.Path]::GetFileName($fullPath)
+    Assert-True ($fullPath.StartsWith(($boundary + [IO.Path]::DirectorySeparatorChar), [StringComparison]::OrdinalIgnoreCase)) `
+        'Refusing to clean a pilot ledger root outside calibration/results.'
+    Assert-True ($leaf -match '^pilot-ledger-[0-9a-f]{32}$') 'Refusing to clean a pilot ledger root not owned by this test.'
+    if (Test-Path -LiteralPath $fullPath) { Remove-Item -LiteralPath $fullPath -Recurse -Force }
+}
+
 function Get-CalibrationResultsTreeSnapshot {
     param([Parameter(Mandatory)][string]$Root)
     return @(
@@ -720,6 +740,193 @@ if (Test-Path -LiteralPath $implementationPath -PathType Leaf) {
             Assert-SequenceEqual (Get-CalibrationResultsTreeSnapshot -Root $resultsRoot) $before
         } finally {
             if (Test-Path -LiteralPath $resultsRoot) { Remove-Item -LiteralPath $resultsRoot -Recurse -Force }
+        }
+    }
+
+    Invoke-Assertion 'pilot ledger creates one claimed run with an exact safe initial result' {
+        $input = New-TestCalibrationPilotLedgerInput
+        $context = $null
+        try {
+            $context = New-CalibrationPilotRun -ResultsRoot $input.results_root -RunId 'ledger-test-001' -Plan $input.plan
+            $runRoot = Join-Path $input.results_root 'ledger-test-001'
+            Assert-SequenceEqual @(
+                Get-ChildItem -LiteralPath $runRoot -Force | Sort-Object Name | ForEach-Object Name
+            ) @('.run.claim', 'claims', 'plan.json', 'raw', 'result.json')
+            $persistedPlan = Get-Content -Raw -LiteralPath (Join-Path $runRoot 'plan.json') | ConvertFrom-Json -Depth 100
+            $result = Get-Content -Raw -LiteralPath (Join-Path $runRoot 'result.json') | ConvertFrom-Json -Depth 100
+            Assert-Equal (Get-CalibrationObjectSha256 -Value $persistedPlan) (Get-CalibrationObjectSha256 -Value $input.plan)
+            Assert-SequenceEqual @($result.PSObject.Properties.Name) @(
+                'artifact_version', 'run_id', 'pilot_id', 'selection_mode', 'run_state', 'stop_reason',
+                'started_at', 'finished_at', 'source_hashes', 'limits', 'attempts', 'slots_consumed',
+                'launcher_processes_started', 'provider_side_requests', 'quality',
+                'profile_promotion_allowed', 'profile_mutated', 'production_eligibility_changed'
+            )
+            Assert-Equal $result.artifact_version 'calibration-pilot-result/v1'
+            Assert-Equal $result.run_id 'ledger-test-001'
+            Assert-Equal $result.pilot_id 'option1-three-launch-v1'
+            Assert-Equal $result.selection_mode 'calibration_only_exact_pin'
+            Assert-Equal $result.run_state 'planned'
+            Assert-True ($null -eq $result.stop_reason)
+            Assert-True ($null -eq $result.started_at)
+            Assert-True ($null -eq $result.finished_at)
+            Assert-Equal (Get-CalibrationObjectSha256 -Value $result.source_hashes) (Get-CalibrationObjectSha256 -Value $input.plan.source_hashes)
+            Assert-Equal (Get-CalibrationObjectSha256 -Value $result.limits) (Get-CalibrationObjectSha256 -Value $input.plan.limits)
+            Assert-Equal @($result.attempts).Count 3
+            for ($index = 0; $index -lt 3; $index++) {
+                $attempt = $result.attempts[$index]
+                $role = $input.plan.roles[$index]
+                Assert-SequenceEqual @($attempt.PSObject.Properties.Name) @(
+                    'ordinal', 'role', 'family', 'launcher', 'route_id', 'configuration_id', 'model', 'effort',
+                    'state', 'slot_claimed_at', 'process_started_at', 'completed_at', 'exit_code',
+                    'transport_status', 'contract_status', 'decision'
+                )
+                foreach ($name in @('ordinal', 'role', 'family', 'launcher', 'route_id', 'configuration_id', 'model', 'effort')) {
+                    Assert-Equal $attempt.$name $role.$name
+                }
+                Assert-Equal $attempt.state 'planned'
+                foreach ($name in @('slot_claimed_at', 'process_started_at', 'completed_at', 'exit_code', 'transport_status', 'contract_status', 'decision')) {
+                    Assert-True ($null -eq $attempt.$name) "Expected initial attempt '$name' to be null."
+                }
+            }
+            Assert-Equal $result.slots_consumed.total 0
+            Assert-Equal $result.slots_consumed.provider_family.google 0
+            Assert-Equal $result.slots_consumed.provider_family.openai 0
+            Assert-Equal $result.slots_consumed.provider_family.anthropic 0
+            Assert-Equal $result.launcher_processes_started.total 0
+            Assert-False $result.provider_side_requests.observable
+            Assert-True ($null -eq $result.provider_side_requests.count)
+            Assert-Equal $result.quality.external_category 'unknown'
+            Assert-False $result.profile_promotion_allowed
+            Assert-False $result.profile_mutated
+            Assert-False $result.production_eligibility_changed
+        } finally {
+            if ($null -ne $context) { Close-CalibrationPilotRun -Context $context }
+            Remove-TestCalibrationPilotLedgerRoot -Path $input.results_root
+        }
+    }
+
+    Invoke-Assertion 'pilot run and attempt state machines reject invalid or stale mutations without changing result' {
+        $input = New-TestCalibrationPilotLedgerInput
+        $context = $null
+        try {
+            $context = New-CalibrationPilotRun -ResultsRoot $input.results_root -RunId 'ledger-test-002' -Plan $input.plan
+            $resultPath = $context.result_path
+            Set-CalibrationPilotRunState -Context $context -State 'preflight_passed'
+            Assert-Equal $context.result.run_state 'preflight_passed'
+            $before = (Get-FileHash -LiteralPath $resultPath -Algorithm SHA256).Hash
+            $context.result.stop_reason = 'arbitrary exception text must not persist'
+            $null = Assert-Throws { Set-CalibrationPilotRunState -Context $context -State 'running' } 'pilot_result_contract_invalid'
+            Assert-Equal (Get-FileHash -LiteralPath $resultPath -Algorithm SHA256).Hash $before
+            $context.result = Get-Content -Raw -LiteralPath $resultPath | ConvertFrom-Json -Depth 100
+            $null = Assert-Throws { Set-CalibrationPilotRunState -Context $context -State 'completed' } 'pilot_run_transition_invalid'
+            Assert-Equal (Get-FileHash -LiteralPath $resultPath -Algorithm SHA256).Hash $before
+            Set-CalibrationPilotRunState -Context $context -State 'running'
+
+            Assert-SequenceEqual @($script:PilotRunTransitions.planned) @('preflight_passed', 'stopped')
+            Assert-SequenceEqual @($script:PilotRunTransitions.preflight_passed) @('running', 'stopped')
+            Assert-SequenceEqual @($script:PilotRunTransitions.running) @('completed', 'stopped', 'indeterminate')
+            foreach ($terminal in @('completed', 'stopped', 'indeterminate')) {
+                Assert-Equal @($script:PilotRunTransitions[$terminal]).Count 0
+            }
+            Assert-SequenceEqual @($script:PilotAttemptTransitions.planned) @('slot_reserved', 'skipped')
+            Assert-SequenceEqual @($script:PilotAttemptTransitions.slot_reserved) @('process_started', 'failed')
+            Assert-SequenceEqual @($script:PilotAttemptTransitions.process_started) @('succeeded', 'failed')
+            foreach ($terminal in @('succeeded', 'failed', 'skipped')) {
+                Assert-Equal @($script:PilotAttemptTransitions[$terminal]).Count 0
+            }
+
+            $null = Assert-Throws { Set-CalibrationPilotRunState -Context $context -State 'completed' } 'pilot_run_completion_invalid'
+
+            $null = Assert-Throws { Set-CalibrationPilotAttemptState -Context $context -Ordinal 2 -State 'slot_reserved' } 'pilot_attempt_transition_invalid'
+            $null = Assert-Throws { Set-CalibrationPilotAttemptState -Context $context -Ordinal 4 -State 'slot_reserved' } 'pilot_attempt_ordinal_invalid'
+            $null = Assert-Throws { Set-CalibrationPilotAttemptState -Context $context -Ordinal 'one' -State 'skipped' } 'pilot_attempt_ordinal_invalid'
+            $missing = Copy-TestObject $context.result
+            $missing.attempts = @($missing.attempts | Select-Object -First 2)
+            $context.result = $missing
+            $before = (Get-FileHash -LiteralPath $resultPath -Algorithm SHA256).Hash
+            $null = Assert-Throws { Set-CalibrationPilotRunState -Context $context -State 'stopped' } 'pilot_result_contract_invalid'
+            Assert-Equal (Get-FileHash -LiteralPath $resultPath -Algorithm SHA256).Hash $before
+            $context.result = Get-Content -Raw -LiteralPath $resultPath | ConvertFrom-Json -Depth 100
+            Set-CalibrationPilotRunState -Context $context -State 'stopped'
+            $before = (Get-FileHash -LiteralPath $resultPath -Algorithm SHA256).Hash
+            $null = Assert-Throws { Set-CalibrationPilotRunState -Context $context -State 'running' } 'pilot_run_transition_invalid'
+            $null = Assert-Throws { Set-CalibrationPilotAttemptState -Context $context -Ordinal 1 -State 'skipped' } 'pilot_attempt_run_terminal'
+            Assert-Equal (Get-FileHash -LiteralPath $resultPath -Algorithm SHA256).Hash $before
+        } finally {
+            if ($null -ne $context) { Close-CalibrationPilotRun -Context $context }
+            Remove-TestCalibrationPilotLedgerRoot -Path $input.results_root
+        }
+    }
+
+    Invoke-Assertion 'pilot slot claims are exact ordered durable and non-refundable' {
+        $input = New-TestCalibrationPilotLedgerInput
+        $context = $null
+        try {
+            $context = New-CalibrationPilotRun -ResultsRoot $input.results_root -RunId 'ledger-test-003' -Plan $input.plan
+            Set-CalibrationPilotRunState -Context $context -State 'preflight_passed'
+            Set-CalibrationPilotRunState -Context $context -State 'running'
+            $google = $input.plan.roles[0]
+            $openai = $input.plan.roles[1]
+            $anthropic = $input.plan.roles[2]
+            $first = New-CalibrationPilotSlotClaim -Context $context -Ordinal 1 -Identity $google
+            Assert-True (Test-Path -LiteralPath $first.claim_path -PathType Leaf)
+            Assert-Equal (Get-CalibrationPilotClaimCount -Context $context).total 1
+            Assert-Equal $context.result.attempts[0].state 'slot_reserved'
+            $null = Assert-Throws { New-CalibrationPilotSlotClaim -Context $context -Ordinal 1 -Identity $google } 'pilot_slot_not_next'
+            $null = Assert-Throws { New-CalibrationPilotSlotClaim -Context $context -Ordinal 3 -Identity $anthropic } 'pilot_slot_not_next'
+            $null = Assert-Throws { New-CalibrationPilotSlotClaim -Context $context -Ordinal 4 -Identity $anthropic } 'pilot_slot_ordinal_invalid'
+            $null = Assert-Throws { New-CalibrationPilotSlotClaim -Context $context -Ordinal 2 -Identity $openai } 'pilot_slot_previous_incomplete'
+            $wrong = Copy-TestObject $openai
+            $wrong.family = 'google'
+            $null = Assert-Throws { New-CalibrationPilotSlotClaim -Context $context -Ordinal 2 -Identity $wrong } 'pilot_slot_identity_invalid'
+
+            Set-CalibrationPilotAttemptState -Context $context -Ordinal 1 -State 'failed'
+            Assert-True (Test-Path -LiteralPath $first.claim_path -PathType Leaf)
+            Assert-Equal (Get-CalibrationPilotClaimCount -Context $context).total 1
+            $null = Assert-Throws { New-CalibrationPilotSlotClaim -Context $context -Ordinal 2 -Identity $openai } 'pilot_slot_previous_incomplete'
+        } finally {
+            if ($null -ne $context) { Close-CalibrationPilotRun -Context $context }
+            Remove-TestCalibrationPilotLedgerRoot -Path $input.results_root
+        }
+    }
+
+    Invoke-Assertion 'pilot slot claims consume exactly one slot per family after prior success' {
+        $input = New-TestCalibrationPilotLedgerInput
+        $context = $null
+        try {
+            $context = New-CalibrationPilotRun -ResultsRoot $input.results_root -RunId 'ledger-test-004' -Plan $input.plan
+            Set-CalibrationPilotRunState -Context $context -State 'preflight_passed'
+            Set-CalibrationPilotRunState -Context $context -State 'running'
+            $google = $input.plan.roles[0]
+            $openai = $input.plan.roles[1]
+            $anthropic = $input.plan.roles[2]
+            $first = New-CalibrationPilotSlotClaim -Context $context -Ordinal 1 -Identity $google
+            Set-CalibrationPilotAttemptState -Context $context -Ordinal 1 -State 'process_started'
+            Set-CalibrationPilotAttemptState -Context $context -Ordinal 1 -State 'succeeded'
+            $second = New-CalibrationPilotSlotClaim -Context $context -Ordinal 2 -Identity $openai
+            Set-CalibrationPilotAttemptState -Context $context -Ordinal 2 -State 'process_started'
+            Set-CalibrationPilotAttemptState -Context $context -Ordinal 2 -State 'succeeded'
+            $third = New-CalibrationPilotSlotClaim -Context $context -Ordinal 3 -Identity $anthropic
+            $counts = Get-CalibrationPilotClaimCount -Context $context
+            Assert-Equal $counts.total 3
+            Assert-Equal $counts.provider_family.google 1
+            Assert-Equal $counts.provider_family.openai 1
+            Assert-Equal $counts.provider_family.anthropic 1
+            Assert-True (Test-Path -LiteralPath $second.claim_path -PathType Leaf)
+            Assert-True (Test-Path -LiteralPath $third.claim_path -PathType Leaf)
+            $thirdHash = (Get-FileHash -LiteralPath $third.claim_path -Algorithm SHA256).Hash
+            Set-CalibrationPilotAttemptState -Context $context -Ordinal 3 -State 'process_started'
+            Assert-Equal $context.result.launcher_processes_started.total 3
+            Assert-Equal $context.result.launcher_processes_started.provider_family.anthropic 1
+            Set-CalibrationPilotAttemptState -Context $context -Ordinal 3 -State 'succeeded'
+            Assert-Equal (Get-FileHash -LiteralPath $third.claim_path -Algorithm SHA256).Hash $thirdHash
+            $before = (Get-FileHash -LiteralPath $context.result_path -Algorithm SHA256).Hash
+            $null = Assert-Throws { Set-CalibrationPilotAttemptState -Context $context -Ordinal 3 -State 'failed' } 'pilot_attempt_transition_invalid'
+            Assert-Equal (Get-FileHash -LiteralPath $context.result_path -Algorithm SHA256).Hash $before
+            $null = Assert-Throws { New-CalibrationPilotSlotClaim -Context $context -Ordinal 4 -Identity $anthropic } 'pilot_slot_ordinal_invalid'
+        } finally {
+            if ($null -ne $context) { Close-CalibrationPilotRun -Context $context }
+            Remove-TestCalibrationPilotLedgerRoot -Path $input.results_root
         }
     }
 
