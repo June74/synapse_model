@@ -93,6 +93,21 @@ function New-TestDirectory {
     return $path
 }
 
+function New-CalibrationResultsTestRoot {
+    $path = Join-Path $calibrationRoot ('results/pilot-admission-{0}' -f [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $path | Out-Null
+    return $path
+}
+
+function Get-CalibrationResultsTreeSnapshot {
+    param([Parameter(Mandatory)][string]$Root)
+    return @(
+        Get-ChildItem -LiteralPath $Root -Force -Recurse |
+        ForEach-Object { $_.FullName.Substring($Root.Length) } |
+        Sort-Object
+    )
+}
+
 function Write-TestPilotMatrix {
     param([Parameter(Mandatory)][string]$Directory, [Parameter(Mandatory)][scriptblock]$Mutation)
     $matrix = Copy-TestObject (Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'pilot/model_matrix.json') | ConvertFrom-Json -Depth 100)
@@ -335,6 +350,102 @@ if (Test-Path -LiteralPath $implementationPath -PathType Leaf) {
         Assert-Equal $script:RouterCalls 0
         Assert-Equal $script:JudgeCalls 0
         Assert-Equal ($first | ConvertTo-Json -Depth 100 -Compress) ($second | ConvertTo-Json -Depth 100 -Compress)
+    }
+
+    Invoke-Assertion 'pilot admission returns the immutable offline three-launch plan without calls or result writes' {
+        $resultsRoot = New-CalibrationResultsTestRoot
+        try {
+            $before = Get-CalibrationResultsTreeSnapshot -Root $resultsRoot
+            $script:PilotCandidateCalls = 0
+            $script:PilotJudgeCalls = 0
+            $candidateSpy = { $script:PilotCandidateCalls++; throw 'pilot plan executed a candidate' }
+            $judgeSpy = { $script:PilotJudgeCalls++; throw 'pilot plan executed a judge' }
+            $result = Invoke-Calibration -Pilot -ResultsRoot $resultsRoot `
+                -CalibrationSetPath $setPath -RubricsRoot $rubricsRoot `
+                -CandidateInvoker $candidateSpy -JudgeInvoker $judgeSpy
+            Assert-Equal $result.mode 'pilot-plan'
+            Assert-Equal $result.artifact_version 'calibration-pilot-plan/v1'
+            Assert-Equal $result.pilot_id 'option1-three-launch-v1'
+            Assert-Equal $result.selection_mode 'calibration_only_exact_pin'
+            Assert-Equal $result.prompt.id 'extraction-low-general-v1'
+            Assert-Equal $result.prompt.version '1.0.0'
+            Assert-SequenceEqual @($result.roles.ordinal) @(1, 2, 3)
+            Assert-SequenceEqual @($result.roles.route_id) @(
+                'agy__gemini_3_7_flash_low__low',
+                'codex__gpt_5_6_sol__max',
+                'claude__claude_opus_5__max'
+            )
+            Assert-SequenceEqual @($result.roles.configuration_id) @(
+                'gemini-3.7-flash-low__low',
+                'gpt-5.6-sol__max',
+                'claude-opus-5__max'
+            )
+            Assert-Equal $result.limits.total 3
+            Assert-Equal $result.limits.provider_family.google 1
+            Assert-Equal $result.limits.provider_family.openai 1
+            Assert-Equal $result.limits.provider_family.anthropic 1
+            Assert-Equal $result.limits.application_retries 0
+            Assert-Equal $result.provider_calls 0
+            Assert-False ([bool]$result.provider_side_requests.observable)
+            Assert-Equal $result.provider_side_requests.count $null
+            Assert-False ([bool]$result.profile_promotion_allowed)
+            Assert-False ([bool]$result.profile_mutated)
+            Assert-False ([bool]$result.production_eligibility_changed)
+            foreach ($name in @('manifest', 'matrix', 'candidate_profile', 'calibration_set', 'prompt_definition', 'rubric', 'response_schema')) {
+                $hash = [string]$result.source_hashes.$name
+                Assert-True ($hash -cmatch '^[0-9a-f]{64}$') "Expected a lowercase SHA-256 for '$name'."
+            }
+            Assert-Equal $script:PilotCandidateCalls 0
+            Assert-Equal $script:PilotJudgeCalls 0
+            Assert-SequenceEqual (Get-CalibrationResultsTreeSnapshot -Root $resultsRoot) $before
+        } finally {
+            if (Test-Path -LiteralPath $resultsRoot) { Remove-Item -LiteralPath $resultsRoot -Recurse -Force }
+        }
+    }
+
+    Invoke-Assertion 'pilot validates all 24 calibration prompts before fixed-prompt selection without calls or writes' {
+        $resultsRoot = New-CalibrationResultsTestRoot
+        try {
+            $sourceDirectory = Join-Path $resultsRoot 'sources'
+            New-Item -ItemType Directory -Path $sourceDirectory | Out-Null
+            $badSet = Copy-TestObject (Get-Content -Raw -LiteralPath $setPath | ConvertFrom-Json -Depth 100)
+            $nonSelected = @($badSet.prompts | Where-Object { $_.id -ceq 'general-low-biology-v1' })[0]
+            $nonSelected.PSObject.Properties.Remove('version')
+            $badSetPath = Join-Path $sourceDirectory 'bad-calibration-set.json'
+            $badSet | ConvertTo-Json -Depth 100 | Set-Content -LiteralPath $badSetPath -Encoding utf8NoBOM
+            $before = Get-CalibrationResultsTreeSnapshot -Root $resultsRoot
+            $script:PilotValidationCalls = 0
+            $spy = { $script:PilotValidationCalls++; throw 'pilot validation executed a provider' }
+            $null = Assert-Throws {
+                Invoke-Calibration -Pilot -ResultsRoot $resultsRoot -CalibrationSetPath $badSetPath `
+                    -RubricsRoot $rubricsRoot -CandidateInvoker $spy -JudgeInvoker $spy | Out-Null
+            } 'Pilot calibration set validation failed'
+            Assert-Equal $script:PilotValidationCalls 0
+            Assert-SequenceEqual (Get-CalibrationResultsTreeSnapshot -Root $resultsRoot) $before
+        } finally {
+            if (Test-Path -LiteralPath $resultsRoot) { Remove-Item -LiteralPath $resultsRoot -Recurse -Force }
+        }
+    }
+
+    Invoke-Assertion 'pilot rejects route and a non-live run id before calls or result writes' {
+        $resultsRoot = New-CalibrationResultsTestRoot
+        try {
+            $before = Get-CalibrationResultsTreeSnapshot -Root $resultsRoot
+            $script:PilotExclusiveCalls = 0
+            $spy = { $script:PilotExclusiveCalls++; throw 'pilot incompatibility executed work' }
+            $null = Assert-Throws {
+                Invoke-Calibration -Pilot -Route -ResultsRoot $resultsRoot -CalibrationSetPath $setPath `
+                    -RubricsRoot $rubricsRoot -CandidateInvoker $spy -JudgeInvoker $spy | Out-Null
+            } 'Pilot and Route are mutually exclusive'
+            $null = Assert-Throws {
+                Invoke-Calibration -Pilot -RunId 'not-live' -ResultsRoot $resultsRoot -CalibrationSetPath $setPath `
+                    -RubricsRoot $rubricsRoot -CandidateInvoker $spy -JudgeInvoker $spy | Out-Null
+            } 'Pilot RunId requires Run'
+            Assert-Equal $script:PilotExclusiveCalls 0
+            Assert-SequenceEqual (Get-CalibrationResultsTreeSnapshot -Root $resultsRoot) $before
+        } finally {
+            if (Test-Path -LiteralPath $resultsRoot) { Remove-Item -LiteralPath $resultsRoot -Recurse -Force }
+        }
     }
 
     Invoke-Assertion 'judge payload recursively hides all supplied identity metadata from keys and values' {

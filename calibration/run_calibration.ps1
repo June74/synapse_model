@@ -2,6 +2,7 @@
 param(
     [switch]$Run,
     [switch]$Route,
+    [switch]$Pilot,
     [AllowNull()][string]$RunId,
     [string]$CalibrationSetPath = (Join-Path $PSScriptRoot 'calibration-set-v1.json'),
     [string]$RubricsRoot = (Join-Path $PSScriptRoot 'rubrics'),
@@ -516,6 +517,16 @@ function Get-CalibrationProfileAndCandidate {
     return [pscustomobject]@{ profile = $profile; candidate = $candidate }
 }
 
+function Get-CalibrationFileSha256 {
+    param([Parameter(Mandatory)][string]$Path)
+    return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+}
+
+function Get-CalibrationObjectSha256 {
+    param([Parameter(Mandatory)][object]$Value)
+    return Get-CalibrationSha256 -Text ($Value | ConvertTo-Json -Depth 100 -Compress)
+}
+
 function Assert-CalibrationPilotExactValue {
     param([object]$Actual, [object]$Expected, [string]$Name)
     if ($Actual -cne $Expected) { throw "Pilot manifest '$Name' differs from the approved contract." }
@@ -683,6 +694,70 @@ function Import-CalibrationPilotManifest {
     return Test-CalibrationPilotManifestObject -Manifest $manifest -SchemaPath $SchemaPath -CalibrationSetPath $CalibrationSetPath -RubricsRoot $RubricsRoot
 }
 
+function New-CalibrationPilotPlan {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][object]$Loaded,
+        [Parameter(Mandatory)][string]$PilotManifestPath,
+        [Parameter(Mandatory)][string]$CalibrationSetPath,
+        [string]$MatrixPath = (Join-Path $script:CalibrationProjectRoot 'pilot/model_matrix.json'),
+        [string]$ResponseSchemaPath = (Join-Path $script:CalibrationProjectRoot 'pilot/shared/response_schema.json')
+    )
+
+    $roles = @(
+        foreach ($loadedRole in @($Loaded.roles)) {
+            [pscustomobject][ordered]@{
+                ordinal = $loadedRole.ordinal
+                role = $loadedRole.role
+                family = $loadedRole.family
+                launcher = $loadedRole.launcher
+                route_id = $loadedRole.route_id
+                configuration_id = $loadedRole.configuration_id
+                model = $loadedRole.model
+                effort = $loadedRole.effort
+            }
+        }
+    )
+    $limits = [pscustomobject][ordered]@{
+        total = $Loaded.manifest.limits.total
+        provider_family = [pscustomobject][ordered]@{
+            google = $Loaded.manifest.limits.provider_family.google
+            openai = $Loaded.manifest.limits.provider_family.openai
+            anthropic = $Loaded.manifest.limits.provider_family.anthropic
+        }
+        application_retries = $Loaded.manifest.limits.application_retries
+    }
+    return [pscustomobject][ordered]@{
+        artifact_version = 'calibration-pilot-plan/v1'
+        pilot_id = [string]$Loaded.manifest.pilot_id
+        mode = 'pilot-plan'
+        selection_mode = [string]$Loaded.manifest.selection_mode
+        prompt = [pscustomobject][ordered]@{
+            id = [string]$Loaded.prompt.id
+            version = [string]$Loaded.prompt.version
+        }
+        roles = $roles
+        limits = $limits
+        source_hashes = [pscustomobject][ordered]@{
+            manifest = Get-CalibrationFileSha256 -Path $PilotManifestPath
+            matrix = Get-CalibrationFileSha256 -Path $MatrixPath
+            candidate_profile = Get-CalibrationObjectSha256 -Value $Loaded.roles[0].profile
+            calibration_set = Get-CalibrationFileSha256 -Path $CalibrationSetPath
+            prompt_definition = Get-CalibrationObjectSha256 -Value $Loaded.prompt
+            rubric = Get-CalibrationObjectSha256 -Value $Loaded.rubric
+            response_schema = Get-CalibrationFileSha256 -Path $ResponseSchemaPath
+        }
+        provider_calls = 0
+        provider_side_requests = [pscustomobject][ordered]@{
+            observable = $false
+            count = $null
+        }
+        profile_promotion_allowed = $false
+        profile_mutated = $false
+        production_eligibility_changed = $false
+    }
+}
+
 function Invoke-CalibrationDefaultRouter {
     param([Parameter(Mandatory)][object]$Request, [Parameter(Mandatory)][object]$PromptDefinition)
     return Invoke-RouterRun -Request $Request -RunMode calibration
@@ -804,10 +879,14 @@ function Invoke-Calibration {
     param(
         [switch]$Run,
         [switch]$Route,
+        [switch]$Pilot,
         [AllowNull()][string]$RunId,
         [string]$CalibrationSetPath = (Join-Path $script:CalibrationRoot 'calibration-set-v1.json'),
         [string]$RubricsRoot = (Join-Path $script:CalibrationRoot 'rubrics'),
         [string]$ResultsRoot = $script:CalibrationResultsRoot,
+        [string]$PilotManifestPath = (Join-Path $script:CalibrationRoot 'pilots/option1-three-launch-v1.json'),
+        [string]$PilotManifestSchemaPath = (Join-Path $script:CalibrationRoot 'pilots/option1-three-launch-manifest.schema.json'),
+        [scriptblock]$CandidateInvoker,
         [scriptblock]$RouteInvoker,
         [scriptblock]$RouterInvoker,
         [scriptblock]$GraderInvoker,
@@ -818,6 +897,17 @@ function Invoke-Calibration {
     )
 
     if ($Run -and $Route) { throw 'Run and Route are mutually exclusive.' }
+    if ($Pilot -and $Route) { throw 'Pilot and Route are mutually exclusive.' }
+    if ($Pilot -and -not $Run -and -not [string]::IsNullOrWhiteSpace($RunId)) {
+        throw 'Pilot RunId requires Run.'
+    }
+    if ($Pilot) {
+        if ($Run) { throw 'pilot_live_not_implemented' }
+        $loadedPilot = Import-CalibrationPilotManifest -Path $PilotManifestPath -SchemaPath $PilotManifestSchemaPath `
+            -CalibrationSetPath $CalibrationSetPath -RubricsRoot $RubricsRoot
+        return New-CalibrationPilotPlan -Loaded $loadedPilot -PilotManifestPath $PilotManifestPath `
+            -CalibrationSetPath $CalibrationSetPath
+    }
     $loaded = Import-CalibrationSet -Path $CalibrationSetPath -RubricsRoot $RubricsRoot
     if (-not $loaded.valid) {
         throw ('Calibration inputs are invalid: {0}' -f (@($loaded.errors) -join ', '))
@@ -1130,15 +1220,16 @@ function Invoke-Calibration {
 
 if ($MyInvocation.InvocationName -cne '.') {
     try {
-        $result = Invoke-Calibration -Run:$Run -Route:$Route -RunId $RunId -CalibrationSetPath $CalibrationSetPath `
+        $result = Invoke-Calibration -Run:$Run -Route:$Route -Pilot:$Pilot -RunId $RunId -CalibrationSetPath $CalibrationSetPath `
             -RubricsRoot $RubricsRoot -ResultsRoot $ResultsRoot
         [Console]::Out.WriteLine(($result | ConvertTo-Json -Depth 100 -Compress))
         exit 0
     } catch {
         [Console]::Out.WriteLine(([pscustomobject][ordered]@{
-            mode = if ($Run) { 'run' } elseif ($Route) { 'route' } else { 'dry-run' }
-            error = 'calibration_failed'
-            message = $_.Exception.Message
+            mode = if ($Pilot) { 'pilot' } elseif ($Run) { 'run' } elseif ($Route) { 'route' } else { 'dry-run' }
+            error = if ($Pilot) { 'pilot_failed' } else { 'calibration_failed' }
+            message = if ($Pilot) { 'pilot_admission_failed' } else { $_.Exception.Message }
+            code = if ($Pilot) { 'pilot_admission_failed' } else { $null }
         } | ConvertTo-Json -Compress))
         exit 1
     }
