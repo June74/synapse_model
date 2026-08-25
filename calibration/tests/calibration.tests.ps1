@@ -1845,7 +1845,7 @@ def sum_even(values):
             'exact commit and exact ordered identities',
             'The current build accepts only `option1-live-20260825-001`.',
             'Do not edit the command to invent a replacement RunId.',
-            'A replacement RunId requires a new reviewed build that accepts it and a revised manifest or acceptance packet that freezes and allows that exact ID, followed by new explicit approval.',
+            'A replacement RunId requires a new reviewed build that accepts it and a revised acceptance packet that freezes and authorizes the exact replacement command, followed by new explicit approval.',
             '`.run.claim`',
             '`claims/01-google-candidate.claim`',
             '`claims/02-openai-judge.claim`',
@@ -1855,10 +1855,17 @@ def sum_even(values):
             '`raw/candidate-response.json`',
             '`raw/judge-responses.json`',
             '`item_id`, `status`, credential-sanitized `output`, and bounded `error_code`',
-            '`item_id`, the anonymized judge payload, and accumulated normalized decisions'
+            '`item_id`, the anonymized judge payload, and accumulated normalized decisions',
+            'Cleanup-indeterminate exceptional residue may include an owned `.result-*.tmp` or `.raw-*.tmp` file.',
+            'The operator must not delete that residue, resume or retry the run, or reuse its RunId automatically.',
+            'Preserve the complete run directory for review; a later replacement still requires the new reviewed build, revised acceptance packet, and new explicit approval described above.'
         )) {
             Assert-True ($section.IndexOf($fragment, [StringComparison]::Ordinal) -ge 0) "README Option 1 section is missing required contract text: $fragment"
         }
+        Assert-False ($section.IndexOf('manifest or acceptance packet', [StringComparison]::Ordinal) -ge 0) `
+            'README must not imply that a manifest can replace the revised acceptance packet.'
+        Assert-False ($section.IndexOf('removed after use', [StringComparison]::Ordinal) -ge 0) `
+            'README must not promise successful temporary-file cleanup after an indeterminate cleanup boundary.'
     }
 
     Invoke-Assertion 'result paths are bounded beneath calibration results and reject traversal' {
