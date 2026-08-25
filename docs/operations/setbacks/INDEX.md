@@ -4,14 +4,14 @@
 |---|---|---|---|---|
 | [SB-20260824-182757-task8-quality-boundaries](incidents/2026-08-24T182757Z-task8-quality-boundaries.md) | Task 8 boundary and transport quality gaps | closed | 2026-08-24 | 2026-08-24 |
 | [SB-20260824-015530-router-pricing-fail-open](incidents/2026-08-24T015530Z-router-pricing-fail-open.md) | Task 6 pricing accepted missing snapshots and free routes | closed | 2026-08-24 | 2026-08-24 |
-| [SB-20260824-012823-apply-patch-duplicate-target](incidents/2026-08-24T012823Z-apply-patch-duplicate-target.md) | Patch request repeated one target file in multiple update blocks | closed | 2026-08-24 | 2026-08-24 |
+| [SB-20260824-012823-apply-patch-duplicate-target](incidents/2026-08-24T012823Z-apply-patch-duplicate-target.md) | Patch request repeated one target file in multiple update blocks | closed | 2026-08-24 | 2026-08-25T19:55:35.3677309Z |
 | [SB-20260823-232717-requirements-profile-path-format-parser](incidents/2026-08-23T232717Z-requirements-profile-path-format-parser.md) | Requirements profile-path format expression caused a parser error | closed | 2026-08-23 | 2026-08-23 |
 | [SB-20260823-234012-minimal-profile-fixture-path](incidents/2026-08-23T234012Z-minimal-profile-fixture-path.md) | Assumed minimal-profile fixture filename caused a path-not-found error | closed | 2026-08-23 | 2026-08-24 |
 | [SB-20260824-031922-baseline-session-id-not-retained](incidents/2026-08-24T031922Z-baseline-session-id-not-retained.md) | Baseline test session identifier was not retained | closed | 2026-08-24 | 2026-08-25 |
 | [SB-20260824-033023-sqlite-test-connection-not-closed](incidents/2026-08-24T033023Z-sqlite-test-connection-not-closed.md) | SQLite test reader left Windows file handles open | closed | 2026-08-24 | 2026-08-24 |
 | [SB-20260824-035416-sqlite-schema-admission-atomicity](incidents/2026-08-24T035416Z-sqlite-schema-admission-atomicity.md) | SQLite schema admission was not exact or atomic | closed | 2026-08-24 | 2026-08-24 |
 | [SB-20260824-044250-sqlite-trace-quality-review](incidents/2026-08-24T044250Z-sqlite-trace-quality-review.md) | SQLite trace admission and bridge durability gaps | closed | 2026-08-24 | 2026-08-24 |
-| [SB-20260824-051403-python-alias-unavailable](incidents/2026-08-24T051403Z-python-alias-unavailable.md) | Python alias unavailable during storage baseline | closed | 2026-08-24 | 2026-08-25 |
+| [SB-20260824-051403-python-alias-unavailable](incidents/2026-08-24T051403Z-python-alias-unavailable.md) | Python alias unavailable during storage baseline | closed | 2026-08-24 | 2026-08-25T19:55:35.3677309Z |
 | [SB-20260824-052419-nullable-trace-id-diagnostic](incidents/2026-08-24T052419Z-nullable-trace-id-diagnostic.md) | Nullable trace ID test expected a leaf diagnostic | closed | 2026-08-24 | 2026-08-24 |
 | [SB-20260824-052700-patch-tool-call-omitted](incidents/2026-08-24T052700Z-patch-tool-call-omitted.md) | Pricing patch text was not sent to the edit tool | closed | 2026-08-24 | 2026-08-24 |
 | [SB-20260824-052823-router-test-assert-helper](incidents/2026-08-24T052823Z-router-test-assert-helper.md) | Task 8 pricing test used an unavailable assertion helper | closed | 2026-08-24 | 2026-08-24 |
@@ -32,9 +32,11 @@
 | [SB-20260825-190440-quality-review-math-min-types](incidents/2026-08-25T190440Z-quality-review-math-min-types.md) | closed | 2026-08-25T19:04:40.2918430Z | Task 4 final code-quality review | Quality-review line-range helper used ambiguous Math.Min types |
 | [SB-20260825-191446-task5-null-method-green](incidents/2026-08-25T191446Z-task5-null-method-green.md) | closed | 2026-08-25T19:14:46.056444Z | Option 1 Task 5 first GREEN verification | Task 5 fake execution hit a null method call |
 | [SB-20260825-193037-task5-test-input-automatic-variable](incidents/2026-08-25T193037Z-task5-test-input-automatic-variable.md) | closed | 2026-08-25T19:30:37.863856Z | Option 1 Task 5 quality-review test hardening | Task 5 boundary fake captured the PowerShell input variable |
+| [SB-20260825-194559-task6-first-green-failure-boundaries](incidents/2026-08-25T194559Z-task6-first-green-failure-boundaries.md) | closed | 2026-08-25T19:45:59.724892Z | 2026-08-25T19:55:35.3677309Z | Task 6 first GREEN failure boundaries |
+| [SB-20260825-195710-task6-red-fixture-cleanup](incidents/2026-08-25T195710Z-task6-red-fixture-cleanup.md) | closed | 2026-08-25T19:57:10.373023Z | 2026-08-25T19:59:31.4342992Z | Task 6 RED fixture left owned result roots |
 | SB-2026-08-19-001 | PowerShell DOCX paragraph extraction syntax error | closed | 2026-08-19 | 2026-08-19 |
 | SB-2026-08-19-002 | Current DOCX locked during full-document scan | closed | 2026-08-19 | 2026-08-19 |
-| SB-2026-08-19-003 | Skill path lookup mismatch | closed | 2026-08-19 | 2026-08-23 |
+| SB-2026-08-19-003 | Skill path lookup mismatch | closed | 2026-08-19 | 2026-08-25 |
 | SB-2026-08-19-004 | Claude CLI smoke test did not return within timeout | contained | 2026-08-19 | 2026-08-19 |
 | SB-2026-08-19-005 | Antigravity CLI authentication unavailable in sandbox | contained | 2026-08-19 | 2026-08-19 |
 | SB-2026-08-19-006 | Git index unavailable to sandbox | contained | 2026-08-19 | 2026-08-25 |

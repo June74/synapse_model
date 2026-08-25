@@ -2,7 +2,7 @@
 
 - **Status:** closed
 - **First observed:** 2026-08-24T01:28:23.3772699Z
-- **Last observed:** 2026-08-24T01:28:23.3772699Z
+- **Last observed:** 2026-08-25T19:55:35.3677309Z
 - **Phase/task:** Deterministic router V1 Task 6 RED-test authoring
 - **Environment:** Windows PowerShell 7 in the deterministic-router-v1 worktree
 - **Version/commit:** 10a2135
@@ -49,5 +49,6 @@ The corrected consolidated patch applied successfully. `git diff --check` comple
 
 ## Recurrence history
 
+- 2026-08-25T19:55:35.3677309Z: Task 6 incident closure repeated `INDEX.md` in two update blocks. The patch was rejected atomically, all changes remained unapplied, and the retry consolidated both index hunks under one target operation before continuing.
 - 2026-08-24T01:28:23.3772699Z: First observed and contained before any Task 6 file changed.
 - 2026-08-24, Task 6 RED-test authoring: Closed after the consolidated patch applied and `git diff --check` verified the correction.

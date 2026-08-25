@@ -2,7 +2,7 @@
 
 - **Status:** closed
 - **First observed:** 2026-08-24T05:14:03Z
-- **Last observed:** 2026-08-25T18:44:00Z
+- **Last observed:** 2026-08-25T19:55:35.3677309Z
 - **Phase/task:** Task 8 pre-implementation baseline
 - **Environment:** Windows PowerShell, Codex desktop managed workspace
 - **Version/commit:** `50ca437`
@@ -51,6 +51,7 @@ The bundled interpreter completed all 52 storage tests with exit code 0 in 15.59
 
 ## Recurrence history
 
+- 2026-08-25T19:55:35.3677309Z: The unavailable `python` and `py` aliases recurred during Task 6 setback-helper discovery. Work remained contained, no product path or provider launcher ran, and the bundled Python 3.12 executable was resolved through the workspace dependency inventory before continuing.
 - 2026-08-25 Task 5: The unavailable `python` alias recurred while requesting setback-helper usage for the first GREEN failure. Work remained contained, no provider or native launcher ran, and the bundled runtime was resolved before retrying the helper.
 - 2026-08-25T18:44:00Z: The unavailable `python` and `py` aliases recurred while invoking the setback helper. The installed Python 3.12 executable was resolved explicitly and the helper completed after the required scoped execution approval.
 

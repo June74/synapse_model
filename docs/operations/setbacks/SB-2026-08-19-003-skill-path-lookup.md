@@ -4,7 +4,7 @@
 - Title: Skill path lookup mismatch
 - Status: closed
 - First observed: 2026-08-19
-- Last observed: 2026-08-23
+- Last observed: 2026-08-25
 - Phase/task: Task 7 SQLite trace storage preflight
 - Environment: Windows PowerShell, Codex desktop
 - Version/commit: Not applicable
@@ -67,3 +67,12 @@ The `scope-gate` and `setback-logger` instructions were read successfully from t
 - Correction: enumerate the resolved skill directory and invoke its exact `scripts/new_setback.py` path with the bundled Python runtime.
 - Prevention: resolve relative resources against the directory containing `SKILL.md`, as required by the skill-loading contract.
 - Verification: the helper's `--help` completed with exit code 0 from the resolved skill path.
+
+### 2026-08-25 - repository instruction and incident filename assumptions
+
+- Symptom: Task 6 first attempted to read a repository-root `AGENTS.md` that is not present in this worktree, then derived this incident filename from its index title instead of enumerating the exact path.
+- Impact: two read-only commands reported path-not-found errors. No product file, provider, native launcher, network request, or private data was involved.
+- Confirmed cause: the commands assumed literal paths without first resolving them from the repository tree.
+- Correction: enumerate `AGENTS.md` and setback files before opening them. The only `AGENTS.md` is scoped beneath `pilot/providers/openai/` and does not govern the Task 6 files.
+- Prevention: use `rg --files` before literal reads whenever the requested repository instruction or incident path has not already been verified.
+- Verification: repository enumeration identified the exact scoped instruction and incident paths; Task 6 preflight continued without applying unrelated provider-scoped instructions.
