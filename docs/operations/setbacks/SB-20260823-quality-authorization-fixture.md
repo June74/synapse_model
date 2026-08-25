@@ -1,0 +1,21 @@
+# SB-20260823-quality-authorization-fixture: Quality authorization fixture produced repeated expected errors
+
+- **Status:** closed
+- **First observed:** 2026-08-23
+- **Last observed:** 2026-08-23
+- **Phase/task:** Task 3 third specification-review follow-up, first GREEN attempt
+- **Environment:** PowerShell 7, `codex/deterministic-router-v1` worktree at `5198de3`
+- **Symptom:** The invalid-authorization assertion expected one structured error but received 30; a follow-up prefix-evaluation probe also failed before inspection because the test script depends on a file-backed `$PSScriptRoot`.
+- **Impact:** Product files were not damaged and the exact-path behavior tests passed; final verification was delayed while the fixture was isolated.
+- **Reproduction conditions:** Give a fixture record 30 measured authorizations, then change its record-level exact-match evidence so every authorization becomes contradictory while asserting exactly one matching error.
+- **Evidence references:** `router/tests/router.tests.ps1` invalid path-specific authorization assertion and the first GREEN-attempt output.
+- **Attempts and outcomes:** The first suite run produced 30 authorization errors. Evaluating only the test-file prefix with `Invoke-Expression` was rejected because `$PSScriptRoot` was empty. Direct inspection showed the contradictory-evidence case invalidated all 30 default authorizations.
+- **Confirmed cause:** The test fixture retained all 30 default measured authorizations after changing record-level evidence to non-exact and unavailable, so the loader correctly emitted one deterministic error per contradictory authorization.
+- **Hypotheses:** None remain open.
+- **Rejected hypotheses:** The duplicate-path detector did not generate 30 false duplicate errors; a standalone construction confirmed the default authorization paths are unique.
+- **Known exclusions:** No provider execution, pricing logic, profile schema, or production quality value was involved.
+- **Correction:** Narrow the contradictory-evidence fixture to one measured authorization before changing record-level evidence.
+- **Prevention:** Mutation tests that assert one error must first reduce repeated collections to the single intended subject.
+- **Owner:** Implementer
+- **Next diagnostic step:** None; reopen only if a collection mutation again produces an unintended multiplicity of errors.
+- **Related verification:** The corrected router suite passed, including the invalid path-specific authorization assertion and the coding-to-mathematics adversarial regression.

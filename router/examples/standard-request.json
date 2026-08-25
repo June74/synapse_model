@@ -1,0 +1,13 @@
+{
+  "request_text": "Rewrite this short note so it is clear and friendly: The meeting starts at three.",
+  "task_type": "writing",
+  "domain": "general",
+  "complexity": "low",
+  "quality_floor": "standard",
+  "latency": "normal",
+  "privacy_level": "standard",
+  "risk_level": "standard",
+  "output_length": "short",
+  "language": "english",
+  "additional_capabilities": []
+}

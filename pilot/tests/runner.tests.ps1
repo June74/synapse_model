@@ -1469,6 +1469,55 @@ Invoke-Assertion 'RunAll continues after one injected candidate failure in the s
     }
 }
 
+Invoke-Assertion 'RunAll records prompt construction failure and continues to the next candidate' {
+    $matrix = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'pilot/model_matrix.json') | ConvertFrom-Json
+    $runMatrix = [pscustomobject]@{
+        candidates = @($matrix.candidates | Where-Object { $_.tool -eq 'codex' } | Select-Object -First 2)
+        special_routes = @()
+    }
+    $failedRoute = $runMatrix.candidates[0].route_id
+    $sensitiveFailure = 'prompt-construction-sensitive-detail'
+    $survivingPrompt = 'offline prompt for the surviving candidate'
+    $resultsPath = New-OfflineResultPath 'prompt-failure-continue'
+    $invocations = [Collections.Generic.List[string]]::new()
+    if (Test-Path -LiteralPath $resultsPath) { Remove-Item -LiteralPath $resultsPath -Force }
+    try {
+        $promptFactory = {
+            param($candidate)
+            if ($candidate.route_id -ceq $failedRoute) { throw $sensitiveFailure }
+            return $survivingPrompt
+        }
+        $invoker = {
+            param($command)
+            $invocations.Add([string]$command.route_id)
+            [pscustomobject]@{
+                exit_code = 0
+                stdout = Get-Content -Raw (Join-Path $projectRoot 'pilot/tests/fixtures/codex-success.jsonl')
+                stderr = ''
+                duration_ms = 6
+            }
+        }
+
+        $run = Invoke-PilotRun -Matrix $runMatrix -RunAll -ResultsPath $resultsPath `
+            -NativeInvoker $invoker -PromptFactory $promptFactory
+        $records = @(Get-Content -LiteralPath $resultsPath | ForEach-Object { $_ | ConvertFrom-Json })
+        Assert-Equal $run.records.Count 2
+        Assert-Equal $records.Count 2
+        Assert-Equal $invocations.Count 1
+        Assert-Equal $invocations[0] $runMatrix.candidates[1].route_id
+        Assert-Equal $records[0].diagnostic_note 'execution failure'
+        Assert-Equal $records[0].error 'execution failure'
+        Assert-True (-not $records[0].transport_success)
+        Assert-True $records[1].transport_success
+        $serialized = ($run | ConvertTo-Json -Depth 30 -Compress) + "`n" +
+            (Get-Content -Raw $resultsPath)
+        Assert-True (-not $serialized.Contains($sensitiveFailure))
+        Assert-True (-not $serialized.Contains($survivingPrompt))
+    } finally {
+        if (Test-Path -LiteralPath $resultsPath) { Remove-Item -LiteralPath $resultsPath -Force }
+    }
+}
+
 Invoke-Assertion 'public CLI no-switch entrypoint performs a 63-candidate dry-run without writing results' {
     $resultsPath = Join-Path 'pilot/results' 'runner-test-run.jsonl'
     $legacyResultsPath = Join-Path 'pilot/results' 'test-run.jsonl'
@@ -1495,6 +1544,232 @@ Invoke-Assertion 'special routes require explicit opt-in' {
     $included = Invoke-PilotRun -Matrix $matrix -DryRun -IncludeSpecialRoutes
     Assert-True ($normal.selected.route_id -notcontains $special.route_id)
     Assert-True ($included.selected.route_id -contains $special.route_id)
+}
+
+Invoke-Assertion 'Invoke-PilotCandidate executes one exact candidate without writing pilot JSONL' {
+    $matrix = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'pilot/model_matrix.json') | ConvertFrom-Json
+    $candidate = @($matrix.candidates | Where-Object { $_.tool -eq 'codex' } | Select-Object -First 1)[0]
+    $prompt = 'Task 8 explicit prompt that must stay off returned process metadata'
+    $invocations = [Collections.Generic.List[object]]::new()
+    $nativeInvoker = {
+        param($command)
+        $invocations.Add($command)
+        $canonicalJson = [pscustomobject]@{ status = 'success'; answer = 'normalized answer'; error = $null } | ConvertTo-Json -Compress
+        $providerOutput = [pscustomobject]@{
+            type = 'item.completed'
+            item = [pscustomobject]@{ type = 'agent_message'; text = $canonicalJson }
+        } | ConvertTo-Json -Compress
+        [pscustomobject]@{
+            exit_code = 0
+            stdout = $providerOutput
+            stderr = 'provider diagnostic must not escape'
+            duration_ms = 321
+            usage = [pscustomobject]@{
+                actual_input_tokens = 100
+                visible_output_tokens = 20
+                reasoning_tokens = 5
+                complete = $true
+            }
+        }
+    }
+
+    $execution = Invoke-PilotCandidate -Candidate $candidate -Prompt $prompt `
+        -NativeInvoker $nativeInvoker -RunId 'task8-characterization' -TimeoutSeconds 17
+
+    Assert-Equal $invocations.Count 1
+    Assert-Equal $invocations[0].route_id $candidate.route_id
+    Assert-Equal $invocations[0].prompt $prompt
+    Assert-Equal $execution.run_id 'task8-characterization'
+    Assert-Equal $execution.diagnostic_note 'completed'
+    Assert-Equal $execution.failure $null
+    Assert-Equal $execution.canonical.status 'success'
+    Assert-Equal $execution.canonical.answer 'normalized answer'
+    Assert-Equal $execution.process.exit_code 0
+    Assert-Equal $execution.process.duration_ms 321
+    Assert-Equal $execution.usage.actual_input_tokens 100
+    Assert-True $execution.usage.complete
+    Assert-True $execution.record.transport_success
+    Assert-True $execution.record.contract_compliant
+    Assert-Equal $execution.record.status 'success'
+    Assert-Equal $execution.record.answer '[provider answer omitted from JSONL for privacy]'
+    $serialized = $execution | ConvertTo-Json -Depth 20 -Compress
+    Assert-True (-not $serialized.Contains($prompt))
+    Assert-True (-not $serialized.Contains('provider diagnostic must not escape'))
+    Assert-True (-not $serialized.Contains('item.completed'))
+}
+
+Invoke-Assertion 'Invoke-PilotCandidate preserves provider-declared and parse failure diagnostics' {
+    $matrix = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'pilot/model_matrix.json') | ConvertFrom-Json
+    $candidate = @($matrix.candidates | Where-Object { $_.tool -eq 'codex' } | Select-Object -First 1)[0]
+    $providerFailure = Invoke-PilotCandidate -Candidate $candidate -Prompt 'provider failure prompt' -NativeInvoker {
+        [pscustomobject]@{
+            exit_code = 0
+            stdout = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'pilot/tests/fixtures/codex-failure.jsonl')
+            stderr = ''
+            duration_ms = 7
+        }
+    }
+    Assert-Equal $providerFailure.diagnostic_note 'provider-declared failure'
+    Assert-Equal $providerFailure.canonical.status 'failure'
+    Assert-Equal $providerFailure.record.error 'provider-declared failure'
+
+    $parseFailure = Invoke-PilotCandidate -Candidate $candidate -Prompt 'parse failure prompt' -NativeInvoker {
+        [pscustomobject]@{ exit_code = 0; stdout = 'not provider JSON'; stderr = 'sensitive raw stderr'; duration_ms = 8 }
+    }
+    Assert-Equal $parseFailure.diagnostic_note 'parse failure'
+    Assert-True ($parseFailure.failure -is [string] -and -not [string]::IsNullOrWhiteSpace($parseFailure.failure))
+    Assert-Equal $parseFailure.record.error 'parse failure'
+    $serialized = $parseFailure | ConvertTo-Json -Depth 20 -Compress
+    Assert-True (-not $serialized.Contains('not provider JSON'))
+    Assert-True (-not $serialized.Contains('sensitive raw stderr'))
+}
+
+Invoke-Assertion 'Invoke-PilotCandidate rejects every unsuccessful transport state before parsing' {
+    $matrix = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'pilot/model_matrix.json') | ConvertFrom-Json
+    $candidate = @($matrix.candidates | Where-Object { $_.tool -eq 'codex' } | Select-Object -First 1)[0]
+    $validOutput = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'pilot/tests/fixtures/codex-success.jsonl')
+    $cases = @(
+        [pscustomobject]@{ name = 'cleanup failed'; exit_code = 0; timed_out = $false; cleanup_failed = $true; process_exited = $true }
+        [pscustomobject]@{ name = 'timed out'; exit_code = 0; timed_out = $true; cleanup_failed = $false; process_exited = $true }
+        [pscustomobject]@{ name = 'process not exited'; exit_code = 0; timed_out = $false; cleanup_failed = $false; process_exited = $false }
+        [pscustomobject]@{ name = 'null exit code'; exit_code = $null; timed_out = $false; cleanup_failed = $false; process_exited = $true }
+    )
+    foreach ($case in $cases) {
+        $nativeTransportResult = [pscustomobject]@{
+            exit_code = $case.exit_code
+            stdout = $validOutput
+            stderr = ''
+            duration_ms = 9
+            timed_out = $case.timed_out
+            cleanup_failed = $case.cleanup_failed
+            cleanup_status = if ($case.cleanup_failed) { 'timeout_cleanup_failed' } else { 'not_required' }
+            process_exited = $case.process_exited
+        }
+        $execution = Invoke-PilotCandidate -Candidate $candidate -Prompt ('transport case ' + $case.name) `
+            -NativeInvoker { $nativeTransportResult }
+        Assert-Equal $execution.failure 'transport failure'
+        Assert-Equal $execution.diagnostic_note 'transport failure'
+        Assert-Equal $execution.canonical $null
+        Assert-True (-not $execution.record.transport_success)
+        Assert-True (-not $execution.record.contract_compliant)
+    }
+}
+
+function Get-TestUsageCandidate {
+    param([Parameter(Mandatory)][string]$Tool, [AllowNull()][string]$Model)
+
+    $matrix = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'pilot/model_matrix.json') | ConvertFrom-Json
+    return @($matrix.candidates | Where-Object {
+        $_.tool -ceq $Tool -and ([string]::IsNullOrEmpty($Model) -or $_.model -ceq $Model)
+    } | Select-Object -First 1)[0]
+}
+
+function New-TestCodexUsageEnvelope {
+    param(
+        [AllowNull()][object]$InputTokens = 120,
+        [AllowNull()][object]$OutputTokens = 45,
+        [AllowNull()][object]$ReasoningTokens = 11,
+        [bool]$IncludeReasoning = $true
+    )
+
+    $usage = [ordered]@{ input_tokens = $InputTokens; cached_input_tokens = 80; output_tokens = $OutputTokens }
+    if ($IncludeReasoning) { $usage.reasoning_output_tokens = $ReasoningTokens }
+    $message = [ordered]@{
+        type = 'item.completed'
+        item = [ordered]@{ type = 'agent_message'; text = '{"status":"success","answer":"4","error":null}' }
+    }
+    $completed = [ordered]@{ type = 'turn.completed'; usage = $usage }
+    return (($message | ConvertTo-Json -Depth 10 -Compress), ($completed | ConvertTo-Json -Depth 10 -Compress)) -join "`n"
+}
+
+function New-TestAgyUsageEnvelope {
+    param(
+        [AllowNull()][object]$InputTokens = 160,
+        [AllowNull()][object]$OutputTokens = 57,
+        [AllowNull()][object]$ThinkingTokens = 13,
+        [bool]$IncludeThinking = $true
+    )
+
+    $usage = [ordered]@{ input_tokens = $InputTokens; output_tokens = $OutputTokens; total_tokens = 217 }
+    if ($IncludeThinking) { $usage.thinking_tokens = $ThinkingTokens }
+    return [ordered]@{
+        thread_id = 'fixture-thread'; session_id = 'fixture-session'; status = 'SUCCESS'
+        created_at = '2026-08-24T18:00:00Z'; finished_at = '2026-08-24T18:00:01Z'; result = '4'
+        structured_output = [ordered]@{ status = 'success'; answer = '4'; error = $null }
+        usage = $usage
+    } | ConvertTo-Json -Depth 10
+}
+
+$completeUsageCases = @(
+    [pscustomobject]@{ tool = 'codex'; model = $null; fixture = 'codex-usage-complete.jsonl'; input = 120; visible = 34; reasoning = 11 }
+    [pscustomobject]@{ tool = 'agy'; model = $null; fixture = 'agy-usage-complete.json'; input = 160; visible = 44; reasoning = 13 }
+)
+foreach ($usageCase in $completeUsageCases) {
+    Invoke-Assertion ("Invoke-PilotCandidate derives visible output from documented final {0} usage" -f $usageCase.tool) {
+        $candidate = Get-TestUsageCandidate -Tool $usageCase.tool -Model $usageCase.model
+        $nativeText = Get-Content -Raw -LiteralPath (Join-Path $projectRoot ('pilot/tests/fixtures/' + $usageCase.fixture))
+        $execution = Invoke-PilotCandidate -Candidate $candidate -Prompt ('complete ' + $usageCase.tool) -NativeInvoker {
+            [pscustomobject]@{
+                exit_code = 0; stdout = $nativeText; stderr = ''; duration_ms = 10
+                timed_out = $false; cleanup_failed = $false; cleanup_status = 'not_required'; process_exited = $true
+            }
+        }
+        Assert-Equal $execution.canonical.answer '4'
+        Assert-True $execution.usage.complete
+        Assert-Equal $execution.usage.actual_input_tokens $usageCase.input
+        Assert-Equal $execution.usage.visible_output_tokens $usageCase.visible
+        Assert-Equal $execution.usage.reasoning_tokens $usageCase.reasoning
+    }
+}
+
+Invoke-Assertion 'Codex final usage is incomplete for missing or invalid exact counts and impossible splits' {
+    $candidate = Get-TestUsageCandidate -Tool 'codex' -Model $null
+    $cases = @(
+        [pscustomobject]@{ name = 'missing reasoning'; text = New-TestCodexUsageEnvelope -IncludeReasoning $false }
+        [pscustomobject]@{ name = 'negative'; text = New-TestCodexUsageEnvelope -ReasoningTokens (-1) }
+        [pscustomobject]@{ name = 'fractional'; text = New-TestCodexUsageEnvelope -OutputTokens 45.5 }
+        [pscustomobject]@{ name = 'boolean'; text = New-TestCodexUsageEnvelope -InputTokens $true }
+        [pscustomobject]@{ name = 'string'; text = New-TestCodexUsageEnvelope -ReasoningTokens '11' }
+        [pscustomobject]@{ name = 'reasoning exceeds output'; text = New-TestCodexUsageEnvelope -OutputTokens 10 -ReasoningTokens 11 }
+    )
+    foreach ($case in $cases) {
+        $usage = Get-PilotProviderUsage -Candidate $candidate -Text $case.text
+        Assert-True ($null -ne $usage)
+        Assert-True (-not $usage.complete)
+    }
+}
+
+Invoke-Assertion 'Agy final usage is incomplete for missing or invalid exact counts and impossible splits' {
+    $candidate = Get-TestUsageCandidate -Tool 'agy' -Model $null
+    $cases = @(
+        [pscustomobject]@{ name = 'missing thinking'; text = New-TestAgyUsageEnvelope -IncludeThinking $false }
+        [pscustomobject]@{ name = 'negative'; text = New-TestAgyUsageEnvelope -ThinkingTokens (-1) }
+        [pscustomobject]@{ name = 'fractional'; text = New-TestAgyUsageEnvelope -OutputTokens 57.5 }
+        [pscustomobject]@{ name = 'boolean'; text = New-TestAgyUsageEnvelope -InputTokens $true }
+        [pscustomobject]@{ name = 'string'; text = New-TestAgyUsageEnvelope -ThinkingTokens '13' }
+        [pscustomobject]@{ name = 'thinking exceeds output'; text = New-TestAgyUsageEnvelope -OutputTokens 12 -ThinkingTokens 13 }
+    )
+    foreach ($case in $cases) {
+        $usage = Get-PilotProviderUsage -Candidate $candidate -Text $case.text
+        Assert-True ($null -ne $usage)
+        Assert-True (-not $usage.complete)
+    }
+}
+
+Invoke-Assertion 'Claude modelUsage input and output counts remain incomplete without a documented reasoning split' {
+    $candidate = Get-TestUsageCandidate -Tool 'claude' -Model 'claude-sonnet-5'
+    $nativeText = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'pilot/tests/fixtures/claude-usage-input-output-only.json')
+    $execution = Invoke-PilotCandidate -Candidate $candidate -Prompt 'claude incomplete usage' -NativeInvoker {
+        [pscustomobject]@{
+            exit_code = 0; stdout = $nativeText; stderr = ''; duration_ms = 10
+            timed_out = $false; cleanup_failed = $false; cleanup_status = 'not_required'; process_exited = $true
+        }
+    }
+    Assert-Equal $execution.canonical.answer '4'
+    Assert-True ($null -ne $execution.usage)
+    Assert-True (-not $execution.usage.complete)
+    Assert-Equal $execution.usage.visible_output_tokens $null
+    Assert-Equal $execution.usage.reasoning_tokens $null
 }
 
 if ($failures.Count -gt 0) {

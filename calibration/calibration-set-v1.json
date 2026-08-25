@@ -1,0 +1,571 @@
+{
+  "version": "calibration-set-v1",
+  "prompts": [
+    {
+      "id": "general-low-biology-v1",
+      "version": "1.0.0",
+      "external_category": "unknown",
+      "category_target": "quality.task_types.general",
+      "request": {
+        "request_text": "In one short paragraph, explain where photosynthesis occurs in a plant cell and name the two main products of the overall process.",
+        "task_type": "general",
+        "domain": "biology",
+        "complexity": "low",
+        "quality_floor": "standard",
+        "privacy_level": "standard",
+        "risk_level": "standard",
+        "language": "english",
+        "output_length": "short"
+      },
+      "grading": {
+        "rubric_ref": "verified-answer-v1.json",
+        "deterministic_grader": {
+          "type": "verified_answer",
+          "expected_answer": "Photosynthesis occurs in chloroplasts and produces glucose and oxygen.",
+          "required_reasoning": ["chloroplasts", "glucose", "oxygen"]
+        }
+      }
+    },
+    {
+      "id": "general-medium-business-v1",
+      "version": "1.0.0",
+      "external_category": "unknown",
+      "category_target": "quality.task_types.general",
+      "request": {
+        "request_text": "Explain the difference between gross margin and net margin for a small retailer. Include one reason the two percentages can move in opposite directions.",
+        "task_type": "general",
+        "domain": "business",
+        "complexity": "medium",
+        "quality_floor": "standard",
+        "privacy_level": "standard",
+        "risk_level": "standard",
+        "language": "english",
+        "output_length": "normal"
+      },
+      "grading": { "rubric_ref": "reasoning-v1.json" }
+    },
+    {
+      "id": "general-high-humanities-v1",
+      "version": "1.0.0",
+      "external_category": "unknown",
+      "category_target": "quality.task_types.general",
+      "request": {
+        "request_text": "Compare dramatic irony and situational irony. Explain how each can change an audience's interpretation of the same fictional event without relying on a named work.",
+        "task_type": "general",
+        "domain": "humanities",
+        "complexity": "high",
+        "quality_floor": "standard",
+        "privacy_level": "standard",
+        "risk_level": "standard",
+        "language": "english",
+        "output_length": "detailed"
+      },
+      "grading": { "rubric_ref": "reasoning-v1.json" }
+    },
+    {
+      "id": "coding-low-computer-science-v1",
+      "version": "1.0.0",
+      "external_category": "unknown",
+      "category_target": "quality.task_types.coding",
+      "request": {
+        "request_text": "Write a Python function named sum_even(values) that returns the sum of all even integers in a list. Return only the function and a two-sentence explanation.",
+        "task_type": "coding",
+        "domain": "computer_science",
+        "complexity": "low",
+        "quality_floor": "standard",
+        "privacy_level": "standard",
+        "risk_level": "standard",
+        "language": "english",
+        "output_length": "short"
+      },
+      "grading": {
+        "rubric_ref": "coding-v1.json",
+        "deterministic_grader": {
+          "type": "executable_tests",
+          "language": "python",
+          "entry_point": "sum_even",
+          "tests": [
+            { "arguments": [[1, 2, 3, 4]], "expected": 6 },
+            { "arguments": [[]], "expected": 0 },
+            { "arguments": [[-2, -1, 6]], "expected": 4 }
+          ]
+        }
+      }
+    },
+    {
+      "id": "coding-medium-engineering-v1",
+      "version": "1.0.0",
+      "external_category": "unknown",
+      "category_target": "quality.task_types.coding",
+      "request": {
+        "request_text": "Write a Python function moving_average(values, window) that returns contiguous arithmetic means, raises ValueError when window is below 1 or larger than the list, and does not mutate its input.",
+        "task_type": "coding",
+        "domain": "engineering",
+        "complexity": "medium",
+        "quality_floor": "standard",
+        "privacy_level": "standard",
+        "risk_level": "standard",
+        "language": "english",
+        "output_length": "normal"
+      },
+      "grading": {
+        "rubric_ref": "coding-v1.json",
+        "deterministic_grader": {
+          "type": "executable_tests",
+          "language": "python",
+          "entry_point": "moving_average",
+          "tests": [
+            { "arguments": [[1, 2, 3, 4], 2], "expected": [1.5, 2.5, 3.5] },
+            { "arguments": [[5, 7], 2], "expected": [6.0] },
+            { "arguments": [[1, 2], 0], "expected_error": "ValueError" }
+          ]
+        }
+      }
+    },
+    {
+      "id": "coding-high-computer-science-v1",
+      "version": "1.0.0",
+      "external_category": "unknown",
+      "category_target": "quality.task_types.coding",
+      "request": {
+        "request_text": "Write a Python function topological_order(edges) for a directed graph whose vertices are strings. Return the lexicographically smallest valid order, include isolated vertices supplied as self-free keys if you choose an adjacency mapping, and raise ValueError on a cycle. State your chosen input shape clearly.",
+        "task_type": "coding",
+        "domain": "computer_science",
+        "complexity": "high",
+        "quality_floor": "standard",
+        "privacy_level": "standard",
+        "risk_level": "standard",
+        "language": "english",
+        "output_length": "detailed"
+      },
+      "grading": {
+        "rubric_ref": "coding-v1.json",
+        "deterministic_grader": {
+          "type": "executable_tests",
+          "language": "python",
+          "entry_point": "topological_order",
+          "tests": [
+            { "arguments": [{"a": ["c"], "b": ["c"], "c": []}], "expected": ["a", "b", "c"] },
+            { "arguments": [{"z": [], "a": []}], "expected": ["a", "z"] },
+            { "arguments": [{"a": ["b"], "b": ["a"]}], "expected_error": "ValueError" }
+          ]
+        }
+      }
+    },
+    {
+      "id": "math-low-mathematics-v1",
+      "version": "1.0.0",
+      "external_category": "unknown",
+      "category_target": "quality.task_types.math",
+      "request": {
+        "request_text": "Solve 3x + 5 = 20. Show the two algebra steps and state x.",
+        "task_type": "math",
+        "domain": "mathematics",
+        "complexity": "low",
+        "quality_floor": "standard",
+        "privacy_level": "standard",
+        "risk_level": "standard",
+        "language": "english",
+        "output_length": "short"
+      },
+      "grading": {
+        "rubric_ref": "verified-answer-v1.json",
+        "deterministic_grader": {
+          "type": "verified_answer",
+          "expected_answer": "x = 5",
+          "required_reasoning": ["subtract 5", "divide by 3"]
+        }
+      }
+    },
+    {
+      "id": "math-medium-finance-v1",
+      "version": "1.0.0",
+      "external_category": "unknown",
+      "category_target": "quality.task_types.math",
+      "request": {
+        "request_text": "A fictional savings exercise starts with $1,000 and earns 5% annually, compounded once per year, with no deposits. Calculate the balance after two years and show the formula. This is an arithmetic exercise, not financial advice.",
+        "task_type": "math",
+        "domain": "finance",
+        "complexity": "medium",
+        "quality_floor": "standard",
+        "privacy_level": "standard",
+        "risk_level": "standard",
+        "language": "english",
+        "output_length": "normal"
+      },
+      "grading": {
+        "rubric_ref": "verified-answer-v1.json",
+        "deterministic_grader": {
+          "type": "verified_answer",
+          "expected_answer": "$1,102.50",
+          "required_reasoning": ["1000(1.05)^2", "1.1025"]
+        }
+      }
+    },
+    {
+      "id": "math-high-physics-v1",
+      "version": "1.0.0",
+      "external_category": "unknown",
+      "category_target": "quality.task_types.math",
+      "request": {
+        "request_text": "A 2 kg cart starts from rest and is pushed by a constant 6 N horizontal force for 3 seconds on a frictionless surface. Calculate its final speed and kinetic energy, showing the acceleration and time relation.",
+        "task_type": "math",
+        "domain": "physics",
+        "complexity": "high",
+        "quality_floor": "standard",
+        "privacy_level": "standard",
+        "risk_level": "standard",
+        "language": "english",
+        "output_length": "detailed"
+      },
+      "grading": {
+        "rubric_ref": "verified-answer-v1.json",
+        "deterministic_grader": {
+          "type": "verified_answer",
+          "expected_answer": "final speed 9 m/s; kinetic energy 81 J",
+          "required_reasoning": ["a = F/m = 3 m/s^2", "v = at = 9 m/s", "K = 1/2 mv^2 = 81 J"]
+        }
+      }
+    },
+    {
+      "id": "reasoning-low-social-science-v1",
+      "version": "1.0.0",
+      "external_category": "unknown",
+      "category_target": "quality.task_types.reasoning",
+      "request": {
+        "request_text": "A survey sampled only visitors to a city library and found that 82% read weekly. Explain why this does not establish that 82% of all city residents read weekly, using the idea of selection bias.",
+        "task_type": "reasoning",
+        "domain": "social_science",
+        "complexity": "low",
+        "quality_floor": "standard",
+        "privacy_level": "standard",
+        "risk_level": "standard",
+        "language": "english",
+        "output_length": "short"
+      },
+      "grading": {
+        "rubric_ref": "reasoning-v1.json",
+        "deterministic_grader": {
+          "type": "verified_answer",
+          "expected_answer": "The sample is not representative because library visitors are more likely to read than residents selected at random.",
+          "required_reasoning": ["library visitors", "not representative", "selection bias"]
+        }
+      }
+    },
+    {
+      "id": "reasoning-medium-chemistry-v1",
+      "version": "1.0.0",
+      "external_category": "unknown",
+      "category_target": "quality.task_types.reasoning",
+      "request": {
+        "request_text": "Balance the complete combustion equation C2H6 + O2 -> CO2 + H2O using the smallest whole-number coefficients. Explain how carbon, hydrogen, and oxygen counts determine the result.",
+        "task_type": "reasoning",
+        "domain": "chemistry",
+        "complexity": "medium",
+        "quality_floor": "standard",
+        "privacy_level": "standard",
+        "risk_level": "standard",
+        "language": "english",
+        "output_length": "normal"
+      },
+      "grading": {
+        "rubric_ref": "verified-answer-v1.json",
+        "deterministic_grader": {
+          "type": "verified_answer",
+          "expected_answer": "2 C2H6 + 7 O2 -> 4 CO2 + 6 H2O",
+          "required_reasoning": ["4 carbon atoms", "12 hydrogen atoms", "14 oxygen atoms"]
+        }
+      }
+    },
+    {
+      "id": "reasoning-high-law-v1",
+      "version": "1.0.0",
+      "external_category": "unknown",
+      "category_target": "quality.task_types.reasoning",
+      "request": {
+        "request_text": "In a fictional classroom rule system, Rule A says every submitted form needs a date, Rule B says electronic forms may omit signatures, and Rule C says any form missing a required element is rejected. A dated electronic form has no signature. Determine the outcome and explain which rules control. This is a logic exercise, not legal advice.",
+        "task_type": "reasoning",
+        "domain": "law",
+        "complexity": "high",
+        "quality_floor": "standard",
+        "privacy_level": "standard",
+        "risk_level": "standard",
+        "language": "english",
+        "output_length": "detailed"
+      },
+      "grading": {
+        "rubric_ref": "reasoning-v1.json",
+        "deterministic_grader": {
+          "type": "verified_answer",
+          "expected_answer": "The form is accepted because it has the required date and Rule B makes the signature optional for electronic forms.",
+          "required_reasoning": ["date is present", "signature is optional", "no required element is missing"]
+        }
+      }
+    },
+    {
+      "id": "writing-low-humanities-v1",
+      "version": "1.0.0",
+      "external_category": "unknown",
+      "category_target": "quality.task_types.writing",
+      "request": {
+        "request_text": "Write a 90-to-120-word museum label for an imaginary clay bowl made by a coastal community. Use an inviting educational tone and clearly identify every detail as fictional.",
+        "task_type": "writing",
+        "domain": "humanities",
+        "complexity": "low",
+        "quality_floor": "standard",
+        "privacy_level": "standard",
+        "risk_level": "standard",
+        "language": "english",
+        "output_length": "short"
+      },
+      "grading": { "rubric_ref": "writing-v1.json" }
+    },
+    {
+      "id": "writing-medium-business-v1",
+      "version": "1.0.0",
+      "external_category": "unknown",
+      "category_target": "quality.task_types.writing",
+      "request": {
+        "request_text": "Draft a concise internal announcement explaining that a fictional bookstore will test later Friday hours for six weeks. Include purpose, dates, how feedback is collected, and a friendly closing without making promises about permanent hours.",
+        "task_type": "writing",
+        "domain": "business",
+        "complexity": "medium",
+        "quality_floor": "standard",
+        "privacy_level": "standard",
+        "risk_level": "standard",
+        "language": "english",
+        "output_length": "normal"
+      },
+      "grading": { "rubric_ref": "writing-v1.json" }
+    },
+    {
+      "id": "writing-high-social-science-v1",
+      "version": "1.0.0",
+      "external_category": "unknown",
+      "category_target": "quality.task_types.writing",
+      "request": {
+        "request_text": "Write a balanced 500-word public-facing essay on why survey wording can influence responses. Include a neutral example, distinguish wording effects from dishonest data collection, and end with three practical reading questions.",
+        "task_type": "writing",
+        "domain": "social_science",
+        "complexity": "high",
+        "quality_floor": "standard",
+        "privacy_level": "standard",
+        "risk_level": "standard",
+        "language": "english",
+        "output_length": "detailed"
+      },
+      "grading": { "rubric_ref": "writing-v1.json" }
+    },
+    {
+      "id": "summarization-low-general-v1",
+      "version": "1.0.0",
+      "external_category": "unknown",
+      "category_target": "quality.task_types.summarization",
+      "request": {
+        "request_text": "Summarize in one sentence: The community garden opens at 8 a.m. on Saturdays. Volunteers should bring gloves, while all other equipment is supplied. The garden closes when the noon cleanup ends.",
+        "task_type": "summarization",
+        "domain": "general",
+        "complexity": "low",
+        "quality_floor": "standard",
+        "privacy_level": "standard",
+        "risk_level": "standard",
+        "language": "english",
+        "output_length": "short"
+      },
+      "grading": {
+        "rubric_ref": "summarization-v1.json",
+        "deterministic_grader": {
+          "type": "summary_checks",
+          "required_facts": ["opens at 8 a.m. Saturday", "bring gloves", "other equipment is supplied", "noon cleanup"],
+          "required_omissions": [],
+          "forbidden_claims": ["open on Sunday", "bring all equipment"]
+        }
+      }
+    },
+    {
+      "id": "summarization-medium-medicine-v1",
+      "version": "1.0.0",
+      "external_category": "unknown",
+      "category_target": "quality.task_types.summarization",
+      "request": {
+        "request_text": "Summarize this fictional operations note in three bullets: The teaching clinic moved staff orientation to Tuesday at 9 a.m. The session covers room labels and record filing, not clinical care. New staff meet in Room 4, and attendance questions go to the training coordinator. Do not add medical guidance.",
+        "task_type": "summarization",
+        "domain": "medicine",
+        "complexity": "medium",
+        "quality_floor": "standard",
+        "privacy_level": "standard",
+        "risk_level": "standard",
+        "language": "english",
+        "output_length": "normal"
+      },
+      "grading": {
+        "rubric_ref": "summarization-v1.json",
+        "deterministic_grader": {
+          "type": "summary_checks",
+          "required_facts": ["Tuesday at 9 a.m.", "room labels and record filing", "Room 4", "training coordinator"],
+          "required_omissions": ["clinical advice"],
+          "forbidden_claims": ["clinical training", "patient treatment"]
+        }
+      }
+    },
+    {
+      "id": "summarization-high-law-v1",
+      "version": "1.0.0",
+      "external_category": "unknown",
+      "category_target": "quality.task_types.summarization",
+      "request": {
+        "request_text": "Summarize this fictional civics passage in 120 words or fewer: A proposal is introduced in Committee North, which may amend it or decline it. If approved, the full Assembly debates and votes. A majority sends it to Council South, where the same text must pass. Any changed text returns to the Assembly. The chair signs only after both chambers approve identical text. This is an academic exercise. Preserve the sequence and all return conditions.",
+        "task_type": "summarization",
+        "domain": "law",
+        "complexity": "high",
+        "quality_floor": "standard",
+        "privacy_level": "standard",
+        "risk_level": "standard",
+        "language": "english",
+        "output_length": "detailed"
+      },
+      "grading": {
+        "rubric_ref": "summarization-v1.json",
+        "deterministic_grader": {
+          "type": "summary_checks",
+          "required_facts": ["Committee North may amend or decline", "Assembly majority", "Council South must pass identical text", "changed text returns", "chair signs last"],
+          "required_omissions": [],
+          "forbidden_claims": ["chair may amend", "one chamber is sufficient"]
+        }
+      }
+    },
+    {
+      "id": "extraction-low-general-v1",
+      "version": "1.0.0",
+      "external_category": "unknown",
+      "category_target": "quality.task_types.extraction",
+      "request": {
+        "request_text": "Return JSON with exactly event, date, and room from: Robotics club demo | 2026-09-14 | Room B12.",
+        "task_type": "extraction",
+        "domain": "general",
+        "complexity": "low",
+        "quality_floor": "standard",
+        "privacy_level": "standard",
+        "risk_level": "standard",
+        "language": "english",
+        "output_length": "short"
+      },
+      "grading": {
+        "rubric_ref": "extraction-v1.json",
+        "deterministic_grader": {
+          "type": "exact_fields",
+          "schema": { "event": "string", "date": "string", "room": "string" },
+          "expected": { "event": "Robotics club demo", "date": "2026-09-14", "room": "Room B12" }
+        }
+      }
+    },
+    {
+      "id": "extraction-medium-finance-v1",
+      "version": "1.0.0",
+      "external_category": "unknown",
+      "category_target": "quality.task_types.extraction",
+      "request": {
+        "request_text": "From this fictional invoice line, return JSON with exactly invoice_id, quantity, unit_cost_usd, and line_total_usd: Invoice ZX-204; 7 notebooks at $3.50 each; stated line total $24.50. This is a data extraction exercise.",
+        "task_type": "extraction",
+        "domain": "finance",
+        "complexity": "medium",
+        "quality_floor": "standard",
+        "privacy_level": "standard",
+        "risk_level": "standard",
+        "language": "english",
+        "output_length": "normal"
+      },
+      "grading": {
+        "rubric_ref": "extraction-v1.json",
+        "deterministic_grader": {
+          "type": "exact_fields",
+          "schema": { "invoice_id": "string", "quantity": "integer", "unit_cost_usd": "number", "line_total_usd": "number" },
+          "expected": { "invoice_id": "ZX-204", "quantity": 7, "unit_cost_usd": 3.5, "line_total_usd": 24.5 }
+        }
+      }
+    },
+    {
+      "id": "extraction-high-engineering-v1",
+      "version": "1.0.0",
+      "external_category": "unknown",
+      "category_target": "quality.task_types.extraction",
+      "request": {
+        "request_text": "Extract the three fictional sensor readings into a JSON array with exactly sensor_id, timestamp_utc, value, and unit, preserving order: S-1 at 2026-08-20T10:00:00Z read 18.2 C; S-2 at 2026-08-20T10:00:02Z read 44.1 percent; S-1 at 2026-08-20T10:00:05Z read 18.4 C.",
+        "task_type": "extraction",
+        "domain": "engineering",
+        "complexity": "high",
+        "quality_floor": "standard",
+        "privacy_level": "standard",
+        "risk_level": "standard",
+        "language": "english",
+        "output_length": "detailed"
+      },
+      "grading": {
+        "rubric_ref": "extraction-v1.json",
+        "deterministic_grader": {
+          "type": "exact_fields",
+          "schema": [{ "sensor_id": "string", "timestamp_utc": "string", "value": "number", "unit": "string" }],
+          "expected": [
+            { "sensor_id": "S-1", "timestamp_utc": "2026-08-20T10:00:00Z", "value": 18.2, "unit": "C" },
+            { "sensor_id": "S-2", "timestamp_utc": "2026-08-20T10:00:02Z", "value": 44.1, "unit": "percent" },
+            { "sensor_id": "S-1", "timestamp_utc": "2026-08-20T10:00:05Z", "value": 18.4, "unit": "C" }
+          ]
+        }
+      }
+    },
+    {
+      "id": "research-low-mathematics-v1",
+      "version": "1.0.0",
+      "external_category": "unknown",
+      "category_target": "quality.task_types.research_synthesis",
+      "request": {
+        "request_text": "Using only these notes, write a 120-word synthesis: Source A says spaced practice improved quiz retention compared with one long session. Source B says the benefit was largest when practice intervals matched the later test interval. Identify the shared finding and one limitation: neither note reports sample size.",
+        "task_type": "research_synthesis",
+        "domain": "mathematics",
+        "complexity": "low",
+        "quality_floor": "standard",
+        "privacy_level": "standard",
+        "risk_level": "standard",
+        "language": "english",
+        "output_length": "short"
+      },
+      "grading": { "rubric_ref": "research-synthesis-v1.json" }
+    },
+    {
+      "id": "research-medium-medicine-v1",
+      "version": "1.0.0",
+      "external_category": "unknown",
+      "category_target": "quality.task_types.research_synthesis",
+      "request": {
+        "request_text": "Synthesize these fictional, non-clinical workflow notes without offering health advice: Study A observed shorter check-in lines after signs were simplified. Study B observed fewer filing errors after folders were color-coded. Study C found no change when both interventions were introduced during a staffing shortage. Explain the findings and the main confounder.",
+        "task_type": "research_synthesis",
+        "domain": "medicine",
+        "complexity": "medium",
+        "quality_floor": "standard",
+        "privacy_level": "standard",
+        "risk_level": "standard",
+        "language": "english",
+        "output_length": "normal"
+      },
+      "grading": { "rubric_ref": "research-synthesis-v1.json" }
+    },
+    {
+      "id": "research-high-general-v1",
+      "version": "1.0.0",
+      "external_category": "unknown",
+      "category_target": "quality.task_types.research_synthesis",
+      "request": {
+        "request_text": "Write a structured synthesis using only these fictional source summaries. A: remote teams completed focused tasks faster but reported weaker informal knowledge sharing. B: scheduled peer sessions improved knowledge sharing but reduced uninterrupted work blocks. C: teams choosing their own peer-session frequency reported both stable completion time and improved knowledge sharing, but the study lacked random assignment. Separate convergence, tension, and evidence limits.",
+        "task_type": "research_synthesis",
+        "domain": "general",
+        "complexity": "high",
+        "quality_floor": "standard",
+        "privacy_level": "standard",
+        "risk_level": "standard",
+        "language": "english",
+        "output_length": "detailed"
+      },
+      "grading": { "rubric_ref": "research-synthesis-v1.json" }
+    }
+  ]
+}

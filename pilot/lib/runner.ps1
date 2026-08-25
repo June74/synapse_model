@@ -1289,6 +1289,25 @@ function ConvertTo-RunnerCredentialRedactedText {
     return $result
 }
 
+function Test-PilotTransportSuccess {
+    param([AllowNull()][object]$ProcessResult)
+
+    if ($null -eq $ProcessResult) { return $false }
+    $exitCodeProperty = $ProcessResult.PSObject.Properties |
+        Where-Object { $_.Name -ceq 'exit_code' } |
+        Select-Object -First 1
+    if ($null -eq $exitCodeProperty -or $null -eq $exitCodeProperty.Value -or
+        $exitCodeProperty.Value -ne 0) { return $false }
+    if ([bool]$ProcessResult.timed_out -or [bool]$ProcessResult.cleanup_failed) { return $false }
+    $processExitedProperty = $ProcessResult.PSObject.Properties |
+        Where-Object { $_.Name -ceq 'process_exited' } |
+        Select-Object -First 1
+    if ($null -ne $processExitedProperty -and
+        $processExitedProperty.Value -is [bool] -and
+        -not $processExitedProperty.Value) { return $false }
+    return $true
+}
+
 function New-ResultRecord {
     param(
         [Parameter(Mandatory)][object]$Candidate,
@@ -1301,10 +1320,7 @@ function New-ResultRecord {
         [AllowNull()][object]$CliReportedCostUsd
     )
 
-    $transportSuccess = $null -ne $ProcessResult -and
-        $ProcessResult.exit_code -eq 0 -and
-        (-not [bool]$ProcessResult.timed_out) -and
-        (-not [bool]$ProcessResult.cleanup_failed)
+    $transportSuccess = Test-PilotTransportSuccess -ProcessResult $ProcessResult
     $contractCompliant = $transportSuccess -and $null -ne $Canonical -and (Test-CanonicalResponse $Canonical).valid
     $safeDiagnosticCodes = @('completed', 'provider-declared failure', 'transport failure', 'parse failure', 'contract failure', 'execution failure')
     $safeNote = if ($safeDiagnosticCodes -contains $DiagnosticNote) { $DiagnosticNote } else { 'execution failure' }
@@ -1341,6 +1357,263 @@ function New-ResultRecord {
     return [pscustomobject]$record
 }
 
+function Test-PilotExactTokenCount {
+    param([AllowNull()][object]$Value)
+
+    if ($null -eq $Value) { return $false }
+    $integerTypes = @([byte], [sbyte], [int16], [uint16], [int32], [uint32], [int64], [uint64], [Numerics.BigInteger])
+    return (($Value.GetType() -in $integerTypes) -or
+        ($Value -is [decimal] -and $Value -eq [decimal]::Truncate($Value))) -and
+        [decimal]$Value -ge 0
+}
+
+function Get-PilotExactPropertyValue {
+    param(
+        [AllowNull()][object]$InputObject,
+        [Parameter(Mandatory)][string]$Name
+    )
+
+    if ($null -eq $InputObject) { return $null }
+    $property = $InputObject.PSObject.Properties |
+        Where-Object { $_.Name -ceq $Name } |
+        Select-Object -First 1
+    if ($null -eq $property) { return $null }
+    return $property.Value
+}
+
+function ConvertTo-PilotUsageMetadata {
+    param([AllowNull()][object]$ProcessResult)
+
+    if ($null -eq $ProcessResult) { return $null }
+    $usageProperty = $ProcessResult.PSObject.Properties |
+        Where-Object { $_.Name -ceq 'usage' } |
+        Select-Object -First 1
+    if ($null -eq $usageProperty -or $null -eq $usageProperty.Value) { return $null }
+
+    $usage = $usageProperty.Value
+    $values = [ordered]@{}
+    $allTokensValid = $true
+    foreach ($name in @('actual_input_tokens', 'visible_output_tokens', 'reasoning_tokens')) {
+        $property = $usage.PSObject.Properties |
+            Where-Object { $_.Name -ceq $name } |
+            Select-Object -First 1
+        $valid = $null -ne $property -and (Test-PilotExactTokenCount -Value $property.Value)
+        $values[$name] = if ($valid) { [decimal]$property.Value } else { $null }
+        if (-not $valid) { $allTokensValid = $false }
+    }
+    $completeProperty = $usage.PSObject.Properties |
+        Where-Object { $_.Name -ceq 'complete' } |
+        Select-Object -First 1
+    $complete = $null -ne $completeProperty -and $completeProperty.Value -is [bool] -and
+        $completeProperty.Value -and $allTokensValid
+
+    return [pscustomobject][ordered]@{
+        actual_input_tokens = $values.actual_input_tokens
+        visible_output_tokens = $values.visible_output_tokens
+        reasoning_tokens = $values.reasoning_tokens
+        complete = [bool]$complete
+    }
+}
+
+function New-PilotExtractedUsage {
+    param(
+        [AllowNull()][object]$InputTokens,
+        [AllowNull()][object]$VisibleOutputTokens,
+        [AllowNull()][object]$ReasoningTokens
+    )
+
+    $wrapper = [pscustomobject]@{
+        usage = [pscustomobject][ordered]@{
+            actual_input_tokens = $InputTokens
+            visible_output_tokens = $VisibleOutputTokens
+            reasoning_tokens = $ReasoningTokens
+            complete = $true
+        }
+    }
+    return ConvertTo-PilotUsageMetadata -ProcessResult $wrapper
+}
+
+function New-PilotSplitOutputUsage {
+    param(
+        [AllowNull()][object]$InputTokens,
+        [AllowNull()][object]$OutputTokens,
+        [AllowNull()][object]$HiddenTokens
+    )
+
+    if (-not (Test-PilotExactTokenCount -Value $InputTokens) -or
+        -not (Test-PilotExactTokenCount -Value $OutputTokens) -or
+        -not (Test-PilotExactTokenCount -Value $HiddenTokens) -or
+        [decimal]$HiddenTokens -gt [decimal]$OutputTokens) {
+        return New-PilotExtractedUsage -InputTokens $InputTokens `
+            -VisibleOutputTokens $null -ReasoningTokens $null
+    }
+
+    return New-PilotExtractedUsage -InputTokens $InputTokens `
+        -VisibleOutputTokens ([decimal]$OutputTokens - [decimal]$HiddenTokens) `
+        -ReasoningTokens $HiddenTokens
+}
+
+function Get-PilotProviderUsage {
+    param(
+        [Parameter(Mandatory)][object]$Candidate,
+        [Parameter(Mandatory)][string]$Text
+    )
+
+    try {
+        switch ($Candidate.tool) {
+            'codex' {
+                $finalUsage = $null
+                foreach ($line in ($Text -split "`r?`n")) {
+                    if ([string]::IsNullOrWhiteSpace($line)) { continue }
+                    $event = $line | ConvertFrom-Json -Depth 30 -ErrorAction Stop
+                    if ($event.type -ceq 'turn.completed' -and
+                        $event.PSObject.Properties.Name -ccontains 'usage') {
+                        $finalUsage = $event.usage
+                    }
+                }
+                if ($null -eq $finalUsage) { return $null }
+                return New-PilotSplitOutputUsage `
+                    -InputTokens (Get-PilotExactPropertyValue -InputObject $finalUsage -Name 'input_tokens') `
+                    -OutputTokens (Get-PilotExactPropertyValue -InputObject $finalUsage -Name 'output_tokens') `
+                    -HiddenTokens (Get-PilotExactPropertyValue -InputObject $finalUsage -Name 'reasoning_output_tokens')
+            }
+            'claude' {
+                $envelope = $Text | ConvertFrom-Json -Depth 30 -ErrorAction Stop
+                if ($envelope.PSObject.Properties.Name -cnotcontains 'modelUsage' -or
+                    $null -eq $envelope.modelUsage) { return $null }
+                $modelProperty = $envelope.modelUsage.PSObject.Properties |
+                    Where-Object { $_.Name -ceq [string]$Candidate.model } |
+                    Select-Object -First 1
+                if ($null -eq $modelProperty -or $null -eq $modelProperty.Value) { return $null }
+                $usage = $modelProperty.Value
+                return New-PilotExtractedUsage `
+                    -InputTokens (Get-PilotExactPropertyValue -InputObject $usage -Name 'inputTokens') `
+                    -VisibleOutputTokens $null -ReasoningTokens $null
+            }
+            'agy' {
+                $objects = @(Get-AgyJsonObjects -Text $Text)
+                if ($objects.Count -ne 1 -or
+                    $objects[0].PSObject.Properties.Name -cnotcontains 'usage') { return $null }
+                $usage = $objects[0].usage
+                return New-PilotSplitOutputUsage `
+                    -InputTokens (Get-PilotExactPropertyValue -InputObject $usage -Name 'input_tokens') `
+                    -OutputTokens (Get-PilotExactPropertyValue -InputObject $usage -Name 'output_tokens') `
+                    -HiddenTokens (Get-PilotExactPropertyValue -InputObject $usage -Name 'thinking_tokens')
+            }
+        }
+    } catch {
+        return $null
+    }
+    return $null
+}
+
+function Invoke-PilotCandidate {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory)][object]$Candidate,
+        [Parameter(Mandatory)][ValidateNotNullOrEmpty()][string]$Prompt,
+        [scriptblock]$NativeInvoker,
+        [AllowNull()][string]$RunId,
+        [ValidateRange(-1, [int]::MaxValue)][int]$TimeoutSeconds = -1
+    )
+
+    $candidateValidation = Test-CandidateDefinition -Candidate $Candidate
+    if (-not $candidateValidation.valid) {
+        throw "Invalid pilot candidate: $($candidateValidation.reason)"
+    }
+    if ([string]::IsNullOrWhiteSpace($RunId)) { $RunId = [guid]::NewGuid().ToString('N') }
+
+    $processResult = $null
+    $canonical = $null
+    $failure = $null
+    $reportedCost = $null
+    $note = 'completed'
+    try {
+        $command = New-CandidateCommand -Candidate $Candidate -Prompt $Prompt
+        $processResult = if ($null -ne $NativeInvoker) {
+            & $NativeInvoker $command
+        } else {
+            $nativeTimeoutSeconds = if ($TimeoutSeconds -ge 0) {
+                $TimeoutSeconds
+            } elseif ($Candidate.tool -in @('agy', 'claude')) {
+                120
+            } else {
+                0
+            }
+            Invoke-NativeCandidate -Command $command -TimeoutSeconds $nativeTimeoutSeconds -PreserveRawOutput
+        }
+        $reportedCost = Get-PilotReportedCost -ProcessResult $processResult
+        if (-not (Test-PilotTransportSuccess -ProcessResult $processResult)) {
+            $note = 'transport failure'
+            $failure = $note
+        } else {
+            try {
+                $providerOutput = if ($processResult.PSObject.Properties.Name -contains 'raw_stdout') {
+                    $processResult.raw_stdout
+                } else {
+                    $processResult.stdout
+                }
+                $canonical = switch ($Candidate.tool) {
+                    'codex' { ConvertFrom-CodexOutput $providerOutput }
+                    'claude' { ConvertFrom-ClaudeOutput $providerOutput }
+                    'agy' { ConvertFrom-AgyOutput $providerOutput }
+                }
+                $canonicalCheck = Test-CanonicalResponse $canonical
+                if (-not $canonicalCheck.valid) {
+                    $note = 'contract failure'
+                    $failure = $note
+                }
+            } catch {
+                $note = 'parse failure'
+                $failure = $note
+            }
+        }
+    } catch {
+        $note = 'execution failure'
+        $failure = $note
+    }
+
+    $safeProcess = if ($null -eq $processResult) {
+        $null
+    } else {
+        [pscustomobject][ordered]@{
+            exit_code = $processResult.exit_code
+            duration_ms = if ($null -ne $processResult.duration_ms) { [int64]$processResult.duration_ms } else { [int64]0 }
+            timed_out = [bool]$processResult.timed_out
+            cleanup_failed = [bool]$processResult.cleanup_failed
+            cleanup_status = if ($processResult.cleanup_status -is [string]) { [string]$processResult.cleanup_status } else { $null }
+            process_exited = if ($processResult.process_exited -is [bool]) { [bool]$processResult.process_exited } else { $null }
+        }
+    }
+    $record = New-ResultRecord -Candidate $Candidate -ProcessResult $safeProcess -Canonical $canonical `
+        -RunId $RunId -DiagnosticNote $note -FailureError $failure -Prompt $Prompt `
+        -CliReportedCostUsd $reportedCost
+    if ($record.diagnostic_note -cne 'completed') { $failure = [string]$record.diagnostic_note }
+
+    $usage = ConvertTo-PilotUsageMetadata -ProcessResult $processResult
+    if ($null -eq $usage -and $null -ne $processResult -and
+        (Test-PilotTransportSuccess -ProcessResult $processResult)) {
+        $providerOutput = if ($processResult.PSObject.Properties.Name -contains 'raw_stdout') {
+            $processResult.raw_stdout
+        } else { $processResult.stdout }
+        $usage = Get-PilotProviderUsage -Candidate $Candidate -Text ([string]$providerOutput)
+    }
+
+    return [pscustomobject][ordered]@{
+        run_id = $RunId
+        candidate = $Candidate
+        process = $safeProcess
+        canonical = $canonical
+        failure = $failure
+        diagnostic_note = [string]$record.diagnostic_note
+        latency_ms = if ($null -ne $safeProcess) { [int64]$safeProcess.duration_ms } else { [int64]0 }
+        usage = $usage
+        cli_reported_cost_usd = ConvertTo-PilotSafeCost -Value $reportedCost
+        record = $record
+    }
+}
+
 function Add-PilotResultRecord {
     param(
         [Parameter(Mandatory)][object]$Record,
@@ -1367,7 +1640,8 @@ function Invoke-PilotRun {
         # new runner writes use this separate normalized-results target by default.
         [string]$ResultsPath = 'pilot/results/runner-test-run.jsonl',
         [switch]$DryRun,
-        [scriptblock]$NativeInvoker
+        [scriptblock]$NativeInvoker,
+        [scriptblock]$PromptFactory
     )
 
     [void](Resolve-PilotResultsPath $ResultsPath)
@@ -1378,50 +1652,20 @@ function Invoke-PilotRun {
 
     $runId = [guid]::NewGuid().ToString('N')
     $records = [System.Collections.Generic.List[object]]::new()
+    if ($null -eq $PromptFactory) {
+        $PromptFactory = { param($Candidate) New-PilotPrompt -Candidate $Candidate }
+    }
     foreach ($candidate in $selected) {
-        $processResult = $null
-        $canonical = $null
-        $failure = $null
-        $prompt = ''
-        $reportedCost = $null
-        $note = 'completed'
         try {
-            $prompt = New-PilotPrompt -Candidate $candidate
-            $command = New-CandidateCommand -Candidate $candidate -Prompt $prompt
-            $processResult = if ($null -ne $NativeInvoker) {
-                & $NativeInvoker $command
-            } else {
-                $nativeTimeoutSeconds = if ($candidate.tool -in @('agy', 'claude')) { 120 } else { 0 }
-                Invoke-NativeCandidate -Command $command -TimeoutSeconds $nativeTimeoutSeconds -PreserveRawOutput
-            }
-            $reportedCost = Get-PilotReportedCost -ProcessResult $processResult
-            if ($processResult.exit_code -ne 0) {
-                $note = 'transport failure'
-                $failure = "Process exited with code $($processResult.exit_code)."
-            } else {
-                try {
-                    $providerOutput = if ($processResult.PSObject.Properties.Name -contains 'raw_stdout') { $processResult.raw_stdout } else { $processResult.stdout }
-                    $canonical = switch ($candidate.tool) {
-                        'codex' { ConvertFrom-CodexOutput $providerOutput }
-                        'claude' { ConvertFrom-ClaudeOutput $providerOutput }
-                        'agy' { ConvertFrom-AgyOutput $providerOutput }
-                    }
-                    $canonicalCheck = Test-CanonicalResponse $canonical
-                    if (-not $canonicalCheck.valid) {
-                        $note = 'contract failure'
-                        $failure = $canonicalCheck.reason
-                    }
-                } catch {
-                    $note = 'parse failure'
-                    $failure = $_.Exception.Message
-                }
-            }
+            $prompt = & $PromptFactory $candidate
+            $execution = Invoke-PilotCandidate -Candidate $candidate -Prompt $prompt `
+                -NativeInvoker $NativeInvoker -RunId $runId
+            $record = $execution.record
         } catch {
-            $note = 'execution failure'
-            $failure = $_.Exception.Message
+            $record = New-ResultRecord -Candidate $candidate -ProcessResult $null `
+                -Canonical $null -RunId $runId -DiagnosticNote 'execution failure' `
+                -FailureError 'execution failure' -Prompt $null -CliReportedCostUsd $null
         }
-        $safeProcessResult = if ($null -ne $processResult) { $processResult | Select-Object -Property * -ExcludeProperty raw_stdout, raw_stderr } else { $null }
-        $record = New-ResultRecord -Candidate $candidate -ProcessResult $safeProcessResult -Canonical $canonical -RunId $runId -DiagnosticNote $note -FailureError $failure -Prompt $prompt -CliReportedCostUsd $reportedCost
         Add-PilotResultRecord -Record $record -ResultsPath $ResultsPath
         [void]$records.Add($record)
     }

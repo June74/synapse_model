@@ -1,0 +1,21 @@
+{
+  "type": "result",
+  "subtype": "success",
+  "is_error": false,
+  "duration_ms": 812,
+  "duration_api_ms": 640,
+  "num_turns": 1,
+  "result": "{\"status\":\"success\",\"answer\":\"4\",\"error\":null}",
+  "session_id": "fixture-session",
+  "total_cost_usd": 0.0042,
+  "modelUsage": {
+    "claude-sonnet-5": {
+      "inputTokens": 140,
+      "outputTokens": 52,
+      "cacheReadInputTokens": 0,
+      "cacheCreationInputTokens": 0,
+      "costUSD": 0.0042,
+      "contextWindow": 200000
+    }
+  }
+}

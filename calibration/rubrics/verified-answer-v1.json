@@ -1,0 +1,9 @@
+{
+  "id": "verified-answer",
+  "version": "1.0.0",
+  "criteria": [
+    "The final answer matches the verified result.",
+    "The explanation includes every required reasoning step.",
+    "The response does not introduce unsupported claims."
+  ]
+}

@@ -2,15 +2,40 @@
 
 | ID | Title | Status | First observed | Last observed |
 |---|---|---|---|---|
+| [SB-20260824-182757-task8-quality-boundaries](incidents/2026-08-24T182757Z-task8-quality-boundaries.md) | Task 8 boundary and transport quality gaps | closed | 2026-08-24 | 2026-08-24 |
+| [SB-20260824-015530-router-pricing-fail-open](incidents/2026-08-24T015530Z-router-pricing-fail-open.md) | Task 6 pricing accepted missing snapshots and free routes | closed | 2026-08-24 | 2026-08-24 |
+| [SB-20260824-012823-apply-patch-duplicate-target](incidents/2026-08-24T012823Z-apply-patch-duplicate-target.md) | Patch request repeated one target file in multiple update blocks | closed | 2026-08-24 | 2026-08-24 |
+| [SB-20260823-232717-requirements-profile-path-format-parser](incidents/2026-08-23T232717Z-requirements-profile-path-format-parser.md) | Requirements profile-path format expression caused a parser error | closed | 2026-08-23 | 2026-08-23 |
+| [SB-20260823-234012-minimal-profile-fixture-path](incidents/2026-08-23T234012Z-minimal-profile-fixture-path.md) | Assumed minimal-profile fixture filename caused a path-not-found error | closed | 2026-08-23 | 2026-08-24 |
+| [SB-20260824-031922-baseline-session-id-not-retained](incidents/2026-08-24T031922Z-baseline-session-id-not-retained.md) | Baseline test session identifier was not retained | closed | 2026-08-24 | 2026-08-24 |
+| [SB-20260824-033023-sqlite-test-connection-not-closed](incidents/2026-08-24T033023Z-sqlite-test-connection-not-closed.md) | SQLite test reader left Windows file handles open | closed | 2026-08-24 | 2026-08-24 |
+| [SB-20260824-035416-sqlite-schema-admission-atomicity](incidents/2026-08-24T035416Z-sqlite-schema-admission-atomicity.md) | SQLite schema admission was not exact or atomic | closed | 2026-08-24 | 2026-08-24 |
+| [SB-20260824-044250-sqlite-trace-quality-review](incidents/2026-08-24T044250Z-sqlite-trace-quality-review.md) | SQLite trace admission and bridge durability gaps | closed | 2026-08-24 | 2026-08-24 |
+| [SB-20260824-051403-python-alias-unavailable](incidents/2026-08-24T051403Z-python-alias-unavailable.md) | Python alias unavailable during storage baseline | closed | 2026-08-24 | 2026-08-24 |
+| [SB-20260824-052419-nullable-trace-id-diagnostic](incidents/2026-08-24T052419Z-nullable-trace-id-diagnostic.md) | Nullable trace ID test expected a leaf diagnostic | closed | 2026-08-24 | 2026-08-24 |
+| [SB-20260824-052700-patch-tool-call-omitted](incidents/2026-08-24T052700Z-patch-tool-call-omitted.md) | Pricing patch text was not sent to the edit tool | closed | 2026-08-24 | 2026-08-24 |
+| [SB-20260824-052823-router-test-assert-helper](incidents/2026-08-24T052823Z-router-test-assert-helper.md) | Task 8 pricing test used an unavailable assertion helper | closed | 2026-08-24 | 2026-08-24 |
+| [SB-20260824-154022-router-dot-source-schema-default](incidents/2026-08-24T154022Z-router-dot-source-schema-default.md) | Normalized request collapsed an empty capability array | closed | 2026-08-24 | 2026-08-24 |
+| [SB-20260824-154446-router-estimate-expectation](incidents/2026-08-24T154446Z-router-estimate-expectation.md) | Task 8 estimate assertion used historical input tokens | closed | 2026-08-24 | 2026-08-24 |
+| [SB-20260824-155022-task8-trace-token-type](incidents/2026-08-24T155022Z-task8-trace-token-type.md) | Finalized Task 8 trace used an incompatible token JSON type | closed | 2026-08-24 | 2026-08-24 |
+| [SB-20260824-160012-task8-sqlite-inspection-column](incidents/2026-08-24T160012Z-task8-sqlite-inspection-column.md) | Acceptance query assumed token columns instead of price JSON | closed | 2026-08-24 | 2026-08-24 |
+| [SB-20260824-160247-task8-unsupported-trace-short-circuit](incidents/2026-08-24T160247Z-task8-unsupported-trace-short-circuit.md) | Unsupported boundary request bypassed trace persistence | closed | 2026-08-24 | 2026-08-24 |
+| [SB-20260824-181040-task8-prompt-boundary-regression](incidents/2026-08-24T181040Z-task8-prompt-boundary-regression.md) | Pilot prompt failure escaped the per-candidate boundary | closed | 2026-08-24 | 2026-08-24 |
+| [SB-20260824-232519-acceptance-artifact-shape](incidents/2026-08-24T232519Z-acceptance-artifact-shape.md) | Acceptance assertion expected response-only artifact fields | closed | 2026-08-24T23:25:19.859408Z | 2026-08-24T23:25:19.859408Z |
+| [SB-20260824-234956-git-worktree-index-lock-permission](incidents/2026-08-24T234956Z-git-worktree-index-lock-permission.md) | Sandbox denied Git worktree index lock creation | closed | 2026-08-24T23:49:56.062250Z | 2026-08-24T23:50:12.460701Z |
+| [SB-20260825-004903-task10-haiku-omitted-effort-preflight](incidents/2026-08-25T004903Z-task10-haiku-omitted-effort-preflight.md) | Task 10 Haiku preflight treated omitted effort as literal default | closed | 2026-08-25T00:49:03.892486Z | 2026-08-25T00:49:37.557659Z |
 | SB-2026-08-19-001 | PowerShell DOCX paragraph extraction syntax error | closed | 2026-08-19 | 2026-08-19 |
 | SB-2026-08-19-002 | Current DOCX locked during full-document scan | closed | 2026-08-19 | 2026-08-19 |
-| SB-2026-08-19-003 | Skill path lookup mismatch | closed | 2026-08-19 | 2026-08-19 |
+| SB-2026-08-19-003 | Skill path lookup mismatch | closed | 2026-08-19 | 2026-08-23 |
 | SB-2026-08-19-004 | Claude CLI smoke test did not return within timeout | contained | 2026-08-19 | 2026-08-19 |
 | SB-2026-08-19-005 | Antigravity CLI authentication unavailable in sandbox | contained | 2026-08-19 | 2026-08-19 |
-| SB-2026-08-19-006 | Git index unavailable to sandbox | contained | 2026-08-19 | 2026-08-20 |
+| SB-2026-08-19-006 | Git index unavailable to sandbox | contained | 2026-08-19 | 2026-08-24 |
 | SB-2026-08-19-007 | Plan review command used an invalid PowerShell parameter | contained | 2026-08-19 | 2026-08-19 |
-| SB-2026-08-19-008 | Pre-creation worktree ignore check rejected absent directory | contained | 2026-08-19 | 2026-08-19 |
+| SB-2026-08-19-008 | Pre-creation worktree ignore check rejected absent directory | contained | 2026-08-19 | 2026-08-24 |
 | SB-2026-08-19-009 | Existing descendant-drain test was transiently timing-sensitive | closed | 2026-08-19 | 2026-08-19 |
-| SB-2026-08-19-010 | Parser verification command used invalid PowerShell interpolation | closed | 2026-08-19 | 2026-08-19 |
+| SB-2026-08-19-010 | Parser verification command used invalid PowerShell interpolation | closed | 2026-08-19 | 2026-08-25 |
 | SB-20260822-190417-main-feature-branch-divergence | Fast-forward merge unavailable after main advanced | closed | 2026-08-22 | 2026-08-22 |
 | SB-20260822-190757-merged-main-legacy-result-deletion | Merged main lost required legacy pilot result fixture | closed | 2026-08-22 | 2026-08-22 |
+| SB-20260823-015506-test-json-numeric-precision | Test-Json loses numeric precision at contract boundaries | closed | 2026-08-23 | 2026-08-23 |
+| SB-20260823-141012-convertfrom-json-object-type | ConvertFrom-Json scalar passed PSCustomObject accelerator test | closed | 2026-08-23 | 2026-08-23 |
+| SB-20260823-quality-authorization-fixture | Quality authorization fixture produced repeated expected errors | closed | 2026-08-23 | 2026-08-23 |

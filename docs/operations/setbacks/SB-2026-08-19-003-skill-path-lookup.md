@@ -4,8 +4,8 @@
 - Title: Skill path lookup mismatch
 - Status: closed
 - First observed: 2026-08-19
-- Last observed: 2026-08-19
-- Phase/task: Current-turn research response
+- Last observed: 2026-08-23
+- Phase/task: Task 7 SQLite trace storage preflight
 - Environment: Windows PowerShell, Codex desktop
 - Version/commit: Not applicable
 
@@ -38,3 +38,23 @@ The first attempt to read the `scope-gate` skill used the catalog root `C:\\User
 ## Verification
 
 The `scope-gate` and `setback-logger` instructions were read successfully from their resolved paths.
+
+## Recurrences
+
+### 2026-08-23 - catalog root and incident filename assumptions
+
+- Symptom: a batch skill read assumed every listed skill lived under `C:\\Users\\2006i\\.codex\\skills`; three skills actually lived under `C:\\Users\\2006i\\.agents\\skills`. A later incident read assumed the index title was also the filename.
+- Impact: two read-only commands reported path-not-found errors. No repository product files, private data, or runtime state changed.
+- Confirmed cause: the commands constructed paths from labels instead of resolving the catalog root alias and the directory entry first.
+- Correction: expanded each catalog alias to its configured root and opened the incident using the exact path returned by `Get-ChildItem`.
+- Prevention: resolve catalog aliases and directory entries before issuing literal-path reads; do not derive filenames from display titles.
+- Verification: all required skill files and this incident were subsequently read successfully from resolved paths.
+
+### 2026-08-24 - schema filename assumption
+
+- Symptom: an interface-inspection command requested `request.schema.json` and `response.schema.json` even though the live test harness names `request-profile.schema.json` and `router-response.schema.json`.
+- Impact: two read-only schema reads reported path-not-found errors. Parallel source inspection continued; no product file or runtime state changed.
+- Confirmed cause: the command shortened filenames from memory instead of using the literal paths already exposed by the test harness.
+- Correction: use the exact schema paths from `router/tests/router.tests.ps1` and verify them through a directory listing before reading.
+- Prevention: copy live path variables verbatim; never normalize or abbreviate repository filenames.
+- Verification: the corrected literal-path reads loaded all three schema filenames and the full request and response schemas successfully.

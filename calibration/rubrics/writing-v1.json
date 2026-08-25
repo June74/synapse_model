@@ -1,0 +1,10 @@
+{
+  "id": "writing",
+  "version": "1.0.0",
+  "criteria": [
+    "The response fulfills the stated purpose and audience.",
+    "The organization is clear and coherent.",
+    "The requested tone and length are followed.",
+    "The prose is specific and free of unsupported claims."
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "id": "research-synthesis",
+  "version": "1.0.0",
+  "criteria": [
+    "All supplied sources are represented accurately.",
+    "Agreements, differences, and limitations are distinguished.",
+    "Conclusions follow only from the supplied evidence.",
+    "Source labels remain attached to the claims they support."
+  ]
+}

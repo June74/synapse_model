@@ -1,0 +1,9 @@
+{
+  "id": "extraction",
+  "version": "1.0.0",
+  "criteria": [
+    "The output is valid JSON with exactly the requested fields.",
+    "Every extracted value matches the supplied text.",
+    "No unsupported field or value is added."
+  ]
+}
