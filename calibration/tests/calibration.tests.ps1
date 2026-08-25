@@ -149,6 +149,82 @@ function Remove-TestCalibrationPilotLedgerRoot {
     if (Test-Path -LiteralPath $fullPath) { Remove-Item -LiteralPath $fullPath -Recurse -Force }
 }
 
+function New-TestCalibrationPilotCommand {
+    param([Parameter(Mandatory)][object]$Candidate, [Parameter(Mandatory)][string]$Prompt)
+    return [pscustomobject]@{
+        executable = [string]$Candidate.tool
+        arguments = @()
+        prompt = $Prompt
+        tool = [string]$Candidate.tool
+        route_id = [string]$Candidate.route_id
+        working_directory = $projectRoot
+    }
+}
+
+function New-TestCalibrationPilotExecution {
+    param([Parameter(Mandatory)][object]$Candidate, [Parameter(Mandatory)][string]$Answer, [Parameter(Mandatory)][string]$RunId)
+    return [pscustomobject][ordered]@{
+        run_id = $RunId
+        candidate = $Candidate
+        process = [pscustomobject]@{ exit_code = 0; duration_ms = 1; timed_out = $false; cleanup_failed = $false; cleanup_status = 'not-needed'; process_exited = $true }
+        canonical = [pscustomobject]@{ status = 'success'; answer = $Answer; error = $null }
+        failure = $null
+        diagnostic_note = 'completed'
+        latency_ms = 1
+        usage = $null
+        cli_reported_cost_usd = $null
+        record = [pscustomobject]@{ diagnostic_note = 'completed' }
+    }
+}
+
+function Invoke-TestCalibrationPilotRun {
+    param(
+        [Parameter(Mandatory)][string]$CandidateAnswer,
+        [Parameter(Mandatory)][ValidateSet('pass', 'fail')][string]$JudgeOneDecision,
+        [Parameter(Mandatory)][ValidateSet('pass', 'fail')][string]$JudgeTwoDecision
+    )
+    $input = New-TestCalibrationPilotLedgerInput
+    $invocations = [Collections.Generic.List[string]]::new()
+    $graderCalls = [pscustomobject]@{ count = 0 }
+    $candidateInvoker = {
+        param($Candidate, $Prompt, $LaunchGuard, $RunId)
+        $command = New-TestCalibrationPilotCommand -Candidate $Candidate -Prompt $Prompt
+        & $LaunchGuard $Candidate $command
+        $invocations.Add([string]$Candidate.route_id)
+        return New-TestCalibrationPilotExecution -Candidate $Candidate -Answer $CandidateAnswer -RunId $RunId
+    }.GetNewClosure()
+    $judgeInvoker = {
+        param($JudgeProfileId, $JudgePayload, $PromptDefinition, $LaunchGuard, $RunId)
+        $resolved = Get-CalibrationProfileAndCandidate -ConfigurationId $JudgeProfileId
+        $command = New-TestCalibrationPilotCommand -Candidate $resolved.candidate -Prompt 'anonymized-judge-payload'
+        & $LaunchGuard $resolved.candidate $command
+        $invocations.Add([string]$resolved.candidate.route_id)
+        $decision = if ($JudgeProfileId -ceq 'gpt-5.6-sol__max') { $JudgeOneDecision } else { $JudgeTwoDecision }
+        return [pscustomobject]@{ decision = $decision; rationale = "sanitized $decision evidence" }
+    }.GetNewClosure()
+    $graderInvoker = {
+        param($Prompt, $ResponseText, $PythonExecutor, $PythonExecutable, $PythonTimeoutMilliseconds)
+        $graderCalls.count++
+        return Invoke-CalibrationDeterministicGrader -Prompt $Prompt -ResponseText $ResponseText
+    }.GetNewClosure()
+    $gitInvoker = { [pscustomobject]@{ clean = $true; commit = ('a' * 40) } }
+    try {
+        $result = Invoke-Calibration -Pilot -Run -RunId 'option1-live-20260825-001' `
+            -ResultsRoot $input.results_root -CalibrationSetPath $setPath -RubricsRoot $rubricsRoot `
+            -CandidateInvoker $candidateInvoker -JudgeInvoker $judgeInvoker -GraderInvoker $graderInvoker `
+            -PilotGitInvoker $gitInvoker
+        return [pscustomobject]@{
+            result = $result
+            input = $input
+            invocations = @($invocations)
+            local_grader_calls = $graderCalls.count
+        }
+    } catch {
+        Remove-TestCalibrationPilotLedgerRoot -Path $input.results_root
+        throw
+    }
+}
+
 function Get-CalibrationResultsTreeSnapshot {
     param([Parameter(Mandatory)][string]$Root)
     return @(
@@ -951,6 +1027,78 @@ if (Test-Path -LiteralPath $implementationPath -PathType Leaf) {
         }
     }
 
+    Invoke-Assertion 'option 1 fake execution completes exactly three ordered launches and retains unknown quality' {
+        $execution = Invoke-TestCalibrationPilotRun `
+            -CandidateAnswer '{"event":"Robotics club demo","date":"2026-09-14","room":"Room B12"}' `
+            -JudgeOneDecision pass -JudgeTwoDecision pass
+        try {
+            $result = $execution.result
+            Assert-SequenceEqual @($execution.invocations) @(
+                'agy__gemini_3_7_flash_low__low',
+                'codex__gpt_5_6_sol__max',
+                'claude__claude_opus_5__max'
+            )
+            Assert-Equal $execution.local_grader_calls 1
+            Assert-Equal $result.run_state 'completed'
+            Assert-Equal $result.slots_consumed.total 3
+            Assert-Equal $result.launcher_processes_started.total 3
+            Assert-False $result.provider_side_requests.observable
+            Assert-True ($null -eq $result.provider_side_requests.count)
+            Assert-Equal $result.quality.external_category 'unknown'
+            Assert-Equal $result.quality.deterministic_result.outcome 'pass'
+            Assert-SequenceEqual @($result.quality.judge_decisions.decision) @('pass', 'pass')
+            Assert-Equal $result.quality.outcome 'retained'
+            Assert-False $result.profile_promotion_allowed
+            Assert-False $result.profile_mutated
+            Assert-False $result.production_eligibility_changed
+            $runRoot = Join-Path $execution.input.results_root 'option1-live-20260825-001'
+            $plan = Get-Content -Raw -LiteralPath (Join-Path $runRoot 'plan.json') | ConvertFrom-Json -Depth 100
+            Assert-Equal $plan.git_commit ('a' * 40)
+            Assert-True (Test-Path -LiteralPath (Join-Path $runRoot 'raw/candidate-response.json') -PathType Leaf)
+            Assert-True (Test-Path -LiteralPath (Join-Path $runRoot 'raw/judge-responses.json') -PathType Leaf)
+            $persisted = Get-Content -Raw -LiteralPath (Join-Path $runRoot 'result.json') | ConvertFrom-Json -Depth 100
+            Assert-Equal $persisted.run_state 'completed'
+            Assert-SequenceEqual @($persisted.quality.judge_decisions.decision) @('pass', 'pass')
+        } finally { Remove-TestCalibrationPilotLedgerRoot -Path $execution.input.results_root }
+    }
+
+    Invoke-Assertion 'option 1 deterministic quality failure still runs both judges and completes technically' {
+        $execution = Invoke-TestCalibrationPilotRun `
+            -CandidateAnswer '{"event":"Robotics club demo","date":"2026-09-14","room":"Wrong room"}' `
+            -JudgeOneDecision pass -JudgeTwoDecision pass
+        try {
+            Assert-SequenceEqual @($execution.invocations) @(
+                'agy__gemini_3_7_flash_low__low',
+                'codex__gpt_5_6_sol__max',
+                'claude__claude_opus_5__max'
+            )
+            Assert-Equal $execution.result.run_state 'completed'
+            Assert-Equal $execution.result.quality.deterministic_result.outcome 'fail'
+            Assert-SequenceEqual @($execution.result.quality.judge_decisions.decision) @('pass', 'pass')
+            Assert-Equal $execution.result.quality.outcome 'review_required'
+            Assert-Equal $execution.result.quality.external_category 'unknown'
+        } finally { Remove-TestCalibrationPilotLedgerRoot -Path $execution.input.results_root }
+    }
+
+    Invoke-Assertion 'option 1 first judge quality failure still runs the second judge and completes technically' {
+        $execution = Invoke-TestCalibrationPilotRun `
+            -CandidateAnswer '{"event":"Robotics club demo","date":"2026-09-14","room":"Room B12"}' `
+            -JudgeOneDecision fail -JudgeTwoDecision pass
+        try {
+            Assert-SequenceEqual @($execution.invocations) @(
+                'agy__gemini_3_7_flash_low__low',
+                'codex__gpt_5_6_sol__max',
+                'claude__claude_opus_5__max'
+            )
+            Assert-Equal $execution.result.run_state 'completed'
+            Assert-Equal $execution.result.quality.deterministic_result.outcome 'pass'
+            Assert-SequenceEqual @($execution.result.quality.judge_decisions.decision) @('fail', 'pass')
+            Assert-Equal $execution.result.quality.judge_decisions[0].rationale 'sanitized fail evidence'
+            Assert-Equal $execution.result.quality.outcome 'review_required'
+            Assert-Equal $execution.result.quality.external_category 'unknown'
+        } finally { Remove-TestCalibrationPilotLedgerRoot -Path $execution.input.results_root }
+    }
+
     Invoke-Assertion 'pilot plan and bounded live rejection never reach providers launch guard claims or writers' {
         $resultsRoot = New-CalibrationResultsTestRoot
         $originalFunctions = @{}
@@ -977,7 +1125,7 @@ if (Test-Path -LiteralPath $implementationPath -PathType Leaf) {
                 Invoke-Calibration -Pilot -Run -RunId 'task3-live-not-implemented' -ResultsRoot $resultsRoot `
                     -CalibrationSetPath $setPath -RubricsRoot $rubricsRoot -CandidateInvoker $candidateSpy `
                     -JudgeInvoker $judgeSpy -RouterInvoker $routerSpy | Out-Null
-            } 'pilot_live_not_implemented'
+            } 'pilot_run_id_invalid'
             foreach ($counter in @('PilotCandidateCalls', 'PilotJudgeCalls', 'PilotRouterCalls', 'PilotProviderCalls', 'PilotClaimCalls', 'PilotWriterCalls')) {
                 Assert-Equal (Get-Variable -Scope Script -Name $counter -ValueOnly) 0
             }
