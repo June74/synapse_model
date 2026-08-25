@@ -503,6 +503,157 @@ function Get-CalibrationProfileAndCandidate {
     return [pscustomobject]@{ profile = $profile; candidate = $candidate }
 }
 
+function Assert-CalibrationPilotExactValue {
+    param([object]$Actual, [object]$Expected, [string]$Name)
+    if ($Actual -cne $Expected) { throw "Pilot manifest '$Name' differs from the approved contract." }
+}
+
+function Test-CalibrationPilotManifestObject {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][object]$Manifest,
+        [Parameter(Mandatory)][string]$SchemaPath,
+        [Parameter(Mandatory)][string]$CalibrationSetPath,
+        [Parameter(Mandatory)][string]$RubricsRoot
+    )
+
+    $schemaValidation = Test-RouterSchema -Value $Manifest -SchemaPath $SchemaPath
+    if (-not $schemaValidation.valid) {
+        $errors = @($schemaValidation.errors | ForEach-Object { '{0}:{1}' -f $_.code, $_.path })
+        throw ('Pilot manifest schema validation failed: ' + ($errors -join ', '))
+    }
+
+    $loadedCalibrationSet = Import-CalibrationSet -Path $CalibrationSetPath -RubricsRoot $RubricsRoot
+    if (-not $loadedCalibrationSet.valid) {
+        throw ('Pilot calibration set validation failed: ' + (@($loadedCalibrationSet.errors) -join ', '))
+    }
+
+    $approvedManifest = [pscustomobject][ordered]@{
+        manifest_version = 'calibration-pilot-manifest/v1'
+        pilot_id = 'option1-three-launch-v1'
+        mode = 'option_1_workflow_validation'
+        selection_mode = 'calibration_only_exact_pin'
+        prompt_id = 'extraction-low-general-v1'
+        prompt_version = '1.0.0'
+        deterministic_grader = 'exact_fields'
+        raw_content_policy = 'synthetic_prompt_and_credential_sanitized_outputs_only'
+        profile_promotion_allowed = $false
+        total = 3
+        google = 1
+        openai = 1
+        anthropic = 1
+        application_retries = 0
+        roles = @(
+            [pscustomobject][ordered]@{ ordinal = 1; role = 'candidate'; family = 'google'; launcher = 'agy'; route_id = 'agy__gemini_3_7_flash_low__low'; configuration_id = 'gemini-3.7-flash-low__low'; model = 'gemini-3.7-flash-low'; effort = 'low' }
+            [pscustomobject][ordered]@{ ordinal = 2; role = 'judge_1'; family = 'openai'; launcher = 'codex'; route_id = 'codex__gpt_5_6_sol__max'; configuration_id = 'gpt-5.6-sol__max'; model = 'gpt-5.6-sol'; effort = 'max' }
+            [pscustomobject][ordered]@{ ordinal = 3; role = 'judge_2'; family = 'anthropic'; launcher = 'claude'; route_id = 'claude__claude_opus_5__max'; configuration_id = 'claude-opus-5__max'; model = 'claude-opus-5'; effort = 'max' }
+        )
+    }
+
+    foreach ($name in @('manifest_version', 'pilot_id', 'mode', 'selection_mode', 'deterministic_grader', 'raw_content_policy', 'profile_promotion_allowed')) {
+        Assert-CalibrationPilotExactValue -Actual $Manifest.$name -Expected $approvedManifest.$name -Name $name
+    }
+    Assert-CalibrationPilotExactValue -Actual $Manifest.prompt.id -Expected $approvedManifest.prompt_id -Name 'prompt.id'
+    Assert-CalibrationPilotExactValue -Actual $Manifest.prompt.version -Expected $approvedManifest.prompt_version -Name 'prompt.version'
+    foreach ($name in @('total', 'application_retries')) {
+        Assert-CalibrationPilotExactValue -Actual $Manifest.limits.$name -Expected $approvedManifest.$name -Name "limits.$name"
+    }
+    foreach ($family in @('google', 'openai', 'anthropic')) {
+        Assert-CalibrationPilotExactValue -Actual $Manifest.limits.provider_family.$family -Expected $approvedManifest.$family -Name "limits.provider_family.$family"
+    }
+
+    $manifestRoles = @($Manifest.roles)
+    if ($manifestRoles.Count -ne 3) { throw "Pilot manifest 'roles' must contain exactly three entries." }
+    $promptMatches = @($loadedCalibrationSet.set.prompts | Where-Object {
+        $_.id -ceq $approvedManifest.prompt_id -and $_.version -ceq $approvedManifest.prompt_version
+    })
+    if ($promptMatches.Count -ne 1) { throw 'Pilot manifest fixed prompt was not found exactly once in the validated calibration set.' }
+    $prompt = $promptMatches[0]
+    if ($prompt.grading.deterministic_grader.type -cne $approvedManifest.deterministic_grader) {
+        throw 'Pilot manifest fixed prompt does not use the approved exact_fields grader.'
+    }
+    $rubricRef = [string]$prompt.grading.rubric_ref
+    if (-not $loadedCalibrationSet.rubrics.ContainsKey($rubricRef)) {
+        throw 'Pilot manifest fixed prompt rubric was not loaded from the validated calibration set.'
+    }
+
+    $matrixPath = Join-Path $script:CalibrationProjectRoot 'pilot/model_matrix.json'
+    $matrix = Get-Content -Raw -LiteralPath $matrixPath -ErrorAction Stop | ConvertFrom-Json -Depth 100 -ErrorAction Stop
+    $seenRoutes = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    $seenFamilies = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    $seenConfigurations = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    $resolvedRoles = [Collections.Generic.List[object]]::new()
+
+    for ($index = 0; $index -lt $approvedManifest.roles.Count; $index++) {
+        $role = $manifestRoles[$index]
+        $approvedRole = $approvedManifest.roles[$index]
+        foreach ($name in @('ordinal', 'role', 'family', 'launcher', 'route_id', 'configuration_id', 'model', 'effort')) {
+            Assert-CalibrationPilotExactValue -Actual $role.$name -Expected $approvedRole.$name -Name "roles[$index].$name"
+        }
+        if (-not $seenRoutes.Add([string]$role.route_id)) { throw 'Pilot manifest contains duplicate route IDs.' }
+        if (-not $seenFamilies.Add([string]$role.family)) { throw 'Pilot manifest contains duplicate provider families.' }
+        if (-not $seenConfigurations.Add([string]$role.configuration_id)) { throw 'Pilot manifest contains duplicate configuration IDs.' }
+
+        $matrixMatches = @($matrix.candidates | Where-Object { $_.route_id -ceq $role.route_id })
+        if ($matrixMatches.Count -ne 1) { throw "Pilot route '$($role.route_id)' was not found exactly once in the model matrix." }
+        $matrixCandidate = $matrixMatches[0]
+        if (-not [bool]$matrixCandidate.enabled) { throw "Pilot route '$($role.route_id)' is disabled." }
+        if ($matrixCandidate.candidate_kind -cne 'model') { throw "Pilot route '$($role.route_id)' is not a model candidate." }
+        foreach ($field in @('route_id', 'model', 'effort')) {
+            Assert-CalibrationPilotExactValue -Actual $matrixCandidate.$field -Expected $role.$field -Name "matrix.$field"
+        }
+        Assert-CalibrationPilotExactValue -Actual $matrixCandidate.tool -Expected $role.launcher -Name 'matrix.tool'
+        Assert-CalibrationPilotExactValue -Actual $matrixCandidate.provider -Expected $role.family -Name 'matrix.provider'
+
+        $resolved = Get-CalibrationProfileAndCandidate -ConfigurationId $role.configuration_id
+        foreach ($field in @('configuration_id', 'launcher', 'model', 'effort')) {
+            Assert-CalibrationPilotExactValue -Actual $resolved.profile.$field -Expected $role.$field -Name "profile.$field"
+        }
+        Assert-CalibrationPilotExactValue -Actual $resolved.profile.provider -Expected $role.family -Name 'profile.provider'
+        foreach ($field in @('route_id', 'tool', 'provider', 'model', 'effort', 'candidate_kind', 'enabled')) {
+            Assert-CalibrationPilotExactValue -Actual $resolved.candidate.$field -Expected $matrixCandidate.$field -Name "resolved_candidate.$field"
+        }
+        $resolvedRoles.Add([pscustomobject][ordered]@{
+            ordinal = $role.ordinal
+            role = $role.role
+            family = $role.family
+            launcher = $role.launcher
+            route_id = $role.route_id
+            configuration_id = $role.configuration_id
+            model = $role.model
+            effort = $role.effort
+            profile = $resolved.profile
+            candidate = $resolved.candidate
+        })
+    }
+
+    if ($resolvedRoles[0].family -cne 'google' -or
+        $resolvedRoles[1].family -cne 'openai' -or
+        $resolvedRoles[2].family -cne 'anthropic') {
+        throw 'Pilot manifest must use the approved Google candidate with OpenAI then Anthropic cross-family judges.'
+    }
+
+    return [pscustomobject][ordered]@{
+        manifest = $Manifest
+        calibration_set = $loadedCalibrationSet.set
+        prompt = $prompt
+        rubric = $loadedCalibrationSet.rubrics[$rubricRef]
+        roles = @($resolvedRoles)
+    }
+}
+
+function Import-CalibrationPilotManifest {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$SchemaPath,
+        [Parameter(Mandatory)][string]$CalibrationSetPath,
+        [Parameter(Mandatory)][string]$RubricsRoot
+    )
+    $manifest = Get-Content -Raw -LiteralPath $Path | ConvertFrom-Json -Depth 100 -NoEnumerate
+    return Test-CalibrationPilotManifestObject -Manifest $manifest -SchemaPath $SchemaPath -CalibrationSetPath $CalibrationSetPath -RubricsRoot $RubricsRoot
+}
+
 function Invoke-CalibrationDefaultRouter {
     param([Parameter(Mandatory)][object]$Request, [Parameter(Mandatory)][object]$PromptDefinition)
     return Invoke-RouterRun -Request $Request -RunMode calibration

@@ -6,6 +6,8 @@ $projectRoot = Split-Path -Parent $calibrationRoot
 $implementationPath = Join-Path $calibrationRoot 'run_calibration.ps1'
 $setPath = Join-Path $calibrationRoot 'calibration-set-v1.json'
 $rubricsRoot = Join-Path $calibrationRoot 'rubrics'
+$pilotManifestPath = Join-Path $calibrationRoot 'pilots/option1-three-launch-v1.json'
+$pilotManifestSchemaPath = Join-Path $calibrationRoot 'pilots/option1-three-launch-manifest.schema.json'
 
 function Assert-True {
     param([bool]$Condition, [string]$Message = 'Expected condition to be true.')
@@ -28,6 +30,13 @@ function Assert-SequenceEqual {
     for ($index = 0; $index -lt $Expected.Count; $index++) {
         Assert-Equal $Actual[$index] $Expected[$index]
     }
+}
+
+function Assert-Throws {
+    param([scriptblock]$Script)
+    $threw = $false
+    try { & $Script } catch { $threw = $true }
+    if (-not $threw) { throw 'Expected script to throw.' }
 }
 
 function Invoke-Assertion {
@@ -84,6 +93,37 @@ Invoke-Assertion 'Task 9 production script exists before behavioral checks' {
 
 if (Test-Path -LiteralPath $implementationPath -PathType Leaf) {
     . $implementationPath
+
+    Invoke-Assertion 'option 1 pilot manifest resolves the exact approved three-launch contract' {
+        $pilot = Import-CalibrationPilotManifest -Path $pilotManifestPath -SchemaPath $pilotManifestSchemaPath `
+            -CalibrationSetPath $setPath -RubricsRoot $rubricsRoot
+        Assert-Equal ([string]$pilot.manifest.pilot_id) 'option1-three-launch-v1'
+        Assert-Equal ([string]$pilot.prompt.id) 'extraction-low-general-v1'
+        Assert-SequenceEqual @($pilot.roles.route_id) @(
+            'agy__gemini_3_7_flash_low__low',
+            'codex__gpt_5_6_sol__max',
+            'claude__claude_opus_5__max'
+        )
+        Assert-Equal $pilot.manifest.limits.total 3
+        Assert-False ([bool]$pilot.manifest.profile_promotion_allowed)
+    }
+
+    Invoke-Assertion 'option 1 pilot manifest rejects independent contract mutations' {
+        $manifest = Get-Content -Raw -LiteralPath $pilotManifestPath | ConvertFrom-Json -Depth 100
+        $mutations = @(
+            { param($value) $value | Add-Member -NotePropertyName unexpected -NotePropertyValue 'nope' },
+            { param($value) $value.limits.total = 4 },
+            { param($value) $value.roles[0].route_id = 'agy__wrong__low' }
+        )
+        foreach ($mutation in $mutations) {
+            $mutated = Copy-TestObject $manifest
+            & $mutation $mutated
+            Assert-Throws {
+                Test-CalibrationPilotManifestObject -Manifest $mutated -SchemaPath $pilotManifestSchemaPath `
+                    -CalibrationSetPath $setPath -RubricsRoot $rubricsRoot | Out-Null
+            }
+        }
+    }
 
     Invoke-Assertion 'calibration set validates and contains the exact approved coverage' {
         $loaded = Import-CalibrationSet -Path $setPath -RubricsRoot $rubricsRoot

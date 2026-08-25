@@ -1,0 +1,98 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "calibration-option1-three-launch-manifest/v1",
+  "title": "Option 1 three-launch calibration pilot manifest",
+  "type": "object",
+  "required": ["manifest_version", "pilot_id", "mode", "selection_mode", "prompt", "roles", "deterministic_grader", "limits", "raw_content_policy", "profile_promotion_allowed"],
+  "properties": {
+    "manifest_version": { "const": "calibration-pilot-manifest/v1" },
+    "pilot_id": { "const": "option1-three-launch-v1" },
+    "mode": { "const": "option_1_workflow_validation" },
+    "selection_mode": { "const": "calibration_only_exact_pin" },
+    "prompt": {
+      "type": "object",
+      "required": ["id", "version"],
+      "properties": {
+        "id": { "const": "extraction-low-general-v1" },
+        "version": { "const": "1.0.0" }
+      },
+      "additionalProperties": false
+    },
+    "roles": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": ["ordinal", "role", "family", "launcher", "route_id", "configuration_id", "model", "effort"],
+            "properties": {
+              "ordinal": { "type": "integer" },
+              "role": { "const": "candidate" },
+              "family": { "const": "google" },
+              "launcher": { "const": "agy" },
+              "route_id": { "const": "agy__gemini_3_7_flash_low__low" },
+              "configuration_id": { "const": "gemini-3.7-flash-low__low" },
+              "model": { "const": "gemini-3.7-flash-low" },
+              "effort": { "const": "low" }
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "required": ["ordinal", "role", "family", "launcher", "route_id", "configuration_id", "model", "effort"],
+            "properties": {
+              "ordinal": { "type": "integer" },
+              "role": { "const": "judge_1" },
+              "family": { "const": "openai" },
+              "launcher": { "const": "codex" },
+              "route_id": { "const": "codex__gpt_5_6_sol__max" },
+              "configuration_id": { "const": "gpt-5.6-sol__max" },
+              "model": { "const": "gpt-5.6-sol" },
+              "effort": { "const": "max" }
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "required": ["ordinal", "role", "family", "launcher", "route_id", "configuration_id", "model", "effort"],
+            "properties": {
+              "ordinal": { "type": "integer" },
+              "role": { "const": "judge_2" },
+              "family": { "const": "anthropic" },
+              "launcher": { "const": "claude" },
+              "route_id": { "const": "claude__claude_opus_5__max" },
+              "configuration_id": { "const": "claude-opus-5__max" },
+              "model": { "const": "claude-opus-5" },
+              "effort": { "const": "max" }
+            },
+            "additionalProperties": false
+          }
+        ]
+      }
+    },
+    "deterministic_grader": { "const": "exact_fields" },
+    "limits": {
+      "type": "object",
+      "required": ["total", "provider_family", "application_retries"],
+      "properties": {
+        "total": { "type": "integer" },
+        "provider_family": {
+          "type": "object",
+          "required": ["google", "openai", "anthropic"],
+          "properties": {
+            "google": { "type": "integer" },
+            "openai": { "type": "integer" },
+            "anthropic": { "type": "integer" }
+          },
+          "additionalProperties": false
+        },
+        "application_retries": { "type": "integer" }
+      },
+      "additionalProperties": false
+    },
+    "raw_content_policy": { "const": "synthetic_prompt_and_credential_sanitized_outputs_only" },
+    "profile_promotion_allowed": { "const": false }
+  },
+  "additionalProperties": false
+}
