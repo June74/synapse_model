@@ -2,7 +2,7 @@
 
 | ID | Title | Status | First observed | Last observed |
 |---|---|---|---|---|
-| [SB-20260824-182757-task8-quality-boundaries](incidents/2026-08-24T182757Z-task8-quality-boundaries.md) | Task 8 boundary and transport quality gaps | closed | 2026-08-24 | 2026-08-24 |
+| [SB-20260824-182757-task8-quality-boundaries](incidents/2026-08-24T182757Z-task8-quality-boundaries.md) | Task 8 boundary and transport quality gaps | closed | 2026-08-24 | 2026-08-25 |
 | [SB-20260824-015530-router-pricing-fail-open](incidents/2026-08-24T015530Z-router-pricing-fail-open.md) | Task 6 pricing accepted missing snapshots and free routes | closed | 2026-08-24 | 2026-08-24 |
 | [SB-20260824-012823-apply-patch-duplicate-target](incidents/2026-08-24T012823Z-apply-patch-duplicate-target.md) | Patch request repeated one target file in multiple update blocks | closed | 2026-08-24 | 2026-08-25T19:55:35.3677309Z |
 | [SB-20260823-232717-requirements-profile-path-format-parser](incidents/2026-08-23T232717Z-requirements-profile-path-format-parser.md) | Requirements profile-path format expression caused a parser error | closed | 2026-08-23 | 2026-08-23 |
@@ -44,7 +44,7 @@
 | SB-2026-08-19-003 | Skill path lookup mismatch | closed | 2026-08-19 | 2026-08-25T21:21:13.2998235Z |
 | SB-2026-08-19-004 | Claude CLI smoke test did not return within timeout | contained | 2026-08-19 | 2026-08-19 |
 | SB-2026-08-19-005 | Antigravity CLI authentication unavailable in sandbox | contained | 2026-08-19 | 2026-08-19 |
-| SB-2026-08-19-006 | Git index unavailable to sandbox | contained | 2026-08-19 | 2026-08-25T21:25:41.9314538Z |
+| SB-2026-08-19-006 | Git index unavailable to sandbox | contained | 2026-08-19 | 2026-08-25T21:59:39Z |
 | SB-2026-08-19-007 | Plan review command used an invalid PowerShell parameter | contained | 2026-08-19 | 2026-08-19 |
 | SB-2026-08-19-008 | Pre-creation worktree ignore check rejected absent directory | contained | 2026-08-19 | 2026-08-24 |
 | SB-2026-08-19-009 | Existing descendant-drain test was transiently timing-sensitive | closed | 2026-08-19 | 2026-08-19 |

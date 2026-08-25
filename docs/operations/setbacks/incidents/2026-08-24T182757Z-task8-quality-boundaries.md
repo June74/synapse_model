@@ -2,7 +2,7 @@
 
 - **Status:** closed
 - **First observed:** 2026-08-24T18:27:57Z
-- **Last observed:** 2026-08-24T22:23:29Z
+- **Last observed:** 2026-08-25T21:57:40Z
 - **Phase/task:** Task 8 selected-route execution quality follow-up
 - **Environment:** Windows PowerShell 7, deterministic-router-v1 worktree
 - **Version/commit:** `9154b0b`
@@ -62,3 +62,6 @@ The live router path validates the raw request, then invokes policy with the nor
 - 2026-08-24T18:44:54Z: Closed after RED/GREEN correction, direct CLI byte acceptance, and full offline verification.
 - 2026-08-24T18:54:32Z: Reopened after final review found that synthetic usage fixtures modeled visible and hidden output as independent provider fields instead of deriving visible output from the documented billed-output aggregate.
 - 2026-08-24T22:23:29Z: Closed after realistic native-envelope RED/GREEN coverage, exact billed-output subtraction, full offline verification, and focused product commit `cb5cb50`.
+- 2026-08-25T21:56:21Z: During Option 1 Task 8 offline acceptance at commit `5301a254`, the resolved Python 3.12 storage suite recreated the untracked `router/storage/__pycache__` directory. The cause was confirmed as normal import bytecode generation: the bytecode environment override was unset, the six entries were untracked `.pyc` files timestamped during the 53-test run, and the suite imports the storage modules. The exact resolved cache directory was verified inside the isolated worktree, contained no tracked or non-bytecode entries, and was removed. A clean `git status --short --branch` verified containment. No source, database, provider, credential, or live-calibration state was affected.
+- 2026-08-25T21:57:06Z: The Option 1 Task 8 read-only secret-pattern scan command failed at PowerShell parse time because a single-quoted regular-expression literal incorrectly used backslash-style quote escaping. This recurred from attempt 4 above, changed no files, performed no scan, and printed no secret values. The retry used PowerShell-native quoting and separated the patterns into bounded scans.
+- 2026-08-25T21:57:40Z: A later read-only function-index query passed a double-quoted pattern containing `$script:` to `rg`; PowerShell expanded it before invocation and `rg` rejected the resulting malformed expression. Other independent read-only queries in the same script completed, no files changed, and no sensitive values were printed. Remaining review queries were changed to fixed-string or single-purpose literal patterns with no PowerShell interpolation tokens.
