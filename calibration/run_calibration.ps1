@@ -195,20 +195,13 @@ function Test-CalibrationDeterministicGrader {
     return $true
 }
 
-function Import-CalibrationSet {
-    [CmdletBinding()]
+function Test-CalibrationSetObject {
     param(
-        [Parameter(Mandatory)][string]$Path,
-        [Parameter(Mandatory)][string]$RubricsRoot
+        [AllowNull()][object]$SetValue,
+        [Parameter(Mandatory)][hashtable]$RubricEntriesByRef
     )
-
     $errors = [Collections.Generic.List[string]]::new()
-    try {
-        $setText = Get-Content -Raw -LiteralPath $Path -ErrorAction Stop
-        $set = $setText | ConvertFrom-Json -Depth 100 -ErrorAction Stop
-    } catch {
-        return [pscustomobject]@{ valid = $false; set = $null; errors = @('calibration_set_json_invalid') }
-    }
+    $set = $SetValue
     if (-not (Test-CalibrationProperty $set 'version') -or $set.version -cne 'calibration-set-v1') {
         $errors.Add('calibration_set_version_invalid')
     }
@@ -266,18 +259,13 @@ function Import-CalibrationSet {
             $errors.Add("calibration_rubric_ref_invalid:$($prompt.id)")
         } else {
             $rubricRef = [string]$prompt.grading.rubric_ref
-            $rubricPath = [IO.Path]::GetFullPath((Join-Path $RubricsRoot $rubricRef))
-            if (-not (Test-CalibrationPathUnderRoot -Path $rubricPath -Root $RubricsRoot) -or
-                -not (Test-Path -LiteralPath $rubricPath -PathType Leaf)) {
+            $entry = if ($RubricEntriesByRef.ContainsKey($rubricRef)) { $RubricEntriesByRef[$rubricRef] } else { $null }
+            if ($null -eq $entry -or $entry.status -ceq 'missing') {
                 $errors.Add("calibration_rubric_missing:$($prompt.id)")
             } elseif (-not $loadedRubrics.ContainsKey($rubricRef)) {
-                try {
-                    $rubric = Get-Content -Raw -LiteralPath $rubricPath | ConvertFrom-Json -Depth 100 -ErrorAction Stop
-                    if (-not (Test-CalibrationRubric $rubric)) { throw 'invalid rubric' }
-                    $loadedRubrics[$rubricRef] = $rubric
-                } catch {
+                if ($entry.status -cne 'valid' -or -not (Test-CalibrationRubric $entry.value)) {
                     $errors.Add("calibration_rubric_invalid:$rubricRef")
-                }
+                } else { $loadedRubrics[$rubricRef] = $entry.value }
             }
         }
         if (-not (Test-CalibrationDeterministicGrader -Prompt $prompt)) {
@@ -298,6 +286,45 @@ function Import-CalibrationSet {
         }
     }
     return [pscustomobject]@{ valid = $errors.Count -eq 0; set = $set; errors = @($errors); rubrics = $loadedRubrics }
+}
+
+function New-CalibrationRubricEntriesFromFiles {
+    param([AllowNull()][object]$SetValue, [Parameter(Mandatory)][string]$RubricsRoot)
+    $entries = @{}
+    if ($null -eq $SetValue -or -not (Test-CalibrationProperty $SetValue 'prompts') -or $SetValue.prompts -isnot [Collections.IList]) { return $entries }
+    foreach ($prompt in @($SetValue.prompts)) {
+        if ($null -eq $prompt -or -not (Test-CalibrationProperty $prompt 'grading') -or
+            -not (Test-CalibrationProperty $prompt.grading 'rubric_ref') -or $prompt.grading.rubric_ref -isnot [string] -or
+            $prompt.grading.rubric_ref -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*\.json$') { continue }
+        $rubricRef = [string]$prompt.grading.rubric_ref
+        if ($entries.ContainsKey($rubricRef)) { continue }
+        $rubricPath = [IO.Path]::GetFullPath((Join-Path $RubricsRoot $rubricRef))
+        if (-not (Test-CalibrationPathUnderRoot -Path $rubricPath -Root $RubricsRoot) -or -not (Test-Path -LiteralPath $rubricPath -PathType Leaf)) {
+            $entries[$rubricRef] = [pscustomobject]@{ status = 'missing'; value = $null }
+            continue
+        }
+        try {
+            $value = Get-Content -Raw -LiteralPath $rubricPath | ConvertFrom-Json -Depth 100 -ErrorAction Stop
+            $entries[$rubricRef] = [pscustomobject]@{ status = 'valid'; value = $value }
+        } catch { $entries[$rubricRef] = [pscustomobject]@{ status = 'invalid'; value = $null } }
+    }
+    return $entries
+}
+
+function Import-CalibrationSet {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$RubricsRoot
+    )
+    try {
+        $setText = Get-Content -Raw -LiteralPath $Path -ErrorAction Stop
+        $set = $setText | ConvertFrom-Json -Depth 100 -ErrorAction Stop
+    } catch {
+        return [pscustomobject]@{ valid = $false; set = $null; errors = @('calibration_set_json_invalid') }
+    }
+    $entries = New-CalibrationRubricEntriesFromFiles -SetValue $set -RubricsRoot $RubricsRoot
+    return Test-CalibrationSetObject -SetValue $set -RubricEntriesByRef $entries
 }
 
 function Get-CalibrationJudgePair {
@@ -572,6 +599,7 @@ function Read-CalibrationPilotJsonSnapshot {
         if ($null -eq $value) { throw 'JSON document is null.' }
         return [pscustomobject][ordered]@{
             path = [IO.Path]::GetFullPath($Path)
+            bytes = $bytes
             text = $text
             value = $value
             sha256 = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes)).ToLowerInvariant()
@@ -604,14 +632,18 @@ function New-CalibrationPilotSourceBundle {
         [Parameter(Mandatory)][string]$RubricsRoot,
         [string]$MatrixPath = (Join-Path $script:CalibrationProjectRoot 'pilot/model_matrix.json'),
         [string]$ProfilesRoot = (Join-Path $script:CalibrationProjectRoot 'profiles'),
-        [string]$ResponseSchemaPath = (Join-Path $script:CalibrationProjectRoot 'pilot/shared/response_schema.json')
+        [string]$ModelProfileSchemaPath = (Join-Path $script:CalibrationProjectRoot 'router/schemas/model-profile.schema.json'),
+        [string]$ResponseSchemaPath = (Join-Path $script:CalibrationProjectRoot 'pilot/shared/response_schema.json'),
+        [AllowNull()][object]$ManifestOverride
     )
 
     $manifestSource = Read-CalibrationPilotJsonSnapshot -Path $PilotManifestPath
     $manifestSchemaSource = Read-CalibrationPilotJsonSnapshot -Path $PilotManifestSchemaPath
     $matrixSource = Read-CalibrationPilotJsonSnapshot -Path $MatrixPath
     $setSource = Read-CalibrationPilotJsonSnapshot -Path $CalibrationSetPath
+    $modelProfileSchemaSource = Read-CalibrationPilotJsonSnapshot -Path $ModelProfileSchemaPath
     $responseSchemaSource = Read-CalibrationPilotJsonSnapshot -Path $ResponseSchemaPath
+    if ($PSBoundParameters.ContainsKey('ManifestOverride')) { $manifestSource.value = $ManifestOverride }
     if ($responseSchemaSource.value -isnot [pscustomobject] -or
         @(Get-RouterSchemaStructureErrors -Schema $responseSchemaSource.value).Count -gt 0) {
         throw 'Pilot response schema is invalid.'
@@ -619,6 +651,10 @@ function New-CalibrationPilotSourceBundle {
     if ($manifestSchemaSource.value -isnot [pscustomobject] -or
         @(Get-RouterSchemaStructureErrors -Schema $manifestSchemaSource.value).Count -gt 0) {
         throw 'Pilot manifest schema is invalid.'
+    }
+    if ($modelProfileSchemaSource.value -isnot [pscustomobject] -or
+        @(Get-RouterSchemaStructureErrors -Schema $modelProfileSchemaSource.value).Count -gt 0) {
+        throw 'Pilot model profile schema is invalid.'
     }
     try {
         $manifestJson = $manifestSource.value | ConvertTo-Json -Depth 100 -Compress -ErrorAction Stop
@@ -628,70 +664,34 @@ function New-CalibrationPilotSourceBundle {
     } catch { throw 'Pilot manifest schema validation failed.' }
 
     $set = $setSource.value
-    if ($set -isnot [pscustomobject] -or $set.version -isnot [string] -or $set.version -cne 'calibration-set-v1' -or
-        $set.prompts -isnot [Collections.IList] -or @($set.prompts).Count -ne 24) {
-        throw 'Pilot calibration set validation failed.'
-    }
+    $rubricEntries = @{}
     $rubricSources = @{}
-    $seenPromptIds = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
-    $taskTypes = @('general', 'coding', 'math', 'reasoning', 'writing', 'summarization', 'extraction', 'research_synthesis')
-    $complexities = @('low', 'medium', 'high')
-    $domains = @('general', 'computer_science', 'mathematics', 'physics', 'chemistry', 'biology', 'medicine', 'engineering', 'social_science', 'humanities', 'business', 'finance', 'law')
-    $categories = @('unknown', 'standard', 'strong', 'frontier')
-    foreach ($prompt in @($set.prompts)) {
-        if ($prompt -isnot [pscustomobject] -or $prompt.id -isnot [string] -or
-            -not (Test-CalibrationSafeLeafName $prompt.id) -or -not $seenPromptIds.Add($prompt.id) -or
-            $prompt.version -isnot [string] -or [string]::IsNullOrWhiteSpace($prompt.version) -or
-            $prompt.request -isnot [pscustomobject] -or $prompt.grading -isnot [pscustomobject]) {
-            throw 'Pilot calibration set validation failed.'
-        }
-        $request = $prompt.request
-        $requiredRequest = @('request_text', 'task_type', 'domain', 'complexity', 'quality_floor', 'privacy_level', 'risk_level', 'language')
-        if (@($requiredRequest | Where-Object { -not (Test-CalibrationProperty $request $_) }).Count -gt 0 -or
-            $request.request_text -isnot [string] -or [string]::IsNullOrWhiteSpace($request.request_text) -or
-            $request.task_type -isnot [string] -or $request.task_type -cnotin $taskTypes -or
-            $request.domain -isnot [string] -or $request.domain -cnotin $domains -or
-            $request.complexity -isnot [string] -or $request.complexity -cnotin $complexities -or
-            $request.quality_floor -isnot [string] -or $request.quality_floor -cnotin @('standard', 'strong', 'frontier') -or
-            $request.privacy_level -isnot [string] -or $request.privacy_level -cne 'standard' -or
-            $request.risk_level -isnot [string] -or $request.risk_level -cne 'standard' -or
-            $request.language -isnot [string] -or $request.language -cne 'english' -or
-            $prompt.external_category -isnot [string] -or $prompt.external_category -cnotin $categories -or
-            $prompt.category_target -isnot [string] -or [string]::IsNullOrWhiteSpace($prompt.category_target) -or
-            -not (Test-CalibrationDeterministicGrader -Prompt $prompt)) {
-            throw 'Pilot calibration set validation failed.'
-        }
-        if ($request.request_text -match '(?i)\b(api[-_ ]?key|password|access[-_ ]?token|authentication code|social security number)\b') {
-            throw "Pilot calibration set validation failed: calibration_prompt_sensitive:$($prompt.id)"
-        }
-        if (-not (Test-CalibrationProperty $prompt.grading 'rubric_ref') -or
-            $prompt.grading.rubric_ref -isnot [string] -or
-            $prompt.grading.rubric_ref -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*\.json$') {
-            throw "Pilot calibration set validation failed: calibration_rubric_ref_invalid:$($prompt.id)"
-        }
-        $rubricPath = [IO.Path]::GetFullPath((Join-Path $RubricsRoot $prompt.grading.rubric_ref))
-        if (-not (Test-CalibrationPathUnderRoot -Path $rubricPath -Root $RubricsRoot)) {
-            throw 'Pilot calibration set validation failed.'
-        }
-        if (-not $rubricSources.ContainsKey($prompt.grading.rubric_ref)) {
-            $rubricSources[$prompt.grading.rubric_ref] = Read-CalibrationPilotJsonSnapshot -Path $rubricPath
-        }
-    }
-    foreach ($rubricSource in $rubricSources.Values) {
-        if (-not (Test-CalibrationRubric $rubricSource.value)) { throw 'Pilot calibration set validation failed.' }
-    }
-    foreach ($taskType in $taskTypes) {
-        foreach ($complexity in $complexities) {
-            if (@($set.prompts | Where-Object { $_.request.task_type -ceq $taskType -and $_.request.complexity -ceq $complexity }).Count -ne 1) {
-                throw 'Pilot calibration set validation failed.'
+    if ($set -is [pscustomobject] -and (Test-CalibrationProperty $set 'prompts') -and $set.prompts -is [Collections.IList]) {
+        foreach ($prompt in @($set.prompts)) {
+            if ($prompt -isnot [pscustomobject] -or -not (Test-CalibrationProperty $prompt 'grading') -or
+                -not (Test-CalibrationProperty $prompt.grading 'rubric_ref') -or $prompt.grading.rubric_ref -isnot [string] -or
+                $prompt.grading.rubric_ref -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*\.json$') { continue }
+            $rubricRef = [string]$prompt.grading.rubric_ref
+            if ($rubricEntries.ContainsKey($rubricRef)) { continue }
+            $rubricPath = [IO.Path]::GetFullPath((Join-Path $RubricsRoot $rubricRef))
+            if (-not (Test-CalibrationPathUnderRoot -Path $rubricPath -Root $RubricsRoot)) {
+                $rubricEntries[$rubricRef] = [pscustomobject]@{ status = 'missing'; value = $null }
+                continue
+            }
+            try {
+                $rubricSource = Read-CalibrationPilotJsonSnapshot -Path $rubricPath
+                $rubricSources[$rubricRef] = $rubricSource
+                $rubricEntries[$rubricRef] = [pscustomobject]@{ status = 'valid'; value = $rubricSource.value }
+            } catch {
+                $rubricEntries[$rubricRef] = [pscustomobject]@{ status = 'invalid'; value = $null }
             }
         }
     }
-    foreach ($domain in $domains) {
-        if (@($set.prompts | Where-Object { $_.request.domain -ceq $domain }).Count -eq 0) {
-            throw 'Pilot calibration set validation failed.'
-        }
+    $setValidation = Test-CalibrationSetObject -SetValue $set -RubricEntriesByRef $rubricEntries
+    if (-not $setValidation.valid) {
+        throw ('Pilot calibration set validation failed: ' + (@($setValidation.errors) -join ', '))
     }
+    $set = $setValidation.set
 
     $manifest = $manifestSource.value
     $approvedRoles = @(
@@ -746,6 +746,12 @@ function New-CalibrationPilotSourceBundle {
         $profileSource = Read-CalibrationPilotJsonSnapshot -Path $profileFiles[0].FullName
         $profileSources[$role.configuration_id] = $profileSource
         $profile = $profileSource.value
+        try {
+            $profileJson = $profile | ConvertTo-Json -Depth 100 -Compress -ErrorAction Stop
+            if (-not (Test-Json -Json $profileJson -Schema $modelProfileSchemaSource.text -ErrorAction Stop)) {
+                throw 'schema validation failed'
+            }
+        } catch { throw "Pilot profile schema validation failed: $($role.configuration_id)" }
         foreach ($name in @('configuration_id', 'launcher', 'model', 'effort')) {
             Assert-CalibrationPilotExactValue -Actual $profile.$name -Expected $role.$name -Name "profile.$name"
         }
@@ -759,12 +765,22 @@ function New-CalibrationPilotSourceBundle {
     }
     $prompts = @($set.prompts | Where-Object { $_.id -ceq $manifest.prompt.id -and $_.version -ceq $manifest.prompt.version })
     if ($prompts.Count -ne 1 -or $prompts[0].grading.deterministic_grader.type -cne 'exact_fields' -or
-        -not $rubricSources.ContainsKey($prompts[0].grading.rubric_ref)) { throw 'Pilot fixed prompt is invalid.' }
+        -not $setValidation.rubrics.ContainsKey($prompts[0].grading.rubric_ref)) { throw 'Pilot fixed prompt is invalid.' }
     return [pscustomobject][ordered]@{
-        manifest = $manifest; calibration_set = $set; prompt = $prompts[0]; rubric = $rubricSources[$prompts[0].grading.rubric_ref].value
+        manifest = $manifest; calibration_set = $set; prompt = $prompts[0]; rubric = $setValidation.rubrics[$prompts[0].grading.rubric_ref]
         roles = @($resolvedRoles); hashes = [pscustomobject][ordered]@{
             manifest = $manifestSource.sha256; matrix = $matrixSource.sha256; calibration_set = $setSource.sha256
-            response_schema = $responseSchemaSource.sha256; candidate_profile = $profileSources[$resolvedRoles[0].configuration_id].sha256
+            response_schema = $responseSchemaSource.sha256; candidate_profile_file_sha256 = $profileSources[$resolvedRoles[0].configuration_id].sha256
+        }
+        sources = [pscustomobject][ordered]@{
+            manifest = $manifestSource
+            manifest_schema = $manifestSchemaSource
+            matrix = $matrixSource
+            calibration_set = $setSource
+            model_profile_schema = $modelProfileSchemaSource
+            response_schema = $responseSchemaSource
+            profiles = $profileSources
+            rubrics = $rubricSources
         }
     }
 }
@@ -780,141 +796,10 @@ function Test-CalibrationPilotManifestObject {
         [string]$ProfilesRoot = (Join-Path $script:CalibrationProjectRoot 'profiles')
     )
 
-    $schemaValidation = Test-RouterSchema -Value $Manifest -SchemaPath $SchemaPath
-    if (-not $schemaValidation.valid) {
-        $errors = @($schemaValidation.errors | ForEach-Object { '{0}:{1}' -f $_.code, $_.path })
-        throw ('Pilot manifest schema validation failed: ' + ($errors -join ', '))
-    }
+    return New-CalibrationPilotSourceBundle -PilotManifestPath (Join-Path $script:CalibrationRoot 'pilots/option1-three-launch-v1.json') `
+        -PilotManifestSchemaPath $SchemaPath -CalibrationSetPath $CalibrationSetPath -RubricsRoot $RubricsRoot `
+        -MatrixPath $MatrixPath -ProfilesRoot $ProfilesRoot -ManifestOverride $Manifest
 
-    $loadedCalibrationSet = Import-CalibrationSet -Path $CalibrationSetPath -RubricsRoot $RubricsRoot
-    if (-not $loadedCalibrationSet.valid) {
-        throw ('Pilot calibration set validation failed: ' + (@($loadedCalibrationSet.errors) -join ', '))
-    }
-
-    $approvedManifest = [pscustomobject][ordered]@{
-        manifest_version = 'calibration-pilot-manifest/v1'
-        pilot_id = 'option1-three-launch-v1'
-        mode = 'option_1_workflow_validation'
-        selection_mode = 'calibration_only_exact_pin'
-        prompt_id = 'extraction-low-general-v1'
-        prompt_version = '1.0.0'
-        deterministic_grader = 'exact_fields'
-        raw_content_policy = 'synthetic_prompt_and_credential_sanitized_outputs_only'
-        profile_promotion_allowed = $false
-        total = 3
-        google = 1
-        openai = 1
-        anthropic = 1
-        application_retries = 0
-        roles = @(
-            [pscustomobject][ordered]@{ ordinal = 1; role = 'candidate'; family = 'google'; launcher = 'agy'; route_id = 'agy__gemini_3_7_flash_low__low'; configuration_id = 'gemini-3.7-flash-low__low'; model = 'gemini-3.7-flash-low'; effort = 'low' }
-            [pscustomobject][ordered]@{ ordinal = 2; role = 'judge_1'; family = 'openai'; launcher = 'codex'; route_id = 'codex__gpt_5_6_sol__max'; configuration_id = 'gpt-5.6-sol__max'; model = 'gpt-5.6-sol'; effort = 'max' }
-            [pscustomobject][ordered]@{ ordinal = 3; role = 'judge_2'; family = 'anthropic'; launcher = 'claude'; route_id = 'claude__claude_opus_5__max'; configuration_id = 'claude-opus-5__max'; model = 'claude-opus-5'; effort = 'max' }
-        )
-    }
-
-    foreach ($name in @('manifest_version', 'pilot_id', 'mode', 'selection_mode', 'deterministic_grader', 'raw_content_policy', 'profile_promotion_allowed')) {
-        Assert-CalibrationPilotExactValue -Actual $Manifest.$name -Expected $approvedManifest.$name -Name $name
-    }
-    Assert-CalibrationPilotExactValue -Actual $Manifest.prompt.id -Expected $approvedManifest.prompt_id -Name 'prompt.id'
-    Assert-CalibrationPilotExactValue -Actual $Manifest.prompt.version -Expected $approvedManifest.prompt_version -Name 'prompt.version'
-    foreach ($name in @('total', 'application_retries')) {
-        Assert-CalibrationPilotExactValue -Actual $Manifest.limits.$name -Expected $approvedManifest.$name -Name "limits.$name"
-    }
-    foreach ($family in @('google', 'openai', 'anthropic')) {
-        Assert-CalibrationPilotExactValue -Actual $Manifest.limits.provider_family.$family -Expected $approvedManifest.$family -Name "limits.provider_family.$family"
-    }
-
-    $manifestRoles = @($Manifest.roles)
-    if ($manifestRoles.Count -ne 3) { throw "Pilot manifest 'roles' must contain exactly three entries." }
-    $promptMatches = @($loadedCalibrationSet.set.prompts | Where-Object {
-        $_.id -ceq $approvedManifest.prompt_id -and $_.version -ceq $approvedManifest.prompt_version
-    })
-    if ($promptMatches.Count -ne 1) { throw 'Pilot manifest fixed prompt was not found exactly once in the validated calibration set.' }
-    $prompt = $promptMatches[0]
-    if ($prompt.grading.deterministic_grader.type -cne $approvedManifest.deterministic_grader) {
-        throw 'Pilot manifest fixed prompt does not use the approved exact_fields grader.'
-    }
-    $rubricRef = [string]$prompt.grading.rubric_ref
-    if (-not $loadedCalibrationSet.rubrics.ContainsKey($rubricRef)) {
-        throw 'Pilot manifest fixed prompt rubric was not loaded from the validated calibration set.'
-    }
-
-    $matrixRead = Read-RouterCatalogJson -FilePath $MatrixPath
-    if (-not $matrixRead.valid) { throw "Pilot model matrix JSON is invalid at $($matrixRead.path)." }
-    $matrix = $matrixRead.value
-    $seenRoutes = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
-    $seenFamilies = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
-    $seenConfigurations = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
-    $resolvedRoles = [Collections.Generic.List[object]]::new()
-
-    for ($index = 0; $index -lt $approvedManifest.roles.Count; $index++) {
-        $role = $manifestRoles[$index]
-        $approvedRole = $approvedManifest.roles[$index]
-        foreach ($name in @('ordinal', 'role', 'family', 'launcher', 'route_id', 'configuration_id', 'model', 'effort')) {
-            Assert-CalibrationPilotExactValue -Actual $role.$name -Expected $approvedRole.$name -Name "roles[$index].$name"
-        }
-        if (-not $seenRoutes.Add([string]$role.route_id)) { throw 'Pilot manifest contains duplicate route IDs.' }
-        if (-not $seenFamilies.Add([string]$role.family)) { throw 'Pilot manifest contains duplicate provider families.' }
-        if (-not $seenConfigurations.Add([string]$role.configuration_id)) { throw 'Pilot manifest contains duplicate configuration IDs.' }
-
-        $matrixMatches = @($matrix.candidates | Where-Object { $_.route_id -ceq $role.route_id })
-        if ($matrixMatches.Count -ne 1) { throw "Pilot route '$($role.route_id)' was not found exactly once in the model matrix." }
-        $matrixCandidate = $matrixMatches[0]
-        if (-not (Test-CalibrationProperty $matrixCandidate 'enabled') -or $matrixCandidate.enabled -isnot [bool]) {
-            throw "Pilot route '$($role.route_id)' enabled must be a Boolean."
-        }
-        if ($matrixCandidate.enabled -ne $true) { throw "Pilot route '$($role.route_id)' is disabled." }
-        if ($matrixCandidate.candidate_kind -cne 'model') { throw "Pilot route '$($role.route_id)' is not a model candidate." }
-        foreach ($field in @('route_id', 'model', 'effort')) {
-            Assert-CalibrationPilotExactValue -Actual $matrixCandidate.$field -Expected $role.$field -Name "matrix.$field"
-        }
-        Assert-CalibrationPilotExactValue -Actual $matrixCandidate.tool -Expected $role.launcher -Name 'matrix.tool'
-        Assert-CalibrationPilotExactValue -Actual $matrixCandidate.provider -Expected $role.family -Name 'matrix.provider'
-
-        $resolved = Get-CalibrationProfileAndCandidate -ConfigurationId $role.configuration_id `
-            -ProfilesRoot $ProfilesRoot -MatrixPath $MatrixPath
-        if (-not (Test-CalibrationProperty $resolved.profile 'enabled') -or $resolved.profile.enabled -isnot [bool]) {
-            throw "Pilot profile '$($role.configuration_id)' enabled must be a Boolean."
-        }
-        if ($matrixCandidate.enabled -ne $resolved.profile.enabled) {
-            throw "Pilot route '$($role.route_id)' matrix and profile enabled values disagree."
-        }
-        if ($resolved.profile.enabled -ne $true) { throw "Pilot profile '$($role.configuration_id)' is disabled." }
-        foreach ($field in @('configuration_id', 'launcher', 'model', 'effort')) {
-            Assert-CalibrationPilotExactValue -Actual $resolved.profile.$field -Expected $role.$field -Name "profile.$field"
-        }
-        Assert-CalibrationPilotExactValue -Actual $resolved.profile.provider -Expected $role.family -Name 'profile.provider'
-        foreach ($field in @('route_id', 'tool', 'provider', 'model', 'effort', 'candidate_kind', 'enabled')) {
-            Assert-CalibrationPilotExactValue -Actual $resolved.candidate.$field -Expected $matrixCandidate.$field -Name "resolved_candidate.$field"
-        }
-        $resolvedRoles.Add([pscustomobject][ordered]@{
-            ordinal = $role.ordinal
-            role = $role.role
-            family = $role.family
-            launcher = $role.launcher
-            route_id = $role.route_id
-            configuration_id = $role.configuration_id
-            model = $role.model
-            effort = $role.effort
-            profile = $resolved.profile
-            candidate = $resolved.candidate
-        })
-    }
-
-    if ($resolvedRoles[0].family -cne 'google' -or
-        $resolvedRoles[1].family -cne 'openai' -or
-        $resolvedRoles[2].family -cne 'anthropic') {
-        throw 'Pilot manifest must use the approved Google candidate with OpenAI then Anthropic cross-family judges.'
-    }
-
-    return [pscustomobject][ordered]@{
-        manifest = $Manifest
-        calibration_set = $loadedCalibrationSet.set
-        prompt = $prompt
-        rubric = $loadedCalibrationSet.rubrics[$rubricRef]
-        roles = @($resolvedRoles)
-    }
 }
 
 function Import-CalibrationPilotManifest {
@@ -925,10 +810,8 @@ function Import-CalibrationPilotManifest {
         [Parameter(Mandatory)][string]$CalibrationSetPath,
         [Parameter(Mandatory)][string]$RubricsRoot
     )
-    $manifestRead = Read-RouterCatalogJson -FilePath $Path
-    if (-not $manifestRead.valid) { throw "Pilot manifest JSON is invalid at $($manifestRead.path)." }
-    $manifest = $manifestRead.value
-    return Test-CalibrationPilotManifestObject -Manifest $manifest -SchemaPath $SchemaPath -CalibrationSetPath $CalibrationSetPath -RubricsRoot $RubricsRoot
+    return New-CalibrationPilotSourceBundle -PilotManifestPath $Path -PilotManifestSchemaPath $SchemaPath `
+        -CalibrationSetPath $CalibrationSetPath -RubricsRoot $RubricsRoot
 }
 
 function New-CalibrationPilotPlan {

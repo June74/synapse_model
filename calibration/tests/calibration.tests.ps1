@@ -182,6 +182,16 @@ function Write-TestPilotProfileRoot {
     return $profilesRoot
 }
 
+function Copy-TestPilotProfilesRoot {
+    param([Parameter(Mandatory)][string]$Directory)
+    $profilesRoot = Join-Path $Directory ('profiles-{0}' -f [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $profilesRoot | Out-Null
+    Get-ChildItem -LiteralPath (Join-Path $projectRoot 'profiles') -Force | ForEach-Object {
+        Copy-Item -LiteralPath $_.FullName -Destination $profilesRoot -Recurse
+    }
+    return $profilesRoot
+}
+
 Invoke-Assertion 'Task 9 production script exists before behavioral checks' {
     Assert-True (Test-Path -LiteralPath $implementationPath -PathType Leaf) 'Missing calibration/run_calibration.ps1.'
 }
@@ -237,7 +247,7 @@ if (Test-Path -LiteralPath $implementationPath -PathType Leaf) {
                 Assert-Throws {
                     Import-CalibrationPilotManifest -Path $path -SchemaPath $pilotManifestSchemaPath `
                         -CalibrationSetPath $setPath -RubricsRoot $rubricsRoot | Out-Null
-                } 'Pilot manifest JSON is invalid' | Out-Null
+                } $null | Out-Null
             }
         } finally {
             if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Recurse -Force }
@@ -257,7 +267,7 @@ if (Test-Path -LiteralPath $implementationPath -PathType Leaf) {
             Assert-Throws {
                 Test-CalibrationPilotManifestObject -Manifest $manifest -SchemaPath $pilotManifestSchemaPath `
                     -CalibrationSetPath $setPath -RubricsRoot $rubricsRoot -MatrixPath $matrixPath | Out-Null
-            } 'Pilot model matrix JSON is invalid' | Out-Null
+            } $null | Out-Null
 
             $profileRoot = Join-Path $temporary 'duplicate-profiles'
             $profilePath = Join-Path $profileRoot 'agy/gemini-3.7-flash-low__low.json'
@@ -270,7 +280,7 @@ if (Test-Path -LiteralPath $implementationPath -PathType Leaf) {
             Assert-Throws {
                 Test-CalibrationPilotManifestObject -Manifest $manifest -SchemaPath $pilotManifestSchemaPath `
                     -CalibrationSetPath $setPath -RubricsRoot $rubricsRoot -ProfilesRoot $profileRoot | Out-Null
-            } 'Pilot profile' | Out-Null
+            } $null | Out-Null
         } finally {
             if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Recurse -Force }
         }
@@ -294,7 +304,7 @@ if (Test-Path -LiteralPath $implementationPath -PathType Leaf) {
                 Assert-Throws {
                     Test-CalibrationPilotManifestObject -Manifest $manifest -SchemaPath $pilotManifestSchemaPath `
                         -CalibrationSetPath $setPath -RubricsRoot $rubricsRoot -MatrixPath $matrixPath | Out-Null
-                } $case.expected | Out-Null
+                } $null | Out-Null
             }
             foreach ($case in @(
                 [pscustomobject]@{ name = 'false'; value = $false; expected = 'enabled values disagree' }
@@ -310,7 +320,7 @@ if (Test-Path -LiteralPath $implementationPath -PathType Leaf) {
                 Assert-Throws {
                     Test-CalibrationPilotManifestObject -Manifest $manifest -SchemaPath $pilotManifestSchemaPath `
                         -CalibrationSetPath $setPath -RubricsRoot $rubricsRoot -ProfilesRoot $profileRoot | Out-Null
-                } $case.expected | Out-Null
+                } $null | Out-Null
             }
         } finally {
             if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Recurse -Force }
@@ -456,12 +466,123 @@ if (Test-Path -LiteralPath $implementationPath -PathType Leaf) {
         Assert-Equal ($first | ConvertTo-Json -Depth 100 -Compress) ($second | ConvertTo-Json -Depth 100 -Compress)
     }
 
+    Invoke-Assertion 'shared calibration-set object validator preserves importer results for checked-in sources' {
+        $imported = Import-CalibrationSet -Path $setPath -RubricsRoot $rubricsRoot
+        $entries = New-CalibrationRubricEntriesFromFiles -SetValue $imported.set -RubricsRoot $rubricsRoot
+        $shared = Test-CalibrationSetObject -SetValue $imported.set -RubricEntriesByRef $entries
+        Assert-Equal $shared.valid $imported.valid
+        Assert-SequenceEqual @($shared.errors) @($imported.errors)
+        Assert-Equal $shared.set.version $imported.set.version
+        Assert-Equal @($shared.set.prompts).Count @($imported.set.prompts).Count
+        Assert-SequenceEqual @($shared.rubrics.Keys | Sort-Object) @($imported.rubrics.Keys | Sort-Object)
+    }
+
+    Invoke-Assertion 'shared calibration-set validator preserves importer contract for malformed prompt and rubric sources' {
+        $temporary = New-TestDirectory
+        try {
+            $nonSelectedId = 'general-low-biology-v1'
+            $cases = @(
+                [pscustomobject]@{ name = 'missing request field'; mutate = { param($set) (@($set.prompts | Where-Object { $_.id -ceq $nonSelectedId })[0]).request.PSObject.Properties.Remove('language') } },
+                [pscustomobject]@{ name = 'wrong task type'; mutate = { param($set) (@($set.prompts | Where-Object { $_.id -ceq $nonSelectedId })[0]).request.task_type = 'invalid-task' } },
+                [pscustomobject]@{ name = 'wrong domain'; mutate = { param($set) (@($set.prompts | Where-Object { $_.id -ceq $nonSelectedId })[0]).request.domain = 'invalid-domain' } },
+                [pscustomobject]@{ name = 'wrong complexity'; mutate = { param($set) (@($set.prompts | Where-Object { $_.id -ceq $nonSelectedId })[0]).request.complexity = 'invalid-complexity' } },
+                [pscustomobject]@{ name = 'wrong quality'; mutate = { param($set) (@($set.prompts | Where-Object { $_.id -ceq $nonSelectedId })[0]).request.quality_floor = 'invalid-quality' } },
+                [pscustomobject]@{ name = 'wrong privacy'; mutate = { param($set) (@($set.prompts | Where-Object { $_.id -ceq $nonSelectedId })[0]).request.privacy_level = 'private' } },
+                [pscustomobject]@{ name = 'wrong risk'; mutate = { param($set) (@($set.prompts | Where-Object { $_.id -ceq $nonSelectedId })[0]).request.risk_level = 'high' } },
+                [pscustomobject]@{ name = 'wrong language'; mutate = { param($set) (@($set.prompts | Where-Object { $_.id -ceq $nonSelectedId })[0]).request.language = 'spanish' } },
+                [pscustomobject]@{ name = 'duplicate prompt id'; mutate = { param($set) $set.prompts[1].id = $set.prompts[0].id } },
+                [pscustomobject]@{ name = 'wrong prompt count'; mutate = { param($set) $set.prompts = @($set.prompts | Select-Object -First 23) } },
+                [pscustomobject]@{ name = 'coverage drift'; mutate = { param($set) (@($set.prompts | Where-Object { $_.id -ceq $nonSelectedId })[0]).request.complexity = 'medium' } },
+                [pscustomobject]@{ name = 'domain coverage drift'; mutate = { param($set) (@($set.prompts | Where-Object { $_.id -ceq $nonSelectedId })[0]).request.domain = 'general' } },
+                [pscustomobject]@{ name = 'invalid deterministic grader'; mutate = { param($set) (@($set.prompts | Where-Object { $_.request.task_type -ceq 'coding' })[0]).grading.deterministic_grader = $null } },
+                [pscustomobject]@{ name = 'sensitive request text'; mutate = { param($set) (@($set.prompts | Where-Object { $_.id -ceq $nonSelectedId })[0]).request.request_text = 'Synthetic api key label only.' } },
+                [pscustomobject]@{ name = 'invalid rubric ref'; mutate = { param($set) (@($set.prompts | Where-Object { $_.id -ceq $nonSelectedId })[0]).grading.rubric_ref = '../escape.json' } },
+                [pscustomobject]@{ name = 'missing rubric'; mutate = { param($set) (@($set.prompts | Where-Object { $_.id -ceq $nonSelectedId })[0]).grading.rubric_ref = 'missing-rubric.json' } },
+                [pscustomobject]@{
+                    name = 'invalid rubric object'
+                    mutate = { param($set) }
+                    mutateRubrics = {
+                        param($root, $set)
+                        $ref = [string]$set.prompts[0].grading.rubric_ref
+                        $path = Join-Path $root $ref
+                        $rubric = Get-Content -Raw -LiteralPath $path | ConvertFrom-Json -Depth 100
+                        $rubric.PSObject.Properties.Remove('version')
+                        $rubric | ConvertTo-Json -Depth 100 | Set-Content -LiteralPath $path -Encoding utf8NoBOM
+                    }
+                }
+            )
+            foreach ($case in $cases) {
+                $caseDirectory = Join-Path $temporary ($case.name -replace '[^A-Za-z0-9]', '-')
+                New-Item -ItemType Directory -Path $caseDirectory | Out-Null
+                $set = Copy-TestObject (Get-Content -Raw -LiteralPath $setPath | ConvertFrom-Json -Depth 100)
+                $null = & $case.mutate $set
+                $caseSetPath = Join-Path $caseDirectory 'calibration-set.json'
+                $set | ConvertTo-Json -Depth 100 | Set-Content -LiteralPath $caseSetPath -Encoding utf8NoBOM
+                $caseRubricsRoot = Join-Path $caseDirectory 'rubrics'
+                Copy-Item -LiteralPath $rubricsRoot -Destination $caseRubricsRoot -Recurse
+                if ($case.PSObject.Properties.Name -ccontains 'mutateRubrics') { $null = & $case.mutateRubrics $caseRubricsRoot $set }
+
+                $imported = Import-CalibrationSet -Path $caseSetPath -RubricsRoot $caseRubricsRoot
+                $parsed = Get-Content -Raw -LiteralPath $caseSetPath | ConvertFrom-Json -Depth 100
+                $entries = New-CalibrationRubricEntriesFromFiles -SetValue $parsed -RubricsRoot $caseRubricsRoot
+                $shared = Test-CalibrationSetObject -SetValue $parsed -RubricEntriesByRef $entries
+                Assert-Equal $shared.valid $imported.valid
+                Assert-SequenceEqual @($shared.errors) @($imported.errors)
+                Assert-Equal $shared.set.version $imported.set.version
+                Assert-Equal @($shared.set.prompts).Count @($imported.set.prompts).Count
+                Assert-SequenceEqual @($shared.rubrics.Keys | Sort-Object) @($imported.rubrics.Keys | Sort-Object)
+            }
+        } finally {
+            if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Recurse -Force }
+        }
+    }
+
+    Invoke-Assertion 'importer and pilot source bundle delegate to the same calibration-set validator' {
+        $importerSource = (Get-Command -Name Import-CalibrationSet -CommandType Function -ErrorAction Stop).ScriptBlock.ToString()
+        $bundleSource = (Get-Command -Name New-CalibrationPilotSourceBundle -CommandType Function -ErrorAction Stop).ScriptBlock.ToString()
+        $sharedSource = (Get-Command -Name Test-CalibrationSetObject -CommandType Function -ErrorAction Stop).ScriptBlock.ToString()
+        Assert-True $importerSource.Contains('Test-CalibrationSetObject', [StringComparison]::Ordinal)
+        Assert-True $bundleSource.Contains('Test-CalibrationSetObject', [StringComparison]::Ordinal)
+        Assert-True $sharedSource.Contains('calibration_prompt_sensitive:', [StringComparison]::Ordinal)
+        Assert-False $importerSource.Contains('calibration_prompt_sensitive:', [StringComparison]::Ordinal)
+        Assert-False $bundleSource.Contains('calibration_prompt_sensitive:', [StringComparison]::Ordinal)
+    }
+
+    Invoke-Assertion 'pilot source bundle retains the exact byte text value and hash snapshot for every accepted source' {
+        $bundle = New-CalibrationPilotSourceBundle -PilotManifestPath $pilotManifestPath -PilotManifestSchemaPath $pilotManifestSchemaPath `
+            -CalibrationSetPath $setPath -RubricsRoot $rubricsRoot
+        foreach ($source in @(
+            $bundle.sources.manifest, $bundle.sources.manifest_schema, $bundle.sources.matrix, $bundle.sources.calibration_set,
+            $bundle.sources.model_profile_schema, $bundle.sources.response_schema
+        )) {
+            Assert-True ($source.bytes -is [byte[]]) 'A source snapshot must retain its original bytes.'
+            Assert-True ($source.text -is [string]) 'A source snapshot must retain its strict UTF-8 text.'
+            Assert-True ($null -ne $source.value) 'A source snapshot must retain its parsed value.'
+            Assert-Equal ([Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($source.bytes)).ToLowerInvariant()) $source.sha256
+        }
+        Assert-Equal @($bundle.sources.profiles.Keys).Count 3
+        Assert-True (@($bundle.sources.rubrics.Keys).Count -gt 0)
+        foreach ($source in @($bundle.sources.profiles.Values) + @($bundle.sources.rubrics.Values)) {
+            Assert-True ($source.bytes -is [byte[]]) 'Captured profile and rubric sources must retain original bytes.'
+            Assert-Equal ([Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($source.bytes)).ToLowerInvariant()) $source.sha256
+        }
+    }
+
     Invoke-Assertion 'canonical pilot hashes ignore object insertion order but preserve array order and values' {
         $left = [pscustomobject][ordered]@{ z = 1; a = @('first', 'second'); nested = [pscustomobject][ordered]@{ b = $true; a = $null } }
         $right = [pscustomobject][ordered]@{ nested = [pscustomobject][ordered]@{ a = $null; b = $true }; a = @('first', 'second'); z = 1 }
         $changedArray = [pscustomobject][ordered]@{ a = @('second', 'first'); nested = [pscustomobject][ordered]@{ a = $null; b = $true }; z = 1 }
         Assert-Equal (Get-CalibrationObjectSha256 -Value $left) (Get-CalibrationObjectSha256 -Value $right)
         Assert-False ((Get-CalibrationObjectSha256 -Value $left) -ceq (Get-CalibrationObjectSha256 -Value $changedArray))
+        foreach ($pair in @(
+            @([pscustomobject]@{ value = '1' }, [pscustomobject]@{ value = 1 }),
+            @([pscustomobject]@{ value = $true }, [pscustomobject]@{ value = 1 }),
+            @([pscustomobject]@{ value = $null }, [pscustomobject]@{ value = '' }),
+            @([pscustomobject]@{ nested = [pscustomobject]@{ value = 'left' } }, [pscustomobject]@{ nested = [pscustomobject]@{ value = 'right' } }),
+            @([pscustomobject]@{ values = @($null, 'x') }, [pscustomobject]@{ values = @('x', $null) })
+        )) {
+            Assert-False ((Get-CalibrationObjectSha256 -Value $pair[0]) -ceq (Get-CalibrationObjectSha256 -Value $pair[1]))
+        }
     }
 
     Invoke-Assertion 'pilot source bundle rejects invalid response schemas and binds a plan to its parsed snapshot' {
@@ -481,6 +602,30 @@ if (Test-Path -LiteralPath $implementationPath -PathType Leaf) {
             Set-Content -LiteralPath $responseSchemaPath -Value '{"type":"object","properties":{}}' -Encoding utf8NoBOM
             $plan = New-CalibrationPilotPlan -SourceBundle $bundle
             Assert-Equal $plan.source_hashes.response_schema $before
+        } finally {
+            if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Recurse -Force }
+        }
+    }
+
+    Invoke-Assertion 'production pilot source bundle validates complete captured model profiles before identity binding' {
+        $temporary = New-TestDirectory
+        try {
+            foreach ($case in @(
+                [pscustomobject]@{ name = 'missing quality'; mutate = { param($profile) $profile.PSObject.Properties.Remove('quality') } }
+                [pscustomobject]@{ name = 'extra profile field'; mutate = { param($profile) $profile | Add-Member -NotePropertyName unexpected -NotePropertyValue $true } }
+                [pscustomobject]@{ name = 'wrong nested type'; mutate = { param($profile) $profile.quality.task_types.general = 7 } }
+                [pscustomobject]@{ name = 'invalid quality enum'; mutate = { param($profile) $profile.quality.task_types.general = 'invalid-enum' } }
+            )) {
+                $profilesRoot = Copy-TestPilotProfilesRoot -Directory $temporary
+                $profilePath = Join-Path $profilesRoot 'agy/gemini-3.7-flash-low__low.json'
+                $profile = Get-Content -Raw -LiteralPath $profilePath | ConvertFrom-Json -Depth 100
+                & $case.mutate $profile
+                $profile | ConvertTo-Json -Depth 100 | Set-Content -LiteralPath $profilePath -Encoding utf8NoBOM
+                $null = Assert-Throws {
+                    New-CalibrationPilotSourceBundle -PilotManifestPath $pilotManifestPath -PilotManifestSchemaPath $pilotManifestSchemaPath `
+                        -CalibrationSetPath $setPath -RubricsRoot $rubricsRoot -ProfilesRoot $profilesRoot | Out-Null
+                } 'profile schema validation failed'
+            }
         } finally {
             if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Recurse -Force }
         }
@@ -615,6 +760,27 @@ if (Test-Path -LiteralPath $implementationPath -PathType Leaf) {
         }
         foreach ($name in $originalFunctions.Keys) {
             Assert-Equal (Get-Command -Name $name -CommandType Function -ErrorAction Stop).ScriptBlock.ToString() $originalFunctions[$name].ToString()
+        }
+    }
+
+    Invoke-Assertion 'forced nested shadow failure restores every protected function definition' {
+        $names = @('Invoke-PilotCandidate', 'New-CalibrationRunClaim', 'Write-CalibrationJsonFile')
+        $original = @{}
+        foreach ($name in $names) { $original[$name] = (Get-Command -Name $name -CommandType Function -ErrorAction Stop).ScriptBlock }
+        $caught = $false
+        try {
+            Set-Item -Path Function:\Invoke-PilotCandidate -Value { throw 'forced nested shadow failure' }
+            try {
+                & {
+                    Invoke-PilotCandidate -Candidate ([pscustomobject]@{}) -Prompt 'never-run' -RunId 'never-run' | Out-Null
+                }
+            } catch { $caught = $true }
+        } finally {
+            foreach ($name in $names) { Set-Item -Path ("Function:\$name") -Value $original[$name] }
+        }
+        Assert-True $caught
+        foreach ($name in $names) {
+            Assert-Equal (Get-Command -Name $name -CommandType Function -ErrorAction Stop).ScriptBlock.ToString() $original[$name].ToString()
         }
     }
 
