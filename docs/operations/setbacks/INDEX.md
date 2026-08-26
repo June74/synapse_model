@@ -52,6 +52,7 @@
 | [SB-20260826-160619-task3-review-incident-filename-assumption](incidents/2026-08-26T160619Z-task3-review-incident-filename-assumption.md) | Quality-review recurrence lookup used a shorthand incident filename | closed | 2026-08-26T16:06:19.432654Z | 2026-08-26T16:29:13.8205439Z |
 | [SB-20260826-163250-task4-range-array-flattening](incidents/2026-08-26T163250Z-task4-range-array-flattening.md) | Dynamic line range flattened into the surrounding PowerShell array | closed | 2026-08-26T16:32:50.936156Z | 2026-08-26T16:32:50.936156Z |
 | [SB-20260826-175410-exact-fields-date-coercion](incidents/2026-08-26T175410Z-exact-fields-date-coercion.md) | Exact-fields parsing coerces ISO timestamp strings | contained | 2026-08-26T17:54:10.0746877Z | 2026-08-26T17:54:10.0746877Z |
+| [SB-20260826-175555-adjudication-acceptance-phrase](incidents/2026-08-26T175555Z-adjudication-acceptance-phrase.md) | Adjudication acceptance check used an overly specific phrase | closed | 2026-08-26T17:55:55.3942857Z | 2026-08-26T17:55:55.3942857Z |
 | SB-2026-08-19-001 | PowerShell DOCX paragraph extraction syntax error | closed | 2026-08-19 | 2026-08-19 |
 | SB-2026-08-19-002 | Current DOCX locked during full-document scan | closed | 2026-08-19 | 2026-08-19 |
 | SB-2026-08-19-003 | Skill path lookup mismatch | closed | 2026-08-19 | 2026-08-26T17:51:09.0115027Z |
