@@ -2,7 +2,7 @@
 
 - **Status:** closed
 - **First observed:** 2026-08-24T03:19:22.527505Z
-- **Last observed:** 2026-08-25T21:31:26.0453209Z
+- **Last observed:** 2026-08-26T04:30:39.5990506Z
 - **Phase/task:** Task 7 documentation specification review
 - **Environment:** Windows PowerShell, Codex desktop managed workspace
 - **Version/commit:** First observed at `12481f6`; Task 4 recurrence at `9d35707`
@@ -55,6 +55,7 @@ Run the full router PowerShell suite through an execution wrapper with a 30-seco
 - 2026-08-24T04:42:50Z: Project-owner-reported Task 7 handoff serialization recurrence; repository status and test state were re-established before work resumed.
 - 2026-08-24T05:14:03Z: Task 8 baseline wrapper again printed partial output without retaining the returned session identifier.
 - 2026-08-25T21:31:26.0453209Z: Task 7 documentation spec review repeated the 30-second wrapper/session-handle loss; a retained-handle rerun completed successfully.
+- 2026-08-26T04:30:39.5990506Z: Option 1 repair baseline repeated the output projection mistake for the functional calibration suite; the orphaned session was allowed to exit without launching a duplicate suite.
 
 ## Recurrence: Task 7 handoff serialization
 
@@ -111,3 +112,13 @@ Run the full router PowerShell suite through an execution wrapper with a 30-seco
 - **Correction:** Confirmed no matching process remained, then reran with the complete execution result retained and polled the returned session handle to an explicit exit code.
 - **Prevention:** Run long PowerShell suites through direct session-aware calls and retain the full result object before inspecting output.
 - **Verification:** The retained-handle rerun completed with exit code 0 and all 48 functional assertions passed; the offline pilot plan separately returned zero provider calls and wrote no result artifact.
+
+## Recurrence: Option 1 Agy-envelope repair baseline
+
+- **Symptom:** A parallel baseline wrapper retained the full nested command results only inside an expired orchestration scope, then printed projected output without the functional suite's continuation identifier or exit code.
+- **Impact:** The partial functional PASS stream is not accepted as baseline evidence. The already-running suite was allowed to finish, and no duplicate suite was launched while it remained active.
+- **Confirmed cause:** The wrapper again projected fields before exposing or storing the long-running command's continuation identifier outside the orchestration scope.
+- **Known exclusions:** The pilot suite completed independently with exit code 0. No provider, native launcher, network request, credential, prompt, response, or product-code mutation was involved.
+- **Correction:** Waited for the known functional-suite parent process to exit without terminating it; rerun the functional suite in a dedicated session-aware call and retain the full result.
+- **Prevention:** Never launch a potentially long suite inside a fresh isolate unless the complete returned object, including `session_id`, is emitted verbatim or durably stored for the next call.
+- **Verification:** The dedicated functional-suite rerun retained session `53324`, was polled to exit code 0, and reported all calibration tests passed.

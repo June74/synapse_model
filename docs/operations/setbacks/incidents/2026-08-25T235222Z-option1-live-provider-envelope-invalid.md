@@ -2,7 +2,7 @@
 
 - **Status:** contained
 - **First observed:** 2026-08-25T23:52:22.2693656Z
-- **Last observed:** 2026-08-25T23:55:02.5686300Z
+- **Last observed:** 2026-08-26T00:04:04.9658578Z
 - **Phase/task:** Task 9 approved live acceptance
 - **Environment:** Windows PowerShell, isolated Option 1 worktree
 - **Version/commit:** `98df9e955e51654c5e927229753901a585715e33`
@@ -38,20 +38,25 @@ Run the exact approved command once from the clean approved commit with RunId `o
 3. Inspected only bounded artifact structure, hashes, claims, terminal state, privacy fields, and visible process names; containment checks passed.
 4. Did not retry, substitute a provider, resume, or create another RunId.
 5. A final inspection report mislabeled the manifest hash as the execution commit. Reading `plan.json.git_commit` corrected the report and confirmed the approved execution commit exactly; no runtime artifact changed.
+6. Composed the real Agy adapter with a fully native-shaped offline success fixture and the strict calibration validator. The ordered success fixture passed, proving the normal process and usage telemetry shapes are compatible.
+7. Reproduced two adapter/envelope contract mismatches without a provider call: a successful canonical response with reordered keys is accepted by the adapter but rejected by the envelope; a provider-declared canonical failure is accepted by the adapter, which also emits failure metadata that the envelope rejects as contradictory.
+8. Reproduced ordinary parse failure and nonzero exit with complete native telemetry. Both produced valid execution envelopes and retained process evidence, unlike the live result.
+9. Inspected the installed launcher without executing it. `agy.exe` was replaced during the live run window, and the prior binary remains beside it with an `.old` suffix; the two binaries have different sizes and SHA-256 hashes.
 
 ## Cause classification
 
-- **Confirmed cause:** The strict pilot execution-envelope boundary rejected the normalized candidate result. The bounded artifact does not identify which envelope field was invalid.
-- **Hypotheses:** A live-only mismatch exists between the Agy adapter result shape and the strict calibration execution-envelope contract.
-- **Rejected hypotheses:** None; authentication, quota, response parsing, and cleanup-specific explanations are not distinguishable from the bounded artifact.
+- **Confirmed cause:** The Agy adapter and strict calibration envelope implement inconsistent canonical-response contracts. Offline reproduction proves that the adapter accepts at least two shapes the envelope rejects: reordered canonical keys, and provider-declared failure accompanied by the adapter's normalized failure metadata. The bounded live artifact intentionally does not retain enough canonical detail to distinguish which of those two variants occurred.
+- **Confirmed contributing condition:** The installed Agy launcher was replaced during the live run window. The current binary was written at `2026-08-25T23:52:18.6808422Z`; the run began at `2026-08-25T23:52:12.9023258Z` and recorded process start at `2026-08-25T23:52:21.7927377Z`. The current and retained prior binaries have different sizes and hashes, so the live launcher identity was not stable across the acceptance boundary.
+- **Hypotheses:** The exact live trigger was either canonical property reordering or provider-declared failure metadata. Launcher replacement may have changed serialization or failure behavior relative to the repository fixture, but binary metadata alone does not prove which behavior changed.
+- **Rejected hypotheses:** An ordinary parse failure or normal nonzero-exit path cannot explain the missing bounded process evidence under the current code: offline reproductions classify those as valid envelopes and preserve process telemetry. The fully native-shaped ordered Agy success fixture also passes, rejecting a general incompatibility in normal process or usage telemetry.
 - **Known exclusions:** No retry, fallback, judge launch, production profile mutation, eligibility change, raw prompt persistence, raw provider-output persistence, or credential persistence occurred.
 
 ## Correction and prevention
 
 - **Correction:** Contained the run at its terminal stopped state and prohibited reuse or retry of the approved RunId.
-- **Prevention:** Before any new live packet, reproduce the adapter/envelope boundary offline with safe fixtures and add bounded field-level diagnostic coverage that does not persist raw provider data.
+- **Prevention:** Before any new live packet, define one canonical response contract shared by the adapter and envelope, cover property-order and provider-declared-failure cases in the composed offline seam, and pin or preflight the launcher binary identity. Add bounded rejection-reason diagnostics that record only a safe field/category code, never raw provider data.
 - **Owner:** Codex.
-- **Next diagnostic step:** Trace the Agy live adapter result into the strict execution-envelope validator using offline fixtures; any correction requires a new reviewed commit, new RunId, revised acceptance packet, and new explicit approval.
+- **Next diagnostic step:** Choose and implement the shared canonical-response semantics, then verify the composed Agy-adapter-to-envelope seam offline. Any correction still requires a new reviewed commit, new RunId, revised acceptance packet, and new explicit approval before another provider call.
 
 ## Verification and related work
 
@@ -61,3 +66,4 @@ The run directory contains only `.run.claim`, the exact candidate claim, `plan.j
 
 - 2026-08-25T23:52:22.2693656Z: First live occurrence; contained without retry.
 - 2026-08-25T23:55:02.5686300Z: Corrected a read-only verification label and reconfirmed the exact approved commit from the immutable plan.
+- 2026-08-26T00:04:04.9658578Z: Offline composition tests confirmed the adapter/envelope contract inconsistency and rejected ordinary parse/nonzero-exit explanations; read-only launcher metadata confirmed replacement during the live run window.

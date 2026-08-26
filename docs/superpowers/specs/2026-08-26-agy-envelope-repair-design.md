@@ -1,0 +1,57 @@
+# Agy Adapter and Calibration Envelope Repair Design
+
+## Purpose
+
+Repair the contained Option 1 live failure without making another provider call. The repair must make the pilot adapter and calibration validator share one canonical-response contract, retain bounded rejection evidence, and bind future live execution to reviewed launcher identities.
+
+## Confirmed live path
+
+`run_calibration.ps1 -Pilot -Run` calls `Invoke-CalibrationPilotRun`, which invokes `Invoke-PilotCandidate`, parses provider output, and passes the normalized execution to `Test-CalibrationPilotExecutionEnvelope`. The contained live run stopped at this final boundary before either judge launched.
+
+## Canonical response contract
+
+Every provider adapter returns exactly three canonical properties in this order: `status`, `answer`, `error`. JSON member order is not semantically meaningful, so a response containing exactly those three properties is re-materialized in that order before validation.
+
+Normalization must preserve the original value types. It must not cast an invalid status, answer, or error into a string, and it must not discard unexpected properties. Agy's existing empty-string success error compatibility remains: an exact three-property success with `error = ""` becomes `error = null`.
+
+## Provider-declared failure contract
+
+A schema-valid canonical response with `status = failure` is a provider-declared response, not an adapter or transport failure. `Invoke-PilotCandidate` therefore returns:
+
+- the canonical failure unchanged except for safe ordering;
+- `failure = null`;
+- `diagnostic_note = provider-declared failure`;
+- valid process and usage evidence.
+
+Calibration accepts the execution envelope as structurally valid, stops with `response_contract_invalid`, persists bounded process evidence, and launches no later roles. The `failure` field remains reserved for transport, parsing, adapter-contract, or execution failures.
+
+## Bounded envelope diagnostics
+
+Every invalid envelope returns one rejection code from this fixed allowlist:
+
+- `execution_shape`
+- `start_state`
+- `failure_metadata`
+- `process_shape`
+- `process_values`
+- `usage`
+- `canonical_shape`
+- `canonical_values`
+- `semantic_conflict`
+
+Each attempt artifact adds nullable `envelope_rejection_code`. It is populated only when the envelope itself is invalid. It never contains raw values, exception text, prompts, answers, errors, paths, or credentials. Existing public stop codes remain unchanged.
+
+## Launcher identity lock
+
+Future live execution must be bound to a reviewed `calibration/pilots/option1-launchers-v1.json` file. Its SHA-256 is included in the immutable pilot plan's source hashes. Each role lists the exact file components needed to identify the launcher: the direct executable for Agy, and the PowerShell shim, effective PowerShell host, and implementation entrypoint for shim-backed Codex and Claude launchers.
+
+The offline `-Pilot` plan validates the lock's schema and source hash but never resolves or starts installed launchers. `-Pilot -Run` resolves and hashes the declared components before reserving a slot. A mismatch or unverifiable component stops with `source_drift`, zero slot claims, and zero provider calls.
+
+The resolved files are opened read-only without write/delete sharing from final verification through `Process.Start`, preventing replacement during the launch boundary on Windows. The same prepared command is executed; it is not resolved a second time. No `--version`, updater, model, or provider command is run as part of identity checking.
+
+## Test and safety requirements
+
+All repair work is test-first and offline. Required regressions cover reordered success, reordered provider failure, invalid type preservation, unexpected-property rejection, provider-failure evidence, every bounded rejection category, launcher mismatch before claim, matching prepared-launch ordering, and privacy scans.
+
+The five existing offline suites must pass before a new acceptance packet is prepared. The consumed RunId `option1-live-20260825-001` is never reused. A new live command requires a new reviewed commit, new RunId, new immutable hashes, and separate explicit approval.
+

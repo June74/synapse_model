@@ -7,7 +7,7 @@
 | [SB-20260824-012823-apply-patch-duplicate-target](incidents/2026-08-24T012823Z-apply-patch-duplicate-target.md) | Patch request repeated one target file in multiple update blocks | closed | 2026-08-24 | 2026-08-25T19:55:35.3677309Z |
 | [SB-20260823-232717-requirements-profile-path-format-parser](incidents/2026-08-23T232717Z-requirements-profile-path-format-parser.md) | Requirements profile-path format expression caused a parser error | closed | 2026-08-23 | 2026-08-23 |
 | [SB-20260823-234012-minimal-profile-fixture-path](incidents/2026-08-23T234012Z-minimal-profile-fixture-path.md) | Assumed minimal-profile fixture filename caused a path-not-found error | closed | 2026-08-23 | 2026-08-24 |
-| [SB-20260824-031922-baseline-session-id-not-retained](incidents/2026-08-24T031922Z-baseline-session-id-not-retained.md) | Baseline test session identifier was not retained | closed | 2026-08-24 | 2026-08-25T21:31:26.0453209Z |
+| [SB-20260824-031922-baseline-session-id-not-retained](incidents/2026-08-24T031922Z-baseline-session-id-not-retained.md) | Baseline test session identifier was not retained | closed | 2026-08-24 | 2026-08-26T04:30:39.5990506Z |
 | [SB-20260824-033023-sqlite-test-connection-not-closed](incidents/2026-08-24T033023Z-sqlite-test-connection-not-closed.md) | SQLite test reader left Windows file handles open | closed | 2026-08-24 | 2026-08-24 |
 | [SB-20260824-035416-sqlite-schema-admission-atomicity](incidents/2026-08-24T035416Z-sqlite-schema-admission-atomicity.md) | SQLite schema admission was not exact or atomic | closed | 2026-08-24 | 2026-08-24 |
 | [SB-20260824-044250-sqlite-trace-quality-review](incidents/2026-08-24T044250Z-sqlite-trace-quality-review.md) | SQLite trace admission and bridge durability gaps | closed | 2026-08-24 | 2026-08-24 |
@@ -39,7 +39,7 @@
 | [SB-20260825-202324-task6-parallel-suite-result-lock](incidents/2026-08-25T202324Z-task6-parallel-suite-result-lock.md) | Parallel calibration suites contended on a run claim | closed | 2026-08-25T20:23:24.5926183Z | 2026-08-25T20:26:10.4121215Z |
 | [SB-20260825-210716-task6-post-launch-ledger-recovery](incidents/2026-08-25T210716Z-task6-post-launch-ledger-recovery.md) | Post-launch ledger failure escaped durable recovery | closed | 2026-08-25T21:07:16.6369573Z | 2026-08-25T21:11:34.0598216Z |
 | [SB-20260825-212139-task7-live-runid-plan-mismatch](incidents/2026-08-25T212139Z-task7-live-runid-plan-mismatch.md) | Task 7 live RunId disagreed with frozen acceptance packet | closed | 2026-08-25T21:21:39.286903Z | 2026-08-25T21:25:03.8356342Z |
-| [SB-20260825-235222-option1-live-provider-envelope-invalid](incidents/2026-08-25T235222Z-option1-live-provider-envelope-invalid.md) | Option 1 live candidate returned an invalid provider envelope | contained | 2026-08-25T23:52:22.2693656Z | 2026-08-25T23:55:02.5686300Z |
+| [SB-20260825-235222-option1-live-provider-envelope-invalid](incidents/2026-08-25T235222Z-option1-live-provider-envelope-invalid.md) | Option 1 live candidate returned an invalid provider envelope | contained | 2026-08-25T23:52:22.2693656Z | 2026-08-26T00:04:04.9658578Z |
 | SB-2026-08-19-001 | PowerShell DOCX paragraph extraction syntax error | closed | 2026-08-19 | 2026-08-19 |
 | SB-2026-08-19-002 | Current DOCX locked during full-document scan | closed | 2026-08-19 | 2026-08-19 |
 | SB-2026-08-19-003 | Skill path lookup mismatch | closed | 2026-08-19 | 2026-08-25T23:53:40.1144919Z |
@@ -49,7 +49,7 @@
 | SB-2026-08-19-007 | Plan review command used an invalid PowerShell parameter | contained | 2026-08-19 | 2026-08-19 |
 | SB-2026-08-19-008 | Pre-creation worktree ignore check rejected absent directory | contained | 2026-08-19 | 2026-08-24 |
 | SB-2026-08-19-009 | Existing descendant-drain test was transiently timing-sensitive | closed | 2026-08-19 | 2026-08-19 |
-| SB-2026-08-19-010 | Parser verification command used invalid PowerShell interpolation | closed | 2026-08-19 | 2026-08-25 |
+| SB-2026-08-19-010 | Parser verification command used invalid PowerShell interpolation | closed | 2026-08-19 | 2026-08-26T00:03:21.8543849Z |
 | SB-20260822-190417-main-feature-branch-divergence | Fast-forward merge unavailable after main advanced | closed | 2026-08-22 | 2026-08-22 |
 | SB-20260822-190757-merged-main-legacy-result-deletion | Merged main lost required legacy pilot result fixture | closed | 2026-08-22 | 2026-08-22 |
 | SB-20260823-015506-test-json-numeric-precision | Test-Json loses numeric precision at contract boundaries | closed | 2026-08-23 | 2026-08-23 |
