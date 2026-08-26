@@ -43,6 +43,10 @@ $script:CalibrationPilotAllowedStopCodes = @(
     'artifact_persistence_failed', 'sensitive_output_detected', 'budget_invariant_failed',
     'manual_abort'
 )
+$script:CalibrationPilotEnvelopeRejectionCodes = @(
+    'execution_shape', 'start_state', 'failure_metadata', 'process_shape', 'process_values', 'usage',
+    'canonical_shape', 'canonical_values', 'semantic_conflict'
+)
 $script:CalibrationPilotMaximumDurationMilliseconds = [int64]3600000
 $script:CalibrationPilotMaximumTokenCount = [decimal]9007199254740991
 $script:CalibrationPilotCleanupStatuses = @(
@@ -1266,17 +1270,16 @@ function Test-CalibrationPilotExecutionEnvelope {
     } elseif (-not $startPropertyPresent -and -not $processRecordPresent) {
         $true
     } else { $false }
-    $invalid = [pscustomobject][ordered]@{
-        valid = $false
-        process_started = [bool]$processStarted
-        start_indeterminate = [bool]$startIndeterminate
-        success = $false
-        stop_code = 'provider_envelope_invalid'
-    }
     if ($null -eq $Execution -or $Execution -is [string] -or
-        $Execution -is [Collections.IDictionary] -or $Execution -is [Collections.IList]) { return $invalid }
+        $Execution -is [Collections.IDictionary] -or $Execution -is [Collections.IList]) {
+        return New-CalibrationPilotExecutionEnvelopeResult -ProcessStarted $processStarted `
+            -StartIndeterminate $startIndeterminate -RejectionCode 'execution_shape'
+    }
     foreach ($required in @('process', 'canonical', 'failure')) {
-        if (-not (Test-CalibrationProperty $Execution $required)) { return $invalid }
+        if (-not (Test-CalibrationProperty $Execution $required)) {
+            return New-CalibrationPilotExecutionEnvelopeResult -ProcessStarted $processStarted `
+                -StartIndeterminate $startIndeterminate -RejectionCode 'execution_shape'
+        }
     }
     if (($null -ne $Execution.failure -and
             ($Execution.failure -isnot [string] -or [string]::IsNullOrWhiteSpace([string]$Execution.failure))) -or
@@ -1287,16 +1290,30 @@ function Test-CalibrationPilotExecutionEnvelope {
         ((Test-CalibrationProperty $Execution 'stop_code') -and
             $null -ne $Execution.stop_code -and
             ($Execution.stop_code -isnot [string] -or
-                [string]::IsNullOrWhiteSpace([string]$Execution.stop_code)))) { return $invalid }
+                [string]::IsNullOrWhiteSpace([string]$Execution.stop_code)))) {
+        return New-CalibrationPilotExecutionEnvelopeResult -ProcessStarted $processStarted `
+            -StartIndeterminate $startIndeterminate -RejectionCode 'failure_metadata'
+    }
     if ((Test-CalibrationProperty $Execution 'failure_code') -and
-        $null -ne $Execution.failure_code -and $null -eq $Execution.failure) { return $invalid }
+        $null -ne $Execution.failure_code -and $null -eq $Execution.failure) {
+        return New-CalibrationPilotExecutionEnvelopeResult -ProcessStarted $processStarted `
+            -StartIndeterminate $startIndeterminate -RejectionCode 'failure_metadata'
+    }
     if ((Test-CalibrationProperty $Execution 'stop_code') -and
-        $null -ne $Execution.stop_code -and $null -eq $Execution.failure) { return $invalid }
-    if ($startIndeterminate) { return $invalid }
+        $null -ne $Execution.stop_code -and $null -eq $Execution.failure) {
+        return New-CalibrationPilotExecutionEnvelopeResult -ProcessStarted $processStarted `
+            -StartIndeterminate $startIndeterminate -RejectionCode 'failure_metadata'
+    }
+    if ($startIndeterminate) {
+        return New-CalibrationPilotExecutionEnvelopeResult -ProcessStarted $processStarted `
+            -StartIndeterminate $true -RejectionCode 'start_state'
+    }
 
     if ($processStarted) {
         $processNames = @('exit_code', 'duration_ms', 'timed_out', 'cleanup_failed', 'cleanup_status', 'process_exited')
-        if (-not (Test-CalibrationPilotExactPropertySet -Value $Execution.process -Names $processNames)) { return $invalid }
+        if (-not (Test-CalibrationPilotExactPropertySet -Value $Execution.process -Names $processNames)) {
+            return New-CalibrationPilotExecutionEnvelopeResult -ProcessStarted $true -RejectionCode 'process_shape'
+        }
         if (($null -ne $Execution.process.exit_code -and
                 -not (Test-CalibrationPilotExactInteger $Execution.process.exit_code)) -or
             -not (Test-CalibrationPilotExactInteger $Execution.process.duration_ms) -or
@@ -1306,15 +1323,21 @@ function Test-CalibrationPilotExecutionEnvelope {
             $Execution.process.cleanup_failed -isnot [bool] -or
             $Execution.process.cleanup_status -isnot [string] -or
             $Execution.process.cleanup_status -cnotin $script:CalibrationPilotCleanupStatuses -or
-            $Execution.process.process_exited -isnot [bool]) { return $invalid }
+            $Execution.process.process_exited -isnot [bool]) {
+            return New-CalibrationPilotExecutionEnvelopeResult -ProcessStarted $true -RejectionCode 'process_values'
+        }
         if ((Test-CalibrationProperty $Execution 'usage') -and $null -ne $Execution.usage) {
-            try { $null = ConvertTo-CalibrationPilotSafeUsage -Usage $Execution.usage } catch { return $invalid }
+            try { $null = ConvertTo-CalibrationPilotSafeUsage -Usage $Execution.usage } catch {
+                return New-CalibrationPilotExecutionEnvelopeResult -ProcessStarted $true -RejectionCode 'usage'
+            }
         }
     }
 
     if ($null -ne $Execution.canonical) {
-        if (-not (Test-CalibrationPilotExactPropertySet -Value $Execution.canonical -Names @('status', 'answer', 'error')) -or
-            $Execution.canonical.status -isnot [string] -or
+        if (-not (Test-CalibrationPilotExactPropertySet -Value $Execution.canonical -Names @('status', 'answer', 'error'))) {
+            return New-CalibrationPilotExecutionEnvelopeResult -ProcessStarted $processStarted -RejectionCode 'canonical_shape'
+        }
+        if ($Execution.canonical.status -isnot [string] -or
             $Execution.canonical.status -cnotin @('success', 'failure') -or
             $Execution.canonical.answer -isnot [string] -or
             ($null -ne $Execution.canonical.error -and $Execution.canonical.error -isnot [string]) -or
@@ -1324,7 +1347,9 @@ function Test-CalibrationPilotExecutionEnvelope {
             ($Execution.canonical.status -ceq 'failure' -and
                 (-not [string]::IsNullOrEmpty([string]$Execution.canonical.answer) -or
                     $Execution.canonical.error -isnot [string] -or
-                    [string]::IsNullOrWhiteSpace([string]$Execution.canonical.error)))) { return $invalid }
+                    [string]::IsNullOrWhiteSpace([string]$Execution.canonical.error)))) {
+            return New-CalibrationPilotExecutionEnvelopeResult -ProcessStarted $processStarted -RejectionCode 'canonical_values'
+        }
     }
 
     $transportSuccess = $processStarted -and
@@ -1335,24 +1360,57 @@ function Test-CalibrationPilotExecutionEnvelope {
     $executionStopCode = if (Test-CalibrationProperty $Execution 'stop_code') { $Execution.stop_code } else { $null }
     if ($transportSuccess) {
         if ($null -ne $Execution.canonical -and $Execution.canonical.status -ceq 'success') {
-            if ($null -ne $Execution.failure -or $null -ne $failureCode -or $null -ne $executionStopCode) { return $invalid }
+            if ($null -ne $Execution.failure -or $null -ne $failureCode -or $null -ne $executionStopCode) {
+                return New-CalibrationPilotExecutionEnvelopeResult -ProcessStarted $processStarted -RejectionCode 'semantic_conflict'
+            }
         } elseif ($null -ne $Execution.canonical -and $Execution.canonical.status -ceq 'failure') {
-            if ($null -ne $Execution.failure -or $null -ne $failureCode -or $null -ne $executionStopCode) { return $invalid }
-        } elseif ($null -eq $Execution.failure) { return $invalid }
+            if ($null -ne $Execution.failure -or $null -ne $failureCode -or $null -ne $executionStopCode) {
+                return New-CalibrationPilotExecutionEnvelopeResult -ProcessStarted $processStarted -RejectionCode 'semantic_conflict'
+            }
+        } elseif ($null -eq $Execution.failure) {
+            return New-CalibrationPilotExecutionEnvelopeResult -ProcessStarted $processStarted -RejectionCode 'semantic_conflict'
+        }
     } else {
-        if ($null -ne $Execution.canonical -or $null -eq $Execution.failure) { return $invalid }
+        if ($null -ne $Execution.canonical -or $null -eq $Execution.failure) {
+            return New-CalibrationPilotExecutionEnvelopeResult -ProcessStarted $processStarted -RejectionCode 'semantic_conflict'
+        }
     }
     $success = $transportSuccess -and $null -ne $Execution.canonical -and
         $Execution.canonical.status -ceq 'success'
-    return [pscustomobject][ordered]@{
-        valid = $true
-        process_started = [bool]$processStarted
-        start_indeterminate = $false
-        success = [bool]$success
-        stop_code = if ($success) { $null } else {
-            $explicitCode = if ($null -ne $executionStopCode) { [string]$executionStopCode } else { $null }
-            Get-CalibrationPilotExecutionStopCode -Execution $Execution -ExplicitCode $explicitCode
+    $stopCode = if ($success) { $null } else {
+        $explicitCode = if ($null -ne $executionStopCode) { [string]$executionStopCode } else { $null }
+        Get-CalibrationPilotExecutionStopCode -Execution $Execution -ExplicitCode $explicitCode
+    }
+    return New-CalibrationPilotExecutionEnvelopeResult -Valid -ProcessStarted $processStarted `
+        -Success:$success -StopCode $stopCode
+}
+
+function New-CalibrationPilotExecutionEnvelopeResult {
+    param(
+        [switch]$Valid,
+        [bool]$ProcessStarted = $false,
+        [bool]$StartIndeterminate = $false,
+        [bool]$Success = $false,
+        [AllowNull()][string]$StopCode,
+        [AllowNull()][string]$RejectionCode
+    )
+    $safeRejectionCode = if ([string]::IsNullOrEmpty($RejectionCode)) { $null } else { $RejectionCode }
+    $safeStopCode = if ([string]::IsNullOrEmpty($StopCode)) { $null } else { $StopCode }
+    if ($Valid) {
+        if ($StartIndeterminate -or $null -ne $safeRejectionCode) { throw 'pilot_execution_envelope_result_invalid' }
+    } else {
+        if ($Success -or $safeRejectionCode -cnotin $script:CalibrationPilotEnvelopeRejectionCodes) {
+            throw 'pilot_execution_envelope_result_invalid'
         }
+        $safeStopCode = 'provider_envelope_invalid'
+    }
+    return [pscustomobject][ordered]@{
+        valid = [bool]$Valid
+        process_started = [bool]$ProcessStarted
+        start_indeterminate = [bool]$StartIndeterminate
+        success = [bool]$Success
+        stop_code = $safeStopCode
+        rejection_code = $safeRejectionCode
     }
 }
 
@@ -1790,6 +1848,7 @@ function New-CalibrationPilotInitialResult {
                 usage = $null
                 transport_status = $null
                 contract_status = $null
+                envelope_rejection_code = $null
                 decision = $null
             }
         }
@@ -1894,13 +1953,15 @@ function Assert-CalibrationPilotResultContract {
     if ((Get-CalibrationObjectSha256 -Value $Result.source_hashes) -cne (Get-CalibrationObjectSha256 -Value $Context.plan.source_hashes) -or
         (Get-CalibrationObjectSha256 -Value $Result.limits) -cne (Get-CalibrationObjectSha256 -Value $Context.plan.limits)) { throw $errorCode }
     if ($Result.attempts -isnot [Collections.IList] -or $Result.attempts.Count -ne 3) { throw $errorCode }
+    $allowedEnvelopeRejectionCodes = @($null) + $script:CalibrationPilotEnvelopeRejectionCodes
     for ($index = 0; $index -lt 3; $index++) {
         $attempt = $Result.attempts[$index]
         $role = $Context.plan.roles[$index]
         Assert-CalibrationExactProperties -Value $attempt -Names @(
             'ordinal', 'role', 'family', 'launcher', 'route_id', 'configuration_id', 'model', 'effort', 'state',
             'slot_claimed_at', 'process_started_at', 'completed_at', 'exit_code', 'duration_ms', 'timed_out',
-            'cleanup_failed', 'cleanup_status', 'process_exited', 'usage', 'transport_status', 'contract_status', 'decision'
+            'cleanup_failed', 'cleanup_status', 'process_exited', 'usage', 'transport_status', 'contract_status',
+            'envelope_rejection_code', 'decision'
         ) -ErrorCode $errorCode
         if (-not (Test-CalibrationPilotOrdinal $attempt.ordinal ($index + 1)) -or
             $attempt.state -isnot [string] -or -not $script:PilotAttemptTransitions.ContainsKey([string]$attempt.state)) { throw $errorCode }
@@ -1925,7 +1986,10 @@ function Assert-CalibrationPilotResultContract {
             ($null -ne $attempt.process_exited -and $attempt.process_exited -isnot [bool]) -or
             $attempt.transport_status -cnotin @($null, 'success', 'failed') -or
             $attempt.contract_status -cnotin @($null, 'success', 'failed', 'not_evaluated') -or
+            $attempt.envelope_rejection_code -cnotin $allowedEnvelopeRejectionCodes -or
             $attempt.decision -cnotin @($null, 'pass', 'fail')) { throw $errorCode }
+        if ($null -ne $attempt.envelope_rejection_code -and
+            ($attempt.state -cne 'failed' -or $Result.stop_reason -cne 'provider_envelope_invalid')) { throw $errorCode }
         if ($null -ne $attempt.usage) {
             if (-not (Test-CalibrationPilotExactPropertySet -Value $attempt.usage -Names @(
                         'actual_input_tokens', 'visible_output_tokens', 'reasoning_tokens', 'complete'))) { throw $errorCode }
@@ -2379,6 +2443,14 @@ function Complete-CalibrationPilotFailure {
         if ($null -ne $Execution -and $null -ne $ExecutionEnvelope) {
             Set-CalibrationPilotAttemptExecutionEvidence -Attempt $next.attempts[$index] `
                 -Execution $Execution -Envelope $ExecutionEnvelope -ContractFailed:$ContractFailed
+        }
+        if ($null -ne $ExecutionEnvelope -and -not [bool]$ExecutionEnvelope.valid) {
+            if (-not (Test-CalibrationProperty $ExecutionEnvelope 'rejection_code') -or
+                $ExecutionEnvelope.rejection_code -isnot [string] -or
+                $ExecutionEnvelope.rejection_code -cnotin $script:CalibrationPilotEnvelopeRejectionCodes) {
+                throw 'pilot_execution_envelope_invalid'
+            }
+            $next.attempts[$index].envelope_rejection_code = [string]$ExecutionEnvelope.rejection_code
         }
         $next.attempts[$index].completed_at = $now
         for ($laterIndex = $index + 1; $laterIndex -lt 3; $laterIndex++) {
@@ -2923,7 +2995,8 @@ function Invoke-CalibrationPilotRun {
         if (-not $candidateEnvelope.valid) {
             return Complete-CalibrationPilotFailure -Context $context -Ordinal 1 `
                 -StopCode 'provider_envelope_invalid' `
-                -Indeterminate:([bool]$candidateEnvelope.start_indeterminate)
+                -Indeterminate:([bool]$candidateEnvelope.start_indeterminate) `
+                -ExecutionEnvelope $candidateEnvelope
         }
         if (-not $candidateEnvelope.success) {
             return Complete-CalibrationPilotFailure -Context $context -Ordinal 1 `
@@ -3021,7 +3094,8 @@ function Invoke-CalibrationPilotRun {
             if (-not $judgeEnvelope.valid) {
                 return Complete-CalibrationPilotFailure -Context $context -Ordinal ($index + 1) `
                     -StopCode 'provider_envelope_invalid' `
-                    -Indeterminate:([bool]$judgeEnvelope.start_indeterminate)
+                    -Indeterminate:([bool]$judgeEnvelope.start_indeterminate) `
+                    -ExecutionEnvelope $judgeEnvelope
             }
             if (-not (Test-CalibrationProperty $rawDecision 'decision') -or
                 ((Test-CalibrationProperty $rawDecision 'stop_code') -and

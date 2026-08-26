@@ -930,7 +930,7 @@ if (Test-Path -LiteralPath $implementationPath -PathType Leaf) {
                     'ordinal', 'role', 'family', 'launcher', 'route_id', 'configuration_id', 'model', 'effort',
                     'state', 'slot_claimed_at', 'process_started_at', 'completed_at', 'exit_code',
                     'duration_ms', 'timed_out', 'cleanup_failed', 'cleanup_status', 'process_exited', 'usage',
-                    'transport_status', 'contract_status', 'decision'
+                    'transport_status', 'contract_status', 'envelope_rejection_code', 'decision'
                 )
                 foreach ($name in @('ordinal', 'role', 'family', 'launcher', 'route_id', 'configuration_id', 'model', 'effort')) {
                     Assert-Equal $attempt.$name $role.$name
@@ -938,7 +938,7 @@ if (Test-Path -LiteralPath $implementationPath -PathType Leaf) {
                 Assert-Equal $attempt.state 'planned'
                 foreach ($name in @('slot_claimed_at', 'process_started_at', 'completed_at', 'exit_code',
                         'duration_ms', 'timed_out', 'cleanup_failed', 'cleanup_status', 'process_exited', 'usage',
-                        'transport_status', 'contract_status', 'decision')) {
+                        'transport_status', 'contract_status', 'envelope_rejection_code', 'decision')) {
                     Assert-True ($null -eq $attempt.$name) "Expected initial attempt '$name' to be null."
                 }
             }
@@ -1139,7 +1139,8 @@ if (Test-Path -LiteralPath $implementationPath -PathType Leaf) {
                 Assert-SequenceEqual @($attempt.PSObject.Properties.Name) @(
                     'ordinal', 'role', 'family', 'launcher', 'route_id', 'configuration_id', 'model', 'effort', 'state',
                     'slot_claimed_at', 'process_started_at', 'completed_at', 'exit_code', 'duration_ms', 'timed_out',
-                    'cleanup_failed', 'cleanup_status', 'process_exited', 'usage', 'transport_status', 'contract_status', 'decision'
+                    'cleanup_failed', 'cleanup_status', 'process_exited', 'usage', 'transport_status', 'contract_status',
+                    'envelope_rejection_code', 'decision'
                 )
                 Assert-Equal $attempt.exit_code 0
                 Assert-Equal $attempt.duration_ms 1
@@ -1156,6 +1157,7 @@ if (Test-Path -LiteralPath $implementationPath -PathType Leaf) {
                 Assert-True $attempt.usage.complete
                 Assert-Equal $attempt.transport_status 'success'
                 Assert-Equal $attempt.contract_status 'success'
+                Assert-Equal $attempt.envelope_rejection_code $null
             }
             $runRoot = Join-Path $execution.input.results_root 'option1-live-20260825-001'
             $plan = Get-Content -Raw -LiteralPath (Join-Path $runRoot 'plan.json') | ConvertFrom-Json -Depth 100
@@ -1271,6 +1273,7 @@ if (Test-Path -LiteralPath $implementationPath -PathType Leaf) {
             Assert-True $result.attempts[0].process_exited
             Assert-Equal $result.attempts[0].transport_status 'success'
             Assert-Equal $result.attempts[0].contract_status 'success'
+            Assert-Equal $result.attempts[0].envelope_rejection_code $null
             Assert-Equal $result.attempts[0].usage.actual_input_tokens 160
             Assert-Equal $result.attempts[0].usage.visible_output_tokens 44
             Assert-Equal $result.attempts[0].usage.reasoning_tokens 13
@@ -1281,6 +1284,96 @@ if (Test-Path -LiteralPath $implementationPath -PathType Leaf) {
             Assert-False (Test-Path -LiteralPath (Join-Path $runRoot 'raw/candidate-response.json') -PathType Leaf)
             Assert-False (Test-Path -LiteralPath (Join-Path $runRoot 'raw/judge-responses.json') -PathType Leaf)
         } finally { Remove-TestCalibrationPilotLedgerRoot -Path $input.results_root }
+    }
+
+    Invoke-Assertion 'pilot execution envelope returns one bounded first-failure category and null for valid envelopes' {
+        $valid = [pscustomobject][ordered]@{
+            process_started = $true
+            process = [pscustomobject][ordered]@{
+                exit_code = 0
+                duration_ms = 1
+                timed_out = $false
+                cleanup_failed = $false
+                cleanup_status = 'not_required'
+                process_exited = $true
+            }
+            canonical = [pscustomobject][ordered]@{ status = 'success'; answer = 'safe'; error = $null }
+            failure = $null
+            failure_code = $null
+            stop_code = $null
+            usage = [pscustomobject][ordered]@{
+                actual_input_tokens = 1
+                visible_output_tokens = 1
+                reasoning_tokens = 0
+                complete = $true
+            }
+        }
+        $cases = @(
+            [pscustomobject]@{ code = 'execution_shape'; make = { 'not an execution object' } },
+            [pscustomobject]@{ code = 'start_state'; make = {
+                $value = Copy-TestObject $valid; $value.process_started = 'true'; $value
+            }.GetNewClosure() },
+            [pscustomobject]@{ code = 'failure_metadata'; make = {
+                $value = Copy-TestObject $valid; $value.failure_code = 9; $value
+            }.GetNewClosure() },
+            [pscustomobject]@{ code = 'process_shape'; make = {
+                $value = Copy-TestObject $valid; $value.process.PSObject.Properties.Remove('duration_ms'); $value
+            }.GetNewClosure() },
+            [pscustomobject]@{ code = 'process_values'; make = {
+                $value = Copy-TestObject $valid; $value.process.duration_ms = -1; $value
+            }.GetNewClosure() },
+            [pscustomobject]@{ code = 'usage'; make = {
+                $value = Copy-TestObject $valid; $value.usage.complete = 'true'; $value
+            }.GetNewClosure() },
+            [pscustomobject]@{ code = 'canonical_shape'; make = {
+                $value = Copy-TestObject $valid; $value.canonical.PSObject.Properties.Remove('error'); $value
+            }.GetNewClosure() },
+            [pscustomobject]@{ code = 'canonical_values'; make = {
+                $value = Copy-TestObject $valid; $value.canonical.status = 'Success'; $value
+            }.GetNewClosure() },
+            [pscustomobject]@{ code = 'semantic_conflict'; make = {
+                $value = Copy-TestObject $valid; $value.failure = 'contradicts canonical success'; $value
+            }.GetNewClosure() }
+        )
+        Assert-SequenceEqual @($script:CalibrationPilotEnvelopeRejectionCodes) @(
+            'execution_shape', 'start_state', 'failure_metadata', 'process_shape', 'process_values', 'usage',
+            'canonical_shape', 'canonical_values', 'semantic_conflict'
+        )
+        foreach ($case in $cases) {
+            $envelope = Test-CalibrationPilotExecutionEnvelope -Execution (& $case.make)
+            Assert-SequenceEqual @($envelope.PSObject.Properties.Name) @(
+                'valid', 'process_started', 'start_indeterminate', 'success', 'stop_code', 'rejection_code'
+            )
+            Assert-False $envelope.valid
+            Assert-Equal $envelope.stop_code 'provider_envelope_invalid'
+            Assert-Equal $envelope.rejection_code $case.code
+        }
+
+        $success = Test-CalibrationPilotExecutionEnvelope -Execution $valid
+        Assert-True $success.valid
+        Assert-True $success.success
+        Assert-Equal $success.rejection_code $null
+
+        $providerFailureExecution = Copy-TestObject $valid
+        $providerFailureExecution.canonical.status = 'failure'
+        $providerFailureExecution.canonical.answer = ''
+        $providerFailureExecution.canonical.error = 'provider declined'
+        $providerFailure = Test-CalibrationPilotExecutionEnvelope -Execution $providerFailureExecution
+        Assert-True $providerFailure.valid
+        Assert-False $providerFailure.success
+        Assert-Equal $providerFailure.stop_code 'response_contract_invalid'
+        Assert-Equal $providerFailure.rejection_code $null
+
+        $technicalFailureExecution = Copy-TestObject $valid
+        $technicalFailureExecution.process.exit_code = 17
+        $technicalFailureExecution.canonical = $null
+        $technicalFailureExecution.failure = 'bounded technical failure'
+        $technicalFailureExecution.failure_code = 'nonzero_exit'
+        $technicalFailure = Test-CalibrationPilotExecutionEnvelope -Execution $technicalFailureExecution
+        Assert-True $technicalFailure.valid
+        Assert-False $technicalFailure.success
+        Assert-Equal $technicalFailure.stop_code 'nonzero_exit'
+        Assert-Equal $technicalFailure.rejection_code $null
     }
 
     Invoke-Assertion 'native Agy adapter rejects mixed-case status values before the calibration envelope' {
@@ -1328,6 +1421,7 @@ if (Test-Path -LiteralPath $implementationPath -PathType Leaf) {
             Assert-True $envelope.process_started
             Assert-False $envelope.start_indeterminate
             Assert-Equal $envelope.stop_code 'provider_envelope_invalid'
+            Assert-Equal $envelope.rejection_code 'canonical_values'
         }
     }
 

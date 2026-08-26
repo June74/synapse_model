@@ -58,23 +58,23 @@ Run the pilot, calibration functional, and calibration security suites. Commit o
 - Test: `calibration/tests/calibration.tests.ps1`
 - Test: `calibration/tests/calibration_security.tests.ps1`
 
-- [ ] **Step 1: Write failing reason-category tests**
+- [x] **Step 1: Write failing reason-category tests**
 
 For each malformed-envelope branch, assert the fixed `rejection_code` category and assert valid envelopes return null. Add artifact-contract assertions for nullable `envelope_rejection_code` on every attempt.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run both calibration suites in dedicated session-aware calls. Expected: the new rejection property/category assertions fail because the validator currently returns only the generic stop code.
 
-- [ ] **Step 3: Implement the bounded enum**
+- [x] **Step 3: Implement the bounded enum**
 
 Add `$script:CalibrationPilotEnvelopeRejectionCodes` with the nine approved values. Replace anonymous invalid returns with a helper that returns `valid`, `process_started`, `start_indeterminate`, `success`, `stop_code`, and `rejection_code`. Do not include rejected values.
 
-- [ ] **Step 4: Persist only the safe category**
+- [x] **Step 4: Persist only the safe category**
 
 Add nullable `envelope_rejection_code` to each attempt. Pass the invalid envelope to `Complete-CalibrationPilotFailure`, copy only its allowlisted rejection code, and extend the exact result-contract checks.
 
-- [ ] **Step 5: Add privacy regressions and run GREEN**
+- [x] **Step 5: Add privacy regressions and run GREEN**
 
 Inject prompt, canonical error, path, and credential sentinels into malformed inputs and prove none appear in the result tree. Run both calibration suites and commit with `fix: persist bounded pilot envelope diagnostics`.
 
