@@ -436,6 +436,7 @@ function Invoke-SecurityPilotFailureCase {
         Run = $true
         RunId = 'option1-live-20260826-002'
         ResultsRoot = $input.results_root
+        AllowPilotResultsRootOverrideForTest = $true
         CalibrationSetPath = $setPath
         RubricsRoot = $rubricsRoot
         CandidateInvoker = $candidate
@@ -1362,6 +1363,7 @@ Invoke-Assertion 'option 1 artifact failure after confirmed start becomes indete
         $null = Assert-Throws {
             Invoke-Calibration -Pilot -Run -RunId 'option1-live-20260826-002' `
                 -ResultsRoot $execution.input.results_root -CalibrationSetPath $setPath -RubricsRoot $rubricsRoot `
+                -AllowPilotResultsRootOverrideForTest `
                 -CandidateInvoker $resumeSpy -JudgeInvoker $resumeSpy `
                 -PilotGitInvoker { [pscustomobject]@{ clean = $true; commit = ('d' * 40) } } | Out-Null
         } 'pilot_run_collision'
@@ -1437,6 +1439,7 @@ Invoke-Assertion 'every post-launch ledger transition recovers one-shot persiste
             $null = Assert-Throws {
                 Invoke-Calibration -Pilot -Run -RunId 'option1-live-20260826-002' `
                     -ResultsRoot $execution.input.results_root -CalibrationSetPath $setPath -RubricsRoot $rubricsRoot `
+                    -AllowPilotResultsRootOverrideForTest `
                     -CandidateInvoker $resumeSpy -JudgeInvoker $resumeSpy `
                     -PilotGitInvoker { [pscustomobject]@{ clean = $true; commit = ('d' * 40) } } | Out-Null
             } 'pilot_run_collision'
@@ -1489,6 +1492,7 @@ Invoke-Assertion 'swallowed launch-guard persistence failures recover exact cand
             $null = Assert-Throws {
                 Invoke-Calibration -Pilot -Run -RunId 'option1-live-20260826-002' `
                     -ResultsRoot $execution.input.results_root -CalibrationSetPath $setPath -RubricsRoot $rubricsRoot `
+                    -AllowPilotResultsRootOverrideForTest `
                     -CandidateInvoker $resumeSpy -JudgeInvoker $resumeSpy `
                     -PilotGitInvoker { [pscustomobject]@{ clean = $true; commit = ('d' * 40) } } | Out-Null
             } 'pilot_run_collision'
@@ -1549,6 +1553,7 @@ Invoke-Assertion 'swallowed launch-guard write-then-throw recovery rebases exact
             $null = Assert-Throws {
                 Invoke-Calibration -Pilot -Run -RunId 'option1-live-20260826-002' `
                     -ResultsRoot $execution.input.results_root -CalibrationSetPath $setPath -RubricsRoot $rubricsRoot `
+                    -AllowPilotResultsRootOverrideForTest `
                     -CandidateInvoker $resumeSpy -JudgeInvoker $resumeSpy `
                     -PilotGitInvoker { [pscustomobject]@{ clean = $true; commit = ('d' * 40) } } | Out-Null
             } 'pilot_run_collision'

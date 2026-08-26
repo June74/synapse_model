@@ -363,6 +363,18 @@ function Assert-CalibrationPilotCanonicalSourcePaths {
     }
 }
 
+function Assert-CalibrationPilotCanonicalResultsRoot {
+    param([Parameter(Mandatory)][string]$ResultsRoot)
+    $trimmedValue = $ResultsRoot.TrimEnd(
+        [IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+    $normalizedValue = [IO.Path]::GetFullPath($ResultsRoot).TrimEnd(
+        [IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+    if (-not [IO.Path]::IsPathFullyQualified($ResultsRoot) -or $trimmedValue -cne $normalizedValue -or
+        $normalizedValue -cne $script:CalibrationResultsRoot) {
+        throw 'pilot_results_root_not_canonical'
+    }
+}
+
 function New-CalibrationRubricEntriesFromFiles {
     param([AllowNull()][object]$SetValue, [Parameter(Mandatory)][string]$RubricsRoot)
     $entries = @{}
@@ -3186,10 +3198,14 @@ function Invoke-CalibrationPilotRun {
         [scriptblock]$JudgeInvoker,
         [scriptblock]$LauncherResolver,
         [scriptblock]$PilotGitInvoker,
-        [scriptblock]$PilotArtifactWriter
+        [scriptblock]$PilotArtifactWriter,
+        [switch]$AllowPilotResultsRootOverrideForTest
     )
     if ($RunId -cne 'option1-live-20260826-002' -or -not (Test-CalibrationSafeLeafName $RunId)) {
         throw 'pilot_run_id_invalid'
+    }
+    if (-not $AllowPilotResultsRootOverrideForTest) {
+        Assert-CalibrationPilotCanonicalResultsRoot -ResultsRoot $ResultsRoot
     }
     if ($null -eq $PilotGitInvoker) { $PilotGitInvoker = ${function:Get-CalibrationPilotGitSnapshot} }
     $gitState = & $PilotGitInvoker
@@ -3445,6 +3461,7 @@ function Invoke-Calibration {
         [string]$LauncherLockPath = (Join-Path $script:CalibrationRoot 'pilots/option1-launchers-v1.json'),
         [string]$LauncherLockSchemaPath = (Join-Path $script:CalibrationRoot 'pilots/option1-launchers.schema.json'),
         [switch]$AllowPilotSourceOverridesForTest,
+        [switch]$AllowPilotResultsRootOverrideForTest,
         [scriptblock]$CandidateInvoker,
         [scriptblock]$PilotGitInvoker,
         [scriptblock]$PilotArtifactWriter,
@@ -3478,7 +3495,8 @@ function Invoke-Calibration {
         return Invoke-CalibrationPilotRun -RunId $RunId -ResultsRoot $ResultsRoot -SourceBundle $sourceBundle `
             -Plan $pilotPlan -CandidateInvoker $CandidateInvoker -GraderInvoker $GraderInvoker `
             -JudgeInvoker $JudgeInvoker -LauncherResolver $LauncherResolver -PilotGitInvoker $PilotGitInvoker `
-            -PilotArtifactWriter $PilotArtifactWriter
+            -PilotArtifactWriter $PilotArtifactWriter `
+            -AllowPilotResultsRootOverrideForTest:$AllowPilotResultsRootOverrideForTest
     }
     $loaded = Import-CalibrationSet -Path $CalibrationSetPath -RubricsRoot $RubricsRoot
     if (-not $loaded.valid) {

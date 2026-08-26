@@ -130,15 +130,15 @@ Prove matching fake components preserve all-role-prepare/verify-before-first-cla
 
 Change the executable live gate, active Option 1 operator command and text, exact documentation contract, and simulated-live functional and security fixtures to proposed RunId `option1-live-20260826-002`. Preserve historical specifications, plans, and incidents that record consumed RunId `option1-live-20260825-001`. Add an offline fake-only regression proving the consumed ID is rejected before Git preflight, launcher resolution or preparation, run/claim directory creation, candidate or judge invokers, artifact writers, or any result-tree write. The proposed ID is not approval to execute it.
 
-- [ ] **Step 2: Update the incident with correction evidence**
+- [x] **Step 2: Update the incident with correction evidence**
 
 Keep status contained until the composed offline seam and all suites pass. Record exact test counts, launcher-lock hash, and the fact that no provider call occurred.
 
-- [ ] **Step 3: Run all five offline suites sequentially where result roots overlap**
+- [x] **Step 3: Run all five offline suites sequentially where result roots overlap**
 
 Run the pilot suite, router suite, SQLite unit suite, calibration functional suite, and calibration security suite. Retain every continuation handle and require explicit exit code 0.
 
-- [ ] **Step 4: Run privacy and repository checks**
+- [x] **Step 4: Run privacy and repository checks**
 
 Run `git diff --check`, bounded forbidden-field scans, prompt/credential sentinel scans, and confirm no production profile or eligibility file changed.
 

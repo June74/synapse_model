@@ -2,7 +2,7 @@
 
 - **Status:** closed
 - **First observed:** 2026-08-26T16:06:19.432654Z
-- **Last observed:** 2026-08-26T16:06:19.432654Z
+- **Last observed:** 2026-08-26T16:29:13.8205439Z
 - **Phase/task:** Task 3 documentation quality-review follow-up
 - **Environment:** Windows PowerShell, isolated option1-calibration-pilot worktree
 - **Version/commit:** 8cd4178b3911185b4b370d8dd0ec40e1b87c99af

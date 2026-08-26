@@ -2,7 +2,7 @@
 
 - **Status:** closed
 - **First observed:** 2026-08-26T15:33:52.882389Z
-- **Last observed:** 2026-08-26T15:33:52.882389Z
+- **Last observed:** 2026-08-26T16:36:49.8970007Z
 - **Phase/task:** Task 3 launcher-identity specification review follow-up
 - **Environment:** Windows PowerShell 7, isolated Option 1 worktree
 - **Version/commit:** `0401d50` plus uncommitted Task 3 review fixes
@@ -50,3 +50,4 @@ The split incident-file patches applied successfully; the exact index rows were 
 ## Recurrence history
 
 - 2026-08-26T15:33:52.882389Z: First observed.
+- 2026-08-26T16:36:49.8970007Z: Task 4 ResultsRoot fixture updates repeated the fragile multi-hunk context failure when one simulated-live call site differed from the expected layout. The patch was rejected atomically, then split into exact local updates. No repository content changed from the failed patch and no provider, launcher, network request, or live calibration ran.
