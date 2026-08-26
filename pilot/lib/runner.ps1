@@ -281,17 +281,17 @@ function Test-CanonicalResponse {
             }
         }
 
-        if ($null -eq $reason -and ($Response.status -isnot [string] -or $Response.status -notin @('success', 'failure'))) {
+        if ($null -eq $reason -and ($Response.status -isnot [string] -or $Response.status -cnotin @('success', 'failure'))) {
             $reason = 'status must be exactly success or failure.'
         } elseif ($null -eq $reason -and $Response.answer -isnot [string]) {
             $reason = 'answer must be a string.'
         } elseif ($null -eq $reason -and $null -ne $Response.error -and $Response.error -isnot [string]) {
             $reason = 'error must be null or a string.'
-        } elseif ($null -eq $reason -and $Response.status -eq 'success' -and $null -ne $Response.error) {
+        } elseif ($null -eq $reason -and $Response.status -ceq 'success' -and $null -ne $Response.error) {
             $reason = 'success responses must have null error.'
-        } elseif ($null -eq $reason -and $Response.status -eq 'success' -and $Response.answer -eq '') {
+        } elseif ($null -eq $reason -and $Response.status -ceq 'success' -and $Response.answer -eq '') {
             $reason = 'success responses must have a nonempty answer.'
-        } elseif ($null -eq $reason -and $Response.status -eq 'failure' -and
+        } elseif ($null -eq $reason -and $Response.status -ceq 'failure' -and
             ($Response.answer -ne '' -or $Response.error -isnot [string] -or [string]::IsNullOrWhiteSpace($Response.error))) {
             $reason = 'failure responses must have an empty answer and a nonempty error.'
         }
@@ -1242,7 +1242,7 @@ function Protect-PilotRecordStrings {
     $structuralProperties = @('run_id', 'route_id', 'tool', 'provider', 'model', 'effort', 'status', 'exit_code', 'duration_ms')
     $safeDiagnosticCodes = @('completed', 'provider-declared failure', 'transport failure', 'parse failure', 'contract failure', 'execution failure')
     $status = if ($Record.PSObject.Properties.Name -contains 'status') { [string]$Record.status } else { 'failure' }
-    $isFailure = $status -eq 'failure'
+    $isFailure = $status -ceq 'failure'
     $isContractCompliant = ($Record.PSObject.Properties.Name -contains 'contract_compliant') -and [bool]$Record.contract_compliant
     foreach ($property in $Record.PSObject.Properties) {
         if ($structuralProperties -contains $property.Name) { continue }
@@ -1325,11 +1325,11 @@ function New-ResultRecord {
     $contractCompliant = $transportSuccess -and $null -ne $Canonical -and (Test-CanonicalResponse $Canonical).valid
     $safeDiagnosticCodes = @('completed', 'provider-declared failure', 'transport failure', 'parse failure', 'contract failure', 'execution failure')
     $safeNote = if ($safeDiagnosticCodes -contains $DiagnosticNote) { $DiagnosticNote } else { 'execution failure' }
-    if ($contractCompliant -and $Canonical.status -eq 'failure') {
+    if ($contractCompliant -and $Canonical.status -ceq 'failure') {
         $safeNote = 'provider-declared failure'
     }
-    $answer = if ($contractCompliant -and $Canonical.status -eq 'success') { '[provider answer omitted from JSONL for privacy]' } else { '' }
-    $error = if ($contractCompliant -and $Canonical.status -eq 'failure') { 'provider-declared failure' } elseif ($contractCompliant) { $null } else { $safeNote }
+    $answer = if ($contractCompliant -and $Canonical.status -ceq 'success') { '[provider answer omitted from JSONL for privacy]' } else { '' }
+    $error = if ($contractCompliant -and $Canonical.status -ceq 'failure') { 'provider-declared failure' } elseif ($contractCompliant) { $null } else { $safeNote }
 
     $record = [ordered]@{
         run_id = $RunId

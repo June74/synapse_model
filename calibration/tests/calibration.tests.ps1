@@ -1283,6 +1283,54 @@ if (Test-Path -LiteralPath $implementationPath -PathType Leaf) {
         } finally { Remove-TestCalibrationPilotLedgerRoot -Path $input.results_root }
     }
 
+    Invoke-Assertion 'native Agy adapter rejects mixed-case status values before the calibration envelope' {
+        $resolved = Get-CalibrationProfileAndCandidate -ConfigurationId 'gemini-3.7-flash-low__low'
+        $cases = @(
+            [pscustomobject]@{ status = 'Success'; answer = '4'; error = $null }
+            [pscustomobject]@{ status = 'Failure'; answer = ''; error = 'provider declined' }
+        )
+        foreach ($case in $cases) {
+            $nativeText = [ordered]@{
+                thread_id = 'fixture-thread'
+                session_id = 'fixture-session'
+                status = 'SUCCESS'
+                created_at = '2026-08-25T00:00:00Z'
+                finished_at = '2026-08-25T00:00:01Z'
+                result = $case.answer
+                structured_output = [ordered]@{
+                    status = $case.status
+                    answer = $case.answer
+                    error = $case.error
+                }
+                usage = [ordered]@{ input_tokens = 20; output_tokens = 5; thinking_tokens = 1; total_tokens = 25 }
+            } | ConvertTo-Json -Compress -Depth 10
+            $execution = Invoke-PilotCandidate -Candidate $resolved.candidate -Prompt 'mixed-case status' `
+                -RunId ("agy-mixed-status-$($case.status)") -NativeInvoker {
+                    [pscustomobject]@{
+                        exit_code = 0
+                        stdout = $nativeText
+                        stderr = ''
+                        duration_ms = 3
+                        timed_out = $false
+                        cleanup_failed = $false
+                        cleanup_status = 'not_required'
+                        process_exited = $true
+                    }
+                }
+            $envelope = Test-CalibrationPilotExecutionEnvelope -Execution $execution
+
+            Assert-True ([string]::Equals(
+                    [string]$execution.canonical.status, [string]$case.status, [StringComparison]::Ordinal))
+            Assert-Equal $execution.diagnostic_note 'contract failure'
+            Assert-Equal $execution.failure 'contract failure'
+            Assert-False $execution.record.contract_compliant
+            Assert-False $envelope.valid
+            Assert-True $envelope.process_started
+            Assert-False $envelope.start_indeterminate
+            Assert-Equal $envelope.stop_code 'provider_envelope_invalid'
+        }
+    }
+
     Invoke-Assertion 'option 1 default adapters forward the exact run id and guarded launch without native execution' {
         $input = New-TestCalibrationPilotLedgerInput
         $runId = 'option1-live-20260825-001'

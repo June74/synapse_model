@@ -765,6 +765,18 @@ Invoke-Assertion 'Test-CanonicalResponse rejects case-variant canonical property
     }
 }
 
+Invoke-Assertion 'Test-CanonicalResponse rejects case-variant canonical status values' {
+    $cases = @(
+        [pscustomobject][ordered]@{ status = 'Success'; answer = '4'; error = $null }
+        [pscustomobject][ordered]@{ status = 'Failure'; answer = ''; error = 'provider declined' }
+    )
+    foreach ($case in $cases) {
+        $validation = Test-CanonicalResponse $case
+        Assert-True (-not $validation.valid)
+        Assert-Contains $validation.reason 'status must be exactly success or failure.'
+    }
+}
+
 Invoke-Assertion 'ConvertFrom-AgyOutput preserves invalid canonical value types' {
     $agy = ConvertFrom-AgyOutput '{"status":"SUCCESS","structured_output":{"answer":4,"error":"","status":"success"}}'
     Assert-SequenceEqual @($agy.PSObject.Properties.Name) @('status', 'answer', 'error')
