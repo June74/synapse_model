@@ -2267,6 +2267,28 @@ function New-TestCalibrationLauncherFixture {
     return [pscustomobject]@{ root = $root; anchors = $anchors; paths = $paths; lock = $lock; lock_path = $lockPath }
 }
 
+function Assert-TestCalibrationDirectoryRenameBlocked {
+    param(
+        [Parameter(Mandatory)][string]$Source,
+        [Parameter(Mandatory)][string]$Destination
+    )
+    $caught = $null
+    try { [IO.Directory]::Move($Source, $Destination) }
+    catch { $caught = $_ }
+    if ($null -eq $caught) {
+        if (Test-Path -LiteralPath $Destination) {
+            [IO.Directory]::Move($Destination, $Source)
+        }
+        throw "Expected held launcher handles to block directory rename: $Source"
+    }
+    $cause = $caught.Exception
+    while ($null -ne $cause -and $cause -isnot [IO.IOException]) { $cause = $cause.InnerException }
+    Assert-True ($cause -is [IO.IOException]) `
+        "Expected IOException for held launcher directory rename, got $($caught.Exception.GetType().FullName)."
+    Assert-True (Test-Path -LiteralPath $Source -PathType Container)
+    Assert-False (Test-Path -LiteralPath $Destination)
+}
+
 Invoke-Assertion 'pilot plan binds launcher lock and schema bytes without resolving installed launchers' {
     $resolverCalls = [Collections.Generic.List[string]]::new()
     $resolver = { param($role, $lockRole) $resolverCalls.Add([string]$role.launcher); throw 'offline plan resolved a launcher' }.GetNewClosure()
@@ -2355,6 +2377,281 @@ Invoke-Assertion 'later-role launcher drift stops before every claim and provide
     } finally {
         if (Test-Path -LiteralPath $resultsRoot) { Remove-Item -LiteralPath $resultsRoot -Recurse -Force }
         if (Test-Path -LiteralPath $fixture.root) { Remove-Item -LiteralPath $fixture.root -Recurse -Force }
+    }
+}
+
+Invoke-Assertion 'prepared identity hash drift propagates source_drift through the composed runner before claim or process' {
+    $fixture = New-TestCalibrationLauncherFixture
+    $resultsRoot = New-CalibrationResultsTestRoot
+    $context = $null
+    $prepared = $null
+    try {
+        $bundle = New-CalibrationPilotSourceBundle -PilotManifestPath $pilotManifestPath `
+            -PilotManifestSchemaPath $pilotManifestSchemaPath -CalibrationSetPath $setPath -RubricsRoot $rubricsRoot `
+            -LauncherLockPath $fixture.lock_path `
+            -LauncherLockSchemaPath (Join-Path $calibrationRoot 'pilots/option1-launchers.schema.json')
+        $plan = Add-CalibrationPilotGitCommitToPlan -Plan (New-CalibrationPilotPlan -SourceBundle $bundle) -Commit ('d' * 40)
+        $resolver = {
+            param($role, $lockRole)
+            $anchor = [string]$fixture.anchors[[string]$role.launcher]
+            $componentId = [string]$lockRole.components[0].id
+            [pscustomobject][ordered]@{
+                anchor_path = $anchor
+                resolved_path = [IO.Path]::GetFullPath($fixture.paths[$componentId])
+            }
+        }.GetNewClosure()
+        $context = New-CalibrationPilotRun -ResultsRoot $resultsRoot -RunId 'prepared-hash-drift' -Plan $plan
+        Set-CalibrationPilotRunState -Context $context -State 'preflight_passed'
+        Set-CalibrationPilotRunState -Context $context -State 'running'
+        $prepared = New-CalibrationPilotPreparedLaunches -Plan $plan -SourceBundle $bundle -LauncherResolver $resolver
+        $context | Add-Member -NotePropertyName prepared_launches -NotePropertyValue $prepared
+        $prepared.roles[0].executable = [IO.Path]::GetFullPath((Join-Path $fixture.anchors.agy 'other-agy.exe'))
+        $nativeCalls = [pscustomobject]@{ count = 0 }
+        $guard = New-CalibrationPilotLaunchGuard -Context $context -Role $context.plan.roles[0]
+        $null = Assert-Throws {
+            Invoke-PilotCandidate -Candidate $bundle.roles[0].candidate -Prompt $bundle.prompt.request.request_text `
+                -LaunchGuard $guard -NativeInvoker { param($command) $nativeCalls.count++; throw 'must_not_start' }.GetNewClosure() `
+                -RunId 'prepared-hash-drift' | Out-Null
+        } 'source_drift'
+        Assert-Equal $context.result.slots_consumed.total 0
+        Assert-Equal $context.result.launcher_processes_started.total 0
+        Assert-Equal $nativeCalls.count 0
+        Assert-False (Test-Path -LiteralPath (Join-Path $context.claims_path '01-google-candidate.claim'))
+    } finally {
+        if ($null -ne $prepared) { Close-CalibrationPilotPreparedLaunches -PreparedLaunches $prepared }
+        if ($null -ne $context -and $context.is_closed -eq $false) { Close-CalibrationPilotRun -Context $context }
+        if (Test-Path -LiteralPath $resultsRoot) { Remove-Item -LiteralPath $resultsRoot -Recurse -Force }
+        if (Test-Path -LiteralPath $fixture.root) { Remove-Item -LiteralPath $fixture.root -Recurse -Force }
+    }
+}
+
+Invoke-Assertion 'claim persistence indeterminate propagates through the composed runner into existing recovery' {
+    $fixture = New-TestCalibrationLauncherFixture
+    $resultsRoot = New-CalibrationResultsTestRoot
+    $originalHook = ${function:Invoke-CalibrationPilotAfterSlotClaimHook}
+    try {
+        $resolver = {
+            param($role, $lockRole)
+            $anchor = [string]$fixture.anchors[[string]$role.launcher]
+            $componentId = [string]$lockRole.components[0].id
+            [pscustomobject][ordered]@{
+                anchor_path = $anchor
+                resolved_path = [IO.Path]::GetFullPath($fixture.paths[$componentId])
+            }
+        }.GetNewClosure()
+        Set-Item -Path Function:Invoke-CalibrationPilotAfterSlotClaimHook -Value {
+            param($Context, $Ordinal)
+            if ($Ordinal -eq 1) { throw 'forced_post_claim_persistence_failure' }
+        }
+        $nativeCalls = [pscustomobject]@{ count = 0 }
+        $observedControlFailure = [pscustomobject]@{ code = $null }
+        $candidateInvoker = {
+            param($Candidate, $Prompt, $LaunchGuard, $RunId)
+            try {
+                Invoke-PilotCandidate -Candidate $Candidate -Prompt $Prompt -LaunchGuard $LaunchGuard `
+                    -NativeInvoker { param($command) $nativeCalls.count++; throw 'must_not_start' }.GetNewClosure() `
+                    -RunId $RunId
+            } catch {
+                $observedControlFailure.code = $_.Exception.Message
+                throw
+            }
+        }.GetNewClosure()
+        $result = Invoke-Calibration -Pilot -Run -RunId 'option1-live-20260825-001' -ResultsRoot $resultsRoot `
+            -CalibrationSetPath $setPath -RubricsRoot $rubricsRoot -AllowPilotSourceOverridesForTest `
+            -LauncherLockPath $fixture.lock_path `
+            -LauncherLockSchemaPath (Join-Path $calibrationRoot 'pilots/option1-launchers.schema.json') `
+            -LauncherResolver $resolver -CandidateInvoker $candidateInvoker `
+            -PilotGitInvoker { [pscustomobject]@{ clean = $true; commit = ('e' * 40) } }
+        Assert-Equal $result.run_state 'indeterminate'
+        Assert-Equal $result.stop_reason 'artifact_persistence_failed'
+        Assert-Equal $result.slots_consumed.total 1
+        Assert-Equal $result.launcher_processes_started.total 0
+        Assert-Equal $nativeCalls.count 0
+        Assert-Equal $observedControlFailure.code 'pilot_claim_persistence_indeterminate'
+        Assert-True (Test-Path -LiteralPath (Join-Path $resultsRoot 'option1-live-20260825-001/claims/01-google-candidate.claim'))
+    } finally {
+        Set-Item -Path Function:Invoke-CalibrationPilotAfterSlotClaimHook -Value $originalHook
+        if (Test-Path -LiteralPath $resultsRoot) { Remove-Item -LiteralPath $resultsRoot -Recurse -Force }
+        if (Test-Path -LiteralPath $fixture.root) { Remove-Item -LiteralPath $fixture.root -Recurse -Force }
+    }
+}
+
+Invoke-Assertion 'Windows held launcher handles block ancestor replacement from preflight through completion and preserve ordering' {
+    $fixture = New-TestCalibrationLauncherFixture
+    $resultsRoot = New-CalibrationResultsTestRoot
+    $parentDestination = $fixture.root + '-renamed'
+    $agyDestination = $fixture.anchors.agy + '-renamed'
+    $npmDestination = $fixture.anchors.codex + '-renamed'
+    $events = [Collections.Generic.List[string]]::new()
+    try {
+        $resolver = {
+            param($role, $lockRole)
+            $events.Add("resolve:$($role.launcher)")
+            $anchor = [string]$fixture.anchors[[string]$role.launcher]
+            $componentId = [string]$lockRole.components[0].id
+            [pscustomobject][ordered]@{
+                anchor_path = $anchor
+                resolved_path = [IO.Path]::GetFullPath($fixture.paths[$componentId])
+            }
+        }.GetNewClosure()
+        $candidateInvoker = {
+            param($Candidate, $Prompt, $LaunchGuard, $RunId)
+            $events.Add('preflight-rename-probe')
+            try {
+                Assert-TestCalibrationDirectoryRenameBlocked -Source $fixture.root -Destination $parentDestination
+            } catch {
+                $events.Add(('preflight-rename-error:' + $_.Exception.Message))
+                throw
+            }
+            $events.Add('preflight-parent-blocked')
+            foreach ($path in @($fixture.paths.agy_native, $fixture.paths.codex_native, $fixture.paths.claude_native)) {
+                $null = Assert-Throws {
+                    $stream = [IO.File]::Open($path, [IO.FileMode]::Open, [IO.FileAccess]::Write, [IO.FileShare]::None)
+                    $stream.Dispose()
+                } $null
+                $events.Add(('write-blocked:' + [IO.Path]::GetFileName($path)))
+            }
+            $events.Add('all-role-prepare-verify')
+            $identity = & $LaunchGuard $Candidate (New-TestCalibrationPilotCommand -Candidate $Candidate -Prompt $Prompt)
+            $events.Add('claim:1')
+            Assert-TestCalibrationDirectoryRenameBlocked -Source $fixture.anchors.agy -Destination $agyDestination
+            $events.Add('start:1')
+            Assert-Equal $identity.executable ([IO.Path]::GetFullPath($fixture.paths.agy_native))
+            Assert-TestCalibrationDirectoryRenameBlocked -Source $fixture.root -Destination $parentDestination
+            $events.Add('candidate-complete')
+            New-TestCalibrationPilotExecution -Candidate $Candidate `
+                -Answer '{"invoice_id":"INV-1042","total":"138.50","currency":"USD"}' -RunId $RunId
+        }.GetNewClosure()
+        $graderInvoker = {
+            param($Prompt, $ResponseText, $PythonExecutor, $PythonExecutable, $PythonTimeoutMilliseconds)
+            Assert-TestCalibrationDirectoryRenameBlocked -Source $fixture.root -Destination $parentDestination
+            $events.Add('grader-complete')
+            Invoke-CalibrationDeterministicGrader -Prompt $Prompt -ResponseText $ResponseText
+        }.GetNewClosure()
+        $judgeInvoker = {
+            param($JudgeProfileId, $JudgePayload, $PromptDefinition, $LaunchGuard, $RunId)
+            $resolved = Get-CalibrationProfileAndCandidate -ConfigurationId $JudgeProfileId
+            $logical = New-TestCalibrationPilotCommand -Candidate $resolved.candidate -Prompt 'safe judge payload'
+            $identity = & $LaunchGuard $resolved.candidate $logical
+            $events.Add("claim:$($identity.ordinal)")
+            Assert-TestCalibrationDirectoryRenameBlocked -Source $fixture.anchors.codex -Destination $npmDestination
+            $events.Add("start:$($identity.ordinal)")
+            [pscustomobject]@{
+                pilot_execution = New-TestCalibrationPilotExecution -Candidate $resolved.candidate `
+                    -Answer '{"decision":"pass","rationale":"safe evidence"}' -RunId $RunId
+                decision = [pscustomobject]@{ decision = 'pass'; rationale = 'safe evidence' }
+            }
+        }.GetNewClosure()
+        $result = Invoke-Calibration -Pilot -Run -RunId 'option1-live-20260825-001' -ResultsRoot $resultsRoot `
+            -CalibrationSetPath $setPath -RubricsRoot $rubricsRoot -AllowPilotSourceOverridesForTest `
+            -LauncherLockPath $fixture.lock_path `
+            -LauncherLockSchemaPath (Join-Path $calibrationRoot 'pilots/option1-launchers.schema.json') `
+            -LauncherResolver $resolver -CandidateInvoker $candidateInvoker -JudgeInvoker $judgeInvoker `
+            -GraderInvoker $graderInvoker -PilotGitInvoker { [pscustomobject]@{ clean = $true; commit = ('f' * 40) } }
+        Assert-True ($result.run_state -ceq 'completed') `
+            "Expected completed but got state '$($result.run_state)', stop '$($result.stop_reason)', events '$(@($events) -join ',')'."
+        Assert-SequenceEqual @($events) @(
+            'resolve:agy', 'resolve:codex', 'resolve:claude', 'preflight-rename-probe', 'preflight-parent-blocked',
+            'write-blocked:agy.exe', 'write-blocked:codex.exe', 'write-blocked:claude.exe', 'all-role-prepare-verify',
+            'claim:1', 'start:1', 'candidate-complete', 'grader-complete',
+            'claim:2', 'start:2', 'claim:3', 'start:3')
+        [IO.Directory]::Move($fixture.root, $parentDestination)
+        Assert-True (Test-Path -LiteralPath $parentDestination -PathType Container)
+    } finally {
+        if (Test-Path -LiteralPath $resultsRoot) { Remove-Item -LiteralPath $resultsRoot -Recurse -Force }
+        foreach ($path in @($parentDestination, $fixture.root)) {
+            if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Recurse -Force }
+        }
+    }
+}
+
+Invoke-Assertion 'lock-derived Codex start observer ignores alternate package injection and releases handles after start failure' {
+    $fixture = New-TestCalibrationLauncherFixture
+    $resultsRoot = New-CalibrationResultsTestRoot
+    $alternateRoot = Join-Path $fixture.root 'alternate-codex-package'
+    $alternateNative = Join-Path $alternateRoot 'vendor/x86_64-pc-windows-msvc/bin/codex.exe'
+    $parentDestination = $fixture.root + '-renamed'
+    $oldPackageRoot = $env:CODEX_MANAGED_PACKAGE_ROOT
+    try {
+        $null = New-Item -ItemType Directory -Path (Split-Path -Parent $alternateNative) -Force
+        [IO.File]::WriteAllText($alternateNative, 'alternate-native-must-not-run', [Text.UTF8Encoding]::new($false))
+        $env:CODEX_MANAGED_PACKAGE_ROOT = $alternateRoot
+        $resolver = {
+            param($role, $lockRole)
+            $anchor = [string]$fixture.anchors[[string]$role.launcher]
+            $componentId = [string]$lockRole.components[0].id
+            [pscustomobject][ordered]@{
+                anchor_path = $anchor
+                resolved_path = [IO.Path]::GetFullPath($fixture.paths[$componentId])
+            }
+        }.GetNewClosure()
+        $candidateInvoker = {
+            param($Candidate, $Prompt, $LaunchGuard, $RunId)
+            $null = & $LaunchGuard $Candidate (New-TestCalibrationPilotCommand -Candidate $Candidate -Prompt $Prompt)
+            New-TestCalibrationPilotExecution -Candidate $Candidate `
+                -Answer '{"invoice_id":"INV-1042","total":"138.50","currency":"USD"}' -RunId $RunId
+        }
+        $observerState = [pscustomobject]@{ count = 0; start_calls = 0; start_error = $null; file_name = $null; package_root = $null }
+        $judgeCalls = [pscustomobject]@{ count = 0 }
+        $startInfoObserver = {
+            param($startInfo, $preparedCommand)
+            $observerState.count++
+            $observerState.file_name = [string]$startInfo.FileName
+            $observerState.package_root = [string]$startInfo.Environment.CODEX_MANAGED_PACKAGE_ROOT
+            Assert-Equal $startInfo.FileName ([IO.Path]::GetFullPath($fixture.paths.codex_native))
+            Assert-True ($startInfo.FileName -cne [IO.Path]::GetFullPath($alternateNative))
+            $expectedRoot = [IO.Path]::GetDirectoryName([IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($fixture.paths.codex_javascript)))
+            Assert-Equal $startInfo.Environment.CODEX_MANAGED_PACKAGE_ROOT $expectedRoot
+            Assert-TestCalibrationDirectoryRenameBlocked -Source $fixture.root -Destination $parentDestination
+            throw 'fake_start_failure_before_process_start'
+        }.GetNewClosure()
+        $judgeInvoker = {
+            param($JudgeProfileId, $JudgePayload, $PromptDefinition, $LaunchGuard, $RunId)
+            $judgeCalls.count++
+            $resolved = Get-CalibrationProfileAndCandidate -ConfigurationId $JudgeProfileId
+            if ($JudgeProfileId -cne 'gpt-5.6-sol__max') { throw 'second_judge_must_not_run' }
+            $logical = New-CandidateCommand -Candidate $resolved.candidate -Prompt 'safe judge payload'
+            $identity = & $LaunchGuard $resolved.candidate $logical
+            $preparedCommand = Bind-RunnerPreparedCommand -Command $logical -PreparedIdentity $identity
+            $observerState.start_calls++
+            try { Invoke-NativeCandidate -Command $preparedCommand -StartInfoObserver $startInfoObserver -PreserveRawOutput | Out-Null }
+            catch { $observerState.start_error = $_.Exception.Message }
+            Assert-Equal $observerState.start_error 'fake_start_failure_before_process_start'
+            $execution = [pscustomobject][ordered]@{
+                process_started = $false
+                process = $null
+                canonical = $null
+                failure = 'process start failed'
+                stop_code = 'process_start_failed'
+            }
+            [pscustomobject]@{ pilot_execution = $execution; decision = $null; stop_code = 'process_start_failed' }
+        }.GetNewClosure()
+        $result = Invoke-Calibration -Pilot -Run -RunId 'option1-live-20260825-001' -ResultsRoot $resultsRoot `
+            -CalibrationSetPath $setPath -RubricsRoot $rubricsRoot -AllowPilotSourceOverridesForTest `
+            -LauncherLockPath $fixture.lock_path `
+            -LauncherLockSchemaPath (Join-Path $calibrationRoot 'pilots/option1-launchers.schema.json') `
+            -LauncherResolver $resolver -CandidateInvoker $candidateInvoker -JudgeInvoker $judgeInvoker `
+            -PilotGitInvoker { [pscustomobject]@{ clean = $true; commit = ('1' * 40) } }
+        Assert-True ($result.run_state -ceq 'stopped') `
+            "Expected stopped but got '$($result.run_state)', stop '$($result.stop_reason)', observer '$($observerState.count)', start error '$($observerState.start_error)'."
+        Assert-Equal $result.stop_reason 'process_start_failed'
+        Assert-Equal $result.slots_consumed.total 2
+        Assert-True ($result.launcher_processes_started.total -eq 1) `
+            "Expected only the fake candidate execution to be counted, got '$($result.launcher_processes_started.total)'."
+        Assert-Equal $result.launcher_processes_started.provider_family.openai 0
+        Assert-True ($judgeCalls.count -eq 1) "Expected one judge call, got '$($judgeCalls.count)'."
+        Assert-True ($observerState.count -eq 1) `
+            "Expected one start observer call, got '$($observerState.count)'; start calls '$($observerState.start_calls)', error '$($observerState.start_error)'."
+        Assert-Equal $observerState.file_name ([IO.Path]::GetFullPath($fixture.paths.codex_native))
+        Assert-False $observerState.file_name.Contains($alternateRoot, [StringComparison]::OrdinalIgnoreCase)
+        [IO.Directory]::Move($fixture.root, $parentDestination)
+        Assert-True (Test-Path -LiteralPath $parentDestination -PathType Container)
+    } finally {
+        $env:CODEX_MANAGED_PACKAGE_ROOT = $oldPackageRoot
+        if (Test-Path -LiteralPath $resultsRoot) { Remove-Item -LiteralPath $resultsRoot -Recurse -Force }
+        foreach ($path in @($parentDestination, $fixture.root)) {
+            if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Recurse -Force }
+        }
     }
 }
 

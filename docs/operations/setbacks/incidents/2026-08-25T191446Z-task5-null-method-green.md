@@ -2,7 +2,7 @@
 
 - **Status:** closed
 - **First observed:** 2026-08-25T19:14:46.056444Z
-- **Last observed:** 2026-08-25T19:14:46.056444Z
+- **Last observed:** 2026-08-26T15:46:28.0658419Z
 - **Phase/task:** Option 1 Task 5 first GREEN verification
 - **Environment:** Windows PowerShell 7, isolated `codex/option1-calibration-pilot` worktree
 - **Version/commit:** `13105b3` plus uncommitted Task 5 RED/GREEN changes
@@ -54,3 +54,5 @@ The session-aware functional suite completed with exit code 0. All three Task 5 
 
 - 2026-08-25T19:14:46.056444Z: First observed.
 - 2026-08-25: Closed after the closure-state correction and complete functional GREEN run.
+- 2026-08-26T15:46:28.0658419Z: A start observer created inside an already closed injected judge scriptblock captured the dynamic module scope rather than the assertion's mutable observer object. The observer was moved to the outer assertion scope before constructing the judge closure; verification is pending.
+- 2026-08-26: Closed again after the outer-scoped observer reached the exact locked Codex start path and the full functional suite exited 0.

@@ -1803,13 +1803,16 @@ Invoke-Assertion 'Invoke-PilotCandidate rejects a prepared identity for another 
             }
         }
     }
-    $execution = Invoke-PilotCandidate -Candidate $candidate -Prompt 'wrong prepared route' `
-        -LaunchGuard { param($c, $command) $wrong }.GetNewClosure() `
-        -NativeInvoker { param($command) $nativeCalls.count++; throw 'must not start' }.GetNewClosure() `
-        -RunId 'prepared-route-mismatch'
+    $launchGuard = { param($c, $command) return $wrong }.GetNewClosure()
+    $thrownCode = $null
+    try {
+        Invoke-PilotCandidate -Candidate $candidate -Prompt 'wrong prepared route' `
+            -LaunchGuard $launchGuard `
+            -NativeInvoker { param($command) $nativeCalls.count++; throw 'must not start' }.GetNewClosure() `
+            -RunId 'prepared-route-mismatch' | Out-Null
+    } catch { $thrownCode = $_.Exception.Message }
+    Assert-Equal $thrownCode 'prepared_launcher_identity_invalid'
     Assert-Equal $nativeCalls.count 0
-    Assert-Equal $execution.diagnostic_note 'execution failure'
-    Assert-Equal $execution.failure 'execution failure'
 }
 
 Invoke-Assertion 'Invoke-NativeCandidate builds exact prepared start info without resolution or a real process start' {
@@ -1903,6 +1906,23 @@ Invoke-Assertion 'Invoke-PilotCandidate vetoes launch safely without invoking Na
     Assert-Equal $execution.canonical $null
     $serialized = $execution | ConvertTo-Json -Depth 20 -Compress
     Assert-True (-not $serialized.Contains('launch_guard_vetoed'))
+}
+
+Invoke-Assertion 'Invoke-PilotCandidate never trusts NativeInvoker control-code spoofing' {
+    $matrix = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'pilot/model_matrix.json') | ConvertFrom-Json
+    $candidate = @($matrix.candidates | Where-Object { $_.route_id -eq 'agy__gemini_3_7_flash_low__low' } | Select-Object -First 1)[0]
+    $caseIndex = 0
+    foreach ($spoofedCode in @('source_drift', 'SOURCE_DRIFT', 'pilot_claim_persistence_indeterminate')) {
+        $caseIndex++
+        $execution = Invoke-PilotCandidate -Candidate $candidate -Prompt 'native spoof prompt' `
+            -LaunchGuard { param($guardCandidate, $command) } `
+            -NativeInvoker { param($command) throw $spoofedCode }.GetNewClosure() `
+            -RunId ('native-spoof-case-' + $caseIndex)
+        Assert-Equal $execution.diagnostic_note 'execution failure'
+        Assert-Equal $execution.failure 'execution failure'
+        $serialized = $execution | ConvertTo-Json -Depth 20 -Compress
+        Assert-True (-not $serialized.Contains($spoofedCode, [StringComparison]::OrdinalIgnoreCase))
+    }
 }
 
 Invoke-Assertion 'Invoke-PilotCandidate preserves provider-declared and parse failure diagnostics' {

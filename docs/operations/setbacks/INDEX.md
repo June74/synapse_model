@@ -11,14 +11,14 @@
 | [SB-20260824-012823-apply-patch-duplicate-target](incidents/2026-08-24T012823Z-apply-patch-duplicate-target.md) | Patch request repeated one target file in multiple update blocks | closed | 2026-08-24 | 2026-08-26T14:53:12Z |
 | [SB-20260823-232717-requirements-profile-path-format-parser](incidents/2026-08-23T232717Z-requirements-profile-path-format-parser.md) | Requirements profile-path format expression caused a parser error | closed | 2026-08-23 | 2026-08-23 |
 | [SB-20260823-234012-minimal-profile-fixture-path](incidents/2026-08-23T234012Z-minimal-profile-fixture-path.md) | Assumed minimal-profile fixture filename caused a path-not-found error | closed | 2026-08-23 | 2026-08-24 |
-| [SB-20260824-031922-baseline-session-id-not-retained](incidents/2026-08-24T031922Z-baseline-session-id-not-retained.md) | Baseline test session identifier was not retained | closed | 2026-08-24 | 2026-08-26T04:30:39.5990506Z |
+| [SB-20260824-031922-baseline-session-id-not-retained](incidents/2026-08-24T031922Z-baseline-session-id-not-retained.md) | Baseline test session identifier was not retained | closed | 2026-08-24 | 2026-08-26T15:22:19.6405081Z |
 | [SB-20260824-033023-sqlite-test-connection-not-closed](incidents/2026-08-24T033023Z-sqlite-test-connection-not-closed.md) | SQLite test reader left Windows file handles open | closed | 2026-08-24 | 2026-08-24 |
 | [SB-20260824-035416-sqlite-schema-admission-atomicity](incidents/2026-08-24T035416Z-sqlite-schema-admission-atomicity.md) | SQLite schema admission was not exact or atomic | closed | 2026-08-24 | 2026-08-24 |
 | [SB-20260824-044250-sqlite-trace-quality-review](incidents/2026-08-24T044250Z-sqlite-trace-quality-review.md) | SQLite trace admission and bridge durability gaps | closed | 2026-08-24 | 2026-08-24 |
-| [SB-20260824-051403-python-alias-unavailable](incidents/2026-08-24T051403Z-python-alias-unavailable.md) | Python alias unavailable during storage baseline | closed | 2026-08-24 | 2026-08-26T14:53:12Z |
+| [SB-20260824-051403-python-alias-unavailable](incidents/2026-08-24T051403Z-python-alias-unavailable.md) | Python alias unavailable during storage baseline | closed | 2026-08-24 | 2026-08-26T15:32:58.107276Z |
 | [SB-20260824-052419-nullable-trace-id-diagnostic](incidents/2026-08-24T052419Z-nullable-trace-id-diagnostic.md) | Nullable trace ID test expected a leaf diagnostic | closed | 2026-08-24 | 2026-08-24 |
 | [SB-20260824-052700-patch-tool-call-omitted](incidents/2026-08-24T052700Z-patch-tool-call-omitted.md) | Pricing patch text was not sent to the edit tool | closed | 2026-08-24 | 2026-08-24 |
-| [SB-20260824-052823-router-test-assert-helper](incidents/2026-08-24T052823Z-router-test-assert-helper.md) | Task 8 pricing test used an unavailable assertion helper | closed | 2026-08-24 | 2026-08-24 |
+| [SB-20260824-052823-router-test-assert-helper](incidents/2026-08-24T052823Z-router-test-assert-helper.md) | Task 8 pricing test used an unavailable assertion helper | closed | 2026-08-24 | 2026-08-26T15:31:27.1651876Z |
 | [SB-20260824-154022-router-dot-source-schema-default](incidents/2026-08-24T154022Z-router-dot-source-schema-default.md) | Normalized request collapsed an empty capability array | closed | 2026-08-24 | 2026-08-24 |
 | [SB-20260824-154446-router-estimate-expectation](incidents/2026-08-24T154446Z-router-estimate-expectation.md) | Task 8 estimate assertion used historical input tokens | closed | 2026-08-24 | 2026-08-24 |
 | [SB-20260824-155022-task8-trace-token-type](incidents/2026-08-24T155022Z-task8-trace-token-type.md) | Finalized Task 8 trace used an incompatible token JSON type | closed | 2026-08-24 | 2026-08-24 |
@@ -34,7 +34,7 @@
 | [SB-20260825-184420-calibration-hook-restore-reference](incidents/2026-08-25T184420Z-calibration-hook-restore-reference.md) | Calibration hook restoration retained a live function reference | closed | 2026-08-25T18:44:20.845597Z | 2026-08-25T18:56:55Z |
 | [SB-20260825-184646-calibration-state-contract-intermittent](incidents/2026-08-25T184646Z-calibration-state-contract-intermittent.md) | Calibration state-machine assertion intermittently fails contract validation | closed | 2026-08-25T18:46:46.046228Z | 2026-08-25T18:52:00Z |
 | [SB-20260825-190440-quality-review-math-min-types](incidents/2026-08-25T190440Z-quality-review-math-min-types.md) | Quality-review line-range helper used ambiguous Math.Min types | closed | 2026-08-25T19:04:40.2918430Z | 2026-08-26T05:44:07.7706432Z |
-| [SB-20260825-191446-task5-null-method-green](incidents/2026-08-25T191446Z-task5-null-method-green.md) | Task 5 fake execution hit a null method call | closed | 2026-08-25T19:14:46.056444Z | 2026-08-25T19:14:46.056444Z |
+| [SB-20260825-191446-task5-null-method-green](incidents/2026-08-25T191446Z-task5-null-method-green.md) | Task 5 fake execution hit a null method call | closed | 2026-08-25T19:14:46.056444Z | 2026-08-26T15:46:28.0658419Z |
 | [SB-20260825-193037-task5-test-input-automatic-variable](incidents/2026-08-25T193037Z-task5-test-input-automatic-variable.md) | Task 5 boundary fake captured the PowerShell input variable | closed | 2026-08-25T19:30:37.863856Z | 2026-08-25T23:12:31.2745448Z |
 | [SB-20260825-194559-task6-first-green-failure-boundaries](incidents/2026-08-25T194559Z-task6-first-green-failure-boundaries.md) | Task 6 first GREEN failure boundaries | closed | 2026-08-25T19:45:59.724892Z | 2026-08-25T19:55:35.3677309Z |
 | [SB-20260825-195710-task6-red-fixture-cleanup](incidents/2026-08-25T195710Z-task6-red-fixture-cleanup.md) | Task 6 RED fixture left owned result roots | closed | 2026-08-25T19:57:10.373023Z | 2026-08-25T19:59:31.4342992Z |
@@ -46,12 +46,15 @@
 | [SB-20260825-235222-option1-live-provider-envelope-invalid](incidents/2026-08-25T235222Z-option1-live-provider-envelope-invalid.md) | Option 1 live candidate returned an invalid provider envelope | contained | 2026-08-25T23:52:22.2693656Z | 2026-08-26T05:00:45.1845601Z |
 | [SB-20260826-052247-task3-audit-foreach-pipeline-parser](incidents/2026-08-26T052247Z-task3-audit-foreach-pipeline-parser.md) | Launcher audit command used an invalid foreach pipeline | closed | 2026-08-26T05:22:47.6016173Z | 2026-08-26T05:22:47.6016173Z |
 | [SB-20260826-052428-task2-privacy-terminal-expectation](incidents/2026-08-26T052428Z-task2-privacy-terminal-expectation.md) | Task 2 privacy fixture expected the wrong terminal state | closed | 2026-08-26T05:24:28.365954Z | 2026-08-26T05:32:37.2947530Z |
+| [SB-20260826-153258-task3-spoof-test-self-collision](incidents/2026-08-26T153258Z-task3-spoof-test-self-collision.md) | Control-code spoof test collided with its own RunId | closed | 2026-08-26T15:32:58.107276Z | 2026-08-26T15:32:58.107276Z |
+| [SB-20260826-153352-task3-multifile-patch-context](incidents/2026-08-26T153352Z-task3-multifile-patch-context.md) | Multi-file setback patch used a stale index context | closed | 2026-08-26T15:33:52.882389Z | 2026-08-26T15:33:52.882389Z |
+| [SB-20260826-155431-task3-nested-parser-expansion](incidents/2026-08-26T155431Z-task3-nested-parser-expansion.md) | closed | 2026-08-26T15:54:31.942794Z | Task 3 follow-up verification | Nested PowerShell parser check lost variables to outer expansion |
 | SB-2026-08-19-001 | PowerShell DOCX paragraph extraction syntax error | closed | 2026-08-19 | 2026-08-19 |
 | SB-2026-08-19-002 | Current DOCX locked during full-document scan | closed | 2026-08-19 | 2026-08-19 |
-| SB-2026-08-19-003 | Skill path lookup mismatch | closed | 2026-08-19 | 2026-08-25T23:53:40.1144919Z |
+| SB-2026-08-19-003 | Skill path lookup mismatch | closed | 2026-08-19 | 2026-08-26T15:32:58.107276Z |
 | SB-2026-08-19-004 | Claude CLI smoke test did not return within timeout | contained | 2026-08-19 | 2026-08-19 |
 | SB-2026-08-19-005 | Antigravity CLI authentication unavailable in sandbox | contained | 2026-08-19 | 2026-08-19 |
-| SB-2026-08-19-006 | Git index unavailable to sandbox | contained | 2026-08-19 | 2026-08-26T05:36:11.6707579Z |
+| SB-2026-08-19-006 | Git index unavailable to sandbox | contained | 2026-08-19 | 2026-08-26T15:55:50.4240433Z |
 | SB-2026-08-19-007 | Plan review command used an invalid PowerShell parameter | contained | 2026-08-19 | 2026-08-19 |
 | SB-2026-08-19-008 | Pre-creation worktree ignore check rejected absent directory | contained | 2026-08-19 | 2026-08-24 |
 | SB-2026-08-19-009 | Existing descendant-drain test was transiently timing-sensitive | closed | 2026-08-19 | 2026-08-19 |

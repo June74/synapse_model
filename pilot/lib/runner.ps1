@@ -1641,56 +1641,82 @@ function Invoke-PilotCandidate {
     $failure = $null
     $reportedCost = $null
     $note = 'completed'
-    try {
-        $command = New-CandidateCommand -Candidate $Candidate -Prompt $Prompt
-        if ($null -ne $LaunchGuard) {
+    $command = New-CandidateCommand -Candidate $Candidate -Prompt $Prompt
+    $launchReady = $true
+    if ($null -ne $LaunchGuard) {
+        try {
             $guardResult = & $LaunchGuard $Candidate $command
             if ($guardResult -is [pscustomobject] -and
                 $guardResult.PSObject.Properties.Name -ccontains 'prepared_launcher_version') {
                 $command = Bind-RunnerPreparedCommand -Command $command -PreparedIdentity $guardResult
             }
-        }
-        $processResult = if ($null -ne $NativeInvoker) {
-            & $NativeInvoker $command
-        } else {
-            $nativeTimeoutSeconds = if ($TimeoutSeconds -ge 0) {
-                $TimeoutSeconds
-            } elseif ($Candidate.tool -in @('agy', 'claude')) {
-                120
-            } else {
-                0
+        } catch {
+            $launchControlFailure = [string]$_.Exception.Message
+            if (@(
+                    'source_drift',
+                    'pilot_claim_persistence_indeterminate',
+                    'pilot_runtime_role_mismatch',
+                    'pilot_slot_reservation_not_persisted',
+                    'pilot_slot_ordinal_invalid',
+                    'pilot_slot_run_not_running',
+                    'pilot_slot_identity_invalid',
+                    'pilot_slot_not_next',
+                    'pilot_slot_limit_reached',
+                    'pilot_slot_prior_attempt_failed',
+                    'pilot_slot_previous_incomplete',
+                    'prepared_launcher_identity_invalid',
+                    'prepared_launcher_command_invalid') -ccontains $launchControlFailure) {
+                throw $launchControlFailure
             }
-            Invoke-NativeCandidate -Command $command -TimeoutSeconds $nativeTimeoutSeconds -PreserveRawOutput
-        }
-        $reportedCost = Get-PilotReportedCost -ProcessResult $processResult
-        if (-not (Test-PilotTransportSuccess -ProcessResult $processResult)) {
-            $note = 'transport failure'
+            $note = 'execution failure'
             $failure = $note
-        } else {
-            try {
-                $providerOutput = if ($processResult.PSObject.Properties.Name -contains 'raw_stdout') {
-                    $processResult.raw_stdout
+            $launchReady = $false
+        }
+    }
+    if ($launchReady) {
+        try {
+            $processResult = if ($null -ne $NativeInvoker) {
+                & $NativeInvoker $command
+            } else {
+                $nativeTimeoutSeconds = if ($TimeoutSeconds -ge 0) {
+                    $TimeoutSeconds
+                } elseif ($Candidate.tool -in @('agy', 'claude')) {
+                    120
                 } else {
-                    $processResult.stdout
+                    0
                 }
-                $canonical = switch ($Candidate.tool) {
-                    'codex' { ConvertFrom-CodexOutput $providerOutput }
-                    'claude' { ConvertFrom-ClaudeOutput $providerOutput }
-                    'agy' { ConvertFrom-AgyOutput $providerOutput }
-                }
-                $canonicalCheck = Test-CanonicalResponse $canonical
-                if (-not $canonicalCheck.valid) {
-                    $note = 'contract failure'
+                Invoke-NativeCandidate -Command $command -TimeoutSeconds $nativeTimeoutSeconds -PreserveRawOutput
+            }
+            $reportedCost = Get-PilotReportedCost -ProcessResult $processResult
+            if (-not (Test-PilotTransportSuccess -ProcessResult $processResult)) {
+                $note = 'transport failure'
+                $failure = $note
+            } else {
+                try {
+                    $providerOutput = if ($processResult.PSObject.Properties.Name -contains 'raw_stdout') {
+                        $processResult.raw_stdout
+                    } else {
+                        $processResult.stdout
+                    }
+                    $canonical = switch ($Candidate.tool) {
+                        'codex' { ConvertFrom-CodexOutput $providerOutput }
+                        'claude' { ConvertFrom-ClaudeOutput $providerOutput }
+                        'agy' { ConvertFrom-AgyOutput $providerOutput }
+                    }
+                    $canonicalCheck = Test-CanonicalResponse $canonical
+                    if (-not $canonicalCheck.valid) {
+                        $note = 'contract failure'
+                        $failure = $note
+                    }
+                } catch {
+                    $note = 'parse failure'
                     $failure = $note
                 }
-            } catch {
-                $note = 'parse failure'
-                $failure = $note
             }
+        } catch {
+            $note = 'execution failure'
+            $failure = $note
         }
-    } catch {
-        $note = 'execution failure'
-        $failure = $note
     }
 
     $safeProcess = if ($null -eq $processResult) {

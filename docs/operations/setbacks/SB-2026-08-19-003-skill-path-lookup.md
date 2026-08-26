@@ -4,7 +4,7 @@
 - Title: Skill path lookup mismatch
 - Status: closed
 - First observed: 2026-08-19
-- Last observed: 2026-08-25T23:53:40.1144919Z
+- Last observed: 2026-08-26T15:32:58.107276Z
 - Phase/task: Task 9 live acceptance incident logging
 - Environment: Windows PowerShell, Codex desktop
 - Version/commit: Not applicable
@@ -94,3 +94,12 @@ The `scope-gate` and `setback-logger` instructions were read successfully from t
 - Correction: enumerated repository files, updated this recurrence, and created the bounded live incident manually because the repository contains no local helper script.
 - Prevention: resolve skill-owned resources against the loaded skill directory and load a function's defining module before calling it; otherwise use the documented manual incident contract.
 - Verification: the existing incident was found by exact path, the new live incident and index row were created with bounded evidence only, and no live command was repeated.
+
+### 2026-08-26 - Task 3 setback-helper location recurrence
+
+- Symptom: the first lookup again treated the setback helper's relative `scripts/` path as repository-relative.
+- Impact: one read-only lookup failed before incident creation. No product process, provider, network request, credential, prompt, or response was affected.
+- Confirmed cause: the relative helper resource was not resolved against the already loaded `setback-logger/SKILL.md` directory.
+- Correction: enumerated the skill directory, resolved its exact helper path, and invoked it through the bundled Python runtime.
+- Prevention: resolve every skill-relative resource against the directory containing the selected `SKILL.md` before filesystem access.
+- Verification: the resolved helper printed its usage and created the bounded incident successfully.

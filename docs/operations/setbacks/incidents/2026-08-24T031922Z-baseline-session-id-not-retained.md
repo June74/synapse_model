@@ -2,8 +2,8 @@
 
 - **Status:** closed
 - **First observed:** 2026-08-24T03:19:22.527505Z
-- **Last observed:** 2026-08-26T04:30:39.5990506Z
-- **Phase/task:** Task 7 documentation specification review
+- **Last observed:** 2026-08-26T15:22:19.6405081Z
+- **Phase/task:** Task 3 launcher-identity specification review follow-up
 - **Environment:** Windows PowerShell, Codex desktop managed workspace
 - **Version/commit:** First observed at `12481f6`; Task 4 recurrence at `9d35707`
 
@@ -56,6 +56,7 @@ Run the full router PowerShell suite through an execution wrapper with a 30-seco
 - 2026-08-24T05:14:03Z: Task 8 baseline wrapper again printed partial output without retaining the returned session identifier.
 - 2026-08-25T21:31:26.0453209Z: Task 7 documentation spec review repeated the 30-second wrapper/session-handle loss; a retained-handle rerun completed successfully.
 - 2026-08-26T04:30:39.5990506Z: Option 1 repair baseline repeated the output projection mistake for the functional calibration suite; the orphaned session was allowed to exit without launching a duplicate suite.
+- 2026-08-26T15:22:19.6405081Z: Task 3 review follow-up again projected output and an undefined exit code without retaining the functional suite's continuation identifier. A subsequent `Win32_Process` inventory probe was denied by the managed Windows permissions and produced no process details.
 
 ## Recurrence: Task 7 handoff serialization
 
@@ -122,3 +123,16 @@ Run the full router PowerShell suite through an execution wrapper with a 30-seco
 - **Correction:** Waited for the known functional-suite parent process to exit without terminating it; rerun the functional suite in a dedicated session-aware call and retain the full result.
 - **Prevention:** Never launch a potentially long suite inside a fresh isolate unless the complete returned object, including `session_id`, is emitted verbatim or durably stored for the next call.
 - **Verification:** The dedicated functional-suite rerun retained session `53324`, was polled to exit code 0, and reported all calibration tests passed.
+
+## Recurrence: Task 3 launcher-identity specification review follow-up
+
+- **Symptom:** The functional RED run crossed the 30-second yield boundary and the orchestration wrapper emitted partial PASS output plus an undefined exit code without retaining the continuation identifier.
+- **Impact:** The partial run is discarded as RED evidence. No product code, provider process, network request, credential, prompt, or response was affected.
+- **Confirmed cause:** The wrapper repeated output projection before preserving the full execution result and continuation identifier.
+- **Rejected hypothesis:** A follow-up `Get-CimInstance Win32_Process` probe could not establish whether the discarded session remained because the managed environment denied that inventory operation.
+- **Known exclusions:** The pilot RED run had already failed only at the newly tightened prepared-identity assertion. No launcher or provider execution was authorized or performed.
+- **Correction:** Rerun the functional RED suite with the complete execution result emitted, retain any returned session identifier, and poll it to an explicit exit code before implementation.
+- **Prevention:** Long suite calls must emit the complete command-result object; never select only output or exit code before checking `session_id`.
+- **Owner:** Codex.
+- **Next diagnostic step:** Complete the corrected session-aware functional RED run, then close this recurrence with its observed result.
+- **Verification:** The corrected functional RED run retained session `11008`, was polled to exit code 1, and reported the intended prepared-hash and claim-control failures plus two new fixture diagnostics.

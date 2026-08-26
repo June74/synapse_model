@@ -2523,7 +2523,8 @@ function Complete-CalibrationPilotFailure {
         } else {
             $next.attempts[$index].state = 'failed'
         }
-        if ($null -ne $Execution -and $null -ne $ExecutionEnvelope) {
+        if ($null -ne $Execution -and $null -ne $ExecutionEnvelope -and
+            [bool]$ExecutionEnvelope.valid -and [bool]$ExecutionEnvelope.process_started) {
             Set-CalibrationPilotAttemptExecutionEvidence -Attempt $next.attempts[$index] `
                 -Execution $Execution -Envelope $ExecutionEnvelope -ContractFailed:$ContractFailed
         }
