@@ -40,6 +40,7 @@
 | [SB-20260825-210716-task6-post-launch-ledger-recovery](incidents/2026-08-25T210716Z-task6-post-launch-ledger-recovery.md) | Post-launch ledger failure escaped durable recovery | closed | 2026-08-25T21:07:16.6369573Z | 2026-08-25T21:11:34.0598216Z |
 | [SB-20260825-212139-task7-live-runid-plan-mismatch](incidents/2026-08-25T212139Z-task7-live-runid-plan-mismatch.md) | Task 7 live RunId disagreed with frozen acceptance packet | closed | 2026-08-25T21:21:39.286903Z | 2026-08-25T21:25:03.8356342Z |
 | [SB-20260825-235222-option1-live-provider-envelope-invalid](incidents/2026-08-25T235222Z-option1-live-provider-envelope-invalid.md) | Option 1 live candidate returned an invalid provider envelope | contained | 2026-08-25T23:52:22.2693656Z | 2026-08-26T05:00:45.1845601Z |
+| [SB-20260826-052247-task3-audit-foreach-pipeline-parser](incidents/2026-08-26T052247Z-task3-audit-foreach-pipeline-parser.md) | Launcher audit command used an invalid foreach pipeline | closed | 2026-08-26T05:22:47.6016173Z | 2026-08-26T05:22:47.6016173Z |
 | [SB-20260826-052428-task2-privacy-terminal-expectation](incidents/2026-08-26T052428Z-task2-privacy-terminal-expectation.md) | Task 2 privacy fixture expected the wrong terminal state | closed | 2026-08-26T05:24:28.365954Z | 2026-08-26T05:32:37.2947530Z |
 | SB-2026-08-19-001 | PowerShell DOCX paragraph extraction syntax error | closed | 2026-08-19 | 2026-08-19 |
 | SB-2026-08-19-002 | Current DOCX locked during full-document scan | closed | 2026-08-19 | 2026-08-19 |

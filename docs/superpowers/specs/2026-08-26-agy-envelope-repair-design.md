@@ -43,15 +43,14 @@ Each attempt artifact adds nullable `envelope_rejection_code`. It is populated o
 
 ## Launcher identity lock
 
-Future live execution must be bound to a reviewed `calibration/pilots/option1-launchers-v1.json` file. Its SHA-256 is included in the immutable pilot plan's source hashes. Each role lists the exact file components needed to identify the launcher: the direct executable for Agy, and the PowerShell shim, effective PowerShell host, and implementation entrypoint for shim-backed Codex and Claude launchers.
+Future live execution must be bound to a reviewed `calibration/pilots/option1-launchers-v1.json` file. Its SHA-256 is included in the immutable pilot plan's source hashes. Each role lists the complete file chain needed to identify the launcher: the direct executable for Agy; the reviewed PowerShell shim, effective Node host, JavaScript entrypoint, and platform-native executable for Codex; and the reviewed PowerShell shim plus native executable for Claude. The checked-in lock contains deterministic locators and hashes, never user-specific absolute paths.
 
 The offline `-Pilot` plan validates the lock's schema and source hash but never resolves or starts installed launchers. `-Pilot -Run` resolves and hashes the declared components before reserving a slot. A mismatch or unverifiable component stops with `source_drift`, zero slot claims, and zero provider calls.
 
-The resolved files are opened read-only without write/delete sharing from final verification through `Process.Start`, preventing replacement during the launch boundary on Windows. The same prepared command is executed; it is not resolved a second time. No `--version`, updater, model, or provider command is run as part of identity checking.
+The installed shim source is verified, but the prepared Codex and Claude commands invoke their reviewed effective entrypoints directly. This removes the Codex shim's unprotectable alternate adjacent-Node branch while preserving the already constructed provider arguments. Every existing component is opened read-only without write/delete sharing before hashing, reparse components are rejected, and those handles stay open through the complete process lifetime. The same prepared command is executed once; it is not resolved a second time. No `--version`, updater, model, or provider command is run as part of identity checking.
 
 ## Test and safety requirements
 
 All repair work is test-first and offline. Required regressions cover reordered success, reordered provider failure, invalid type preservation, unexpected-property rejection, provider-failure evidence, every bounded rejection category, launcher mismatch before claim, matching prepared-launch ordering, and privacy scans.
 
 The five existing offline suites must pass before a new acceptance packet is prepared. The consumed RunId `option1-live-20260825-001` is never reused. A new live command requires a new reviewed commit, new RunId, new immutable hashes, and separate explicit approval.
-

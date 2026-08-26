@@ -177,3 +177,13 @@
 - **Prevention:** Continue treating this worktree's staging and commit operations as requiring approved Git-metadata access.
 - **Related verification:** The functional calibration suite passed 54/54 assertions, the security suite passed 40/40 assertions, the production script parsed without error, and `git diff --check` passed before staging.
 - **Selective-staging note:** Interactive hunk editing was unavailable because the managed terminal had no editor, and an attempted stdin patch could not signal end-of-file through the pseudo-terminal. Both attempts were aborted without changing the index. An exact one-row patch file was then applied directly to the index, and the temporary patch file was removed.
+
+## Recurrence: 2026-08-26, launcher identity design refinement
+
+- **Phase/task:** Agy envelope repair Task 3 design refinement and audit setback commit.
+- **Symptom:** Scoped staging could not create `.git/worktrees/option1-calibration-pilot/index.lock`; Git returned permission denied.
+- **Confirmed cause:** The worktree files are writable, while Git metadata remains outside the managed write boundary under the parent repository `.git` directory.
+- **Impact:** No file was staged and no commit was created by the failed command. The design, plan, and closed audit-setback files remain intact; no launcher, provider, network request, or live calibration ran.
+- **Correction:** Retry only the bounded documentation staging and commit through approved Git-metadata access.
+- **Prevention:** Continue treating this worktree's index and commit operations as requiring approved Git-metadata access.
+- **Related verification:** The scoped documentation diff passed `git diff --check` before the failed staging attempt.
