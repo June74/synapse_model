@@ -406,7 +406,7 @@ function Import-CalibrationSet {
     )
     try {
         $setText = Get-Content -Raw -LiteralPath $Path -ErrorAction Stop
-        $set = $setText | ConvertFrom-Json -Depth 100 -ErrorAction Stop
+        $set = $setText | ConvertFrom-Json -Depth 100 -DateKind String -ErrorAction Stop
     } catch {
         return [pscustomobject]@{ valid = $false; set = $null; errors = @('calibration_set_json_invalid') }
     }
@@ -682,7 +682,7 @@ function Read-CalibrationPilotJsonSnapshot {
             $duplicatePath = @(Find-RouterDuplicateJsonPropertyPath -Element $document.RootElement)
             if ($duplicatePath.Count -gt 0) { throw 'Duplicate JSON property names are not allowed.' }
         } finally { $document.Dispose() }
-        $value = $text | ConvertFrom-Json -Depth 100 -ErrorAction Stop
+        $value = $text | ConvertFrom-Json -Depth 100 -DateKind String -ErrorAction Stop
         if ($null -eq $value) { throw 'JSON document is null.' }
         return [pscustomobject][ordered]@{
             path = [IO.Path]::GetFullPath($Path)

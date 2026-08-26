@@ -45,7 +45,7 @@ function Get-CalibrationJsonPayload {
         } finally {
             $document.Dispose()
         }
-        $value = $trimmed | ConvertFrom-Json -Depth 100 -NoEnumerate -ErrorAction Stop
+        $value = $trimmed | ConvertFrom-Json -Depth 100 -NoEnumerate -DateKind String -ErrorAction Stop
         if ($null -eq $value) { throw 'null is not an extraction result' }
         return [pscustomobject]@{ valid = $true; value = $value }
     } catch {

@@ -563,6 +563,13 @@ if (Test-Path -LiteralPath $implementationPath -PathType Leaf) {
         }
     }
 
+    Invoke-Assertion 'calibration set importer preserves ISO-8601 exact-field values as strings' {
+        $prompt = @((Import-CalibrationSet -Path $setPath -RubricsRoot $rubricsRoot).set.prompts |
+            Where-Object { $_.id -ceq 'extraction-high-engineering-v1' })[0]
+        Assert-True ($prompt.grading.deterministic_grader.expected[0].timestamp_utc -is [string]) `
+            'Import-CalibrationSet must preserve timestamp_utc as System.String.'
+    }
+
     Invoke-Assertion 'objective prompt families declare deterministic graders appropriate to their task' {
         $set = (Import-CalibrationSet -Path $setPath -RubricsRoot $rubricsRoot).set
         foreach ($prompt in @($set.prompts | Where-Object { $_.request.task_type -ceq 'coding' })) {
@@ -721,6 +728,15 @@ if (Test-Path -LiteralPath $implementationPath -PathType Leaf) {
             Assert-True ($source.bytes -is [byte[]]) 'Captured profile and rubric sources must retain original bytes.'
             Assert-Equal ([Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($source.bytes)).ToLowerInvariant()) $source.sha256
         }
+    }
+
+    Invoke-Assertion 'pilot source bundle preserves ISO-8601 exact-field values as strings' {
+        $bundle = New-CalibrationPilotSourceBundle -PilotManifestPath $pilotManifestPath -PilotManifestSchemaPath $pilotManifestSchemaPath `
+            -CalibrationSetPath $setPath -RubricsRoot $rubricsRoot
+        $prompt = @($bundle.sources.calibration_set.value.prompts |
+            Where-Object { $_.id -ceq 'extraction-high-engineering-v1' })[0]
+        Assert-True ($prompt.grading.deterministic_grader.expected[0].timestamp_utc -is [string]) `
+            'New-CalibrationPilotSourceBundle must preserve timestamp_utc as System.String.'
     }
 
     Invoke-Assertion 'pilot admission binds its exact ordered judges to the google calibration pair' {
@@ -2011,6 +2027,15 @@ and
 '@
         Assert-Equal $ambiguous.outcome 'review_required'
         Assert-Equal $ambiguous.reason_code 'malformed_output'
+    }
+
+    Invoke-Assertion 'exact-fields grader accepts serialized expected ISO-8601 string values' {
+        $prompt = @((Import-CalibrationSet -Path $setPath -RubricsRoot $rubricsRoot).set.prompts |
+            Where-Object { $_.id -ceq 'extraction-high-engineering-v1' })[0]
+        $responseText = $prompt.grading.deterministic_grader.expected | ConvertTo-Json -Depth 20 -Compress
+        $result = Invoke-CalibrationDeterministicGrader -Prompt $prompt -ResponseText $responseText
+        Assert-Equal $result.outcome 'pass'
+        Assert-Equal @($result.checks | Where-Object { -not $_.passed }).Count 0
     }
 
     Invoke-Assertion 'verified-answer and summary graders normalize evidence and record every check' {
