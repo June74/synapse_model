@@ -2,10 +2,10 @@
 
 - **Status:** closed
 - **First observed:** 2026-08-24T03:19:22.527505Z
-- **Last observed:** 2026-08-26T15:22:19.6405081Z
-- **Phase/task:** Task 3 launcher-identity specification review follow-up
+- **Last observed:** 2026-08-26T18:35:43.5125472Z
+- **Phase/task:** Calibration JSON repair final offline verification
 - **Environment:** Windows PowerShell, Codex desktop managed workspace
-- **Version/commit:** First observed at `12481f6`; Task 4 recurrence at `9d35707`
+- **Version/commit:** First observed at `12481f6`; calibration JSON repair recurrence at `f25a793`
 
 ## Symptom
 
@@ -57,6 +57,7 @@ Run the full router PowerShell suite through an execution wrapper with a 30-seco
 - 2026-08-25T21:31:26.0453209Z: Task 7 documentation spec review repeated the 30-second wrapper/session-handle loss; a retained-handle rerun completed successfully.
 - 2026-08-26T04:30:39.5990506Z: Option 1 repair baseline repeated the output projection mistake for the functional calibration suite; the orphaned session was allowed to exit without launching a duplicate suite.
 - 2026-08-26T15:22:19.6405081Z: Task 3 review follow-up again projected output and an undefined exit code without retaining the functional suite's continuation identifier. A subsequent `Win32_Process` inventory probe was denied by the managed Windows permissions and produced no process details.
+- 2026-08-26T18:35:43.5125472Z: The calibration JSON repair security gate again discarded a continuation identifier, and a second offline security run was started before completion of the first could be observed. The tracked rerun completed with exit code 0 and 42 passing assertions; the five-suite acceptance sequence remained paused until this recurrence was recorded.
 
 ## Recurrence: Task 7 handoff serialization
 
@@ -148,3 +149,17 @@ Run the full router PowerShell suite through an execution wrapper with a 30-seco
 - **Owner:** Codex.
 - **Next diagnostic step:** None for the wrapper recurrence; continue the remaining offline final suites.
 - **Verification:** The corrected direct unittest run completed with exit code 0: 53 tests ran and reported `OK`.
+
+## Recurrence: Calibration JSON repair security gate
+
+- **Symptom:** The first focused calibration-security invocation crossed the 30-second yield boundary and its wrapper did not retain the continuation identifier. A second invocation was started with correct session tracking before the first invocation's completion had been observed.
+- **Impact:** The first partial stream is discarded as acceptance evidence, and the required sequential five-suite gate was paused. The overlap was limited to duplicate offline security verification; no source or immutable live result was intentionally changed.
+- **Confirmed cause:** The command wrapper again projected only output, losing the long-running command result's continuation identifier; the rerun began before that uncertainty was contained.
+- **Hypotheses:** The first invocation may still have been completing when the tracked rerun started.
+- **Rejected hypotheses:** The retained rerun did not show a product failure; it completed with exit code 0 and 42 passing assertions.
+- **Known exclusions:** No provider, native launcher, network request, credential, prompt, response, calibration `-Run` operation, or paid/local model execution occurred.
+- **Correction:** Paused before the five-suite sequence, discarded the first partial stream, retained and polled the second invocation to an explicit exit code, and recorded this recurrence before resuming.
+- **Prevention:** Every long-running suite call must emit the complete execution result object and be polled by its returned session identifier. Never start a replacement run while the prior run's completion is unobserved.
+- **Owner:** Codex.
+- **Next diagnostic step:** Run the required five suites as separate, strictly sequential, session-aware commands and accept only explicit exit codes.
+- **Verification:** The tracked focused security rerun exited 0 with 42 passing assertions and `All calibration security tests passed.` Final containment will also be checked by the last sequential security suite in the acceptance gate.
