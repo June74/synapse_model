@@ -1961,17 +1961,39 @@ if (Test-Path -LiteralPath $implementationPath -PathType Leaf) {
     Invoke-Assertion 'exact-fields grader accepts one exact JSON value and rejects ambiguity shape drift and malformed output' {
         $prompt = @((Import-CalibrationSet -Path $setPath -RubricsRoot $rubricsRoot).set.prompts |
             Where-Object { $_.id -ceq 'extraction-low-general-v1' })[0]
-        $exact = '{"event":"Robotics club demo","date":"2026-09-14","room":"Room B12"}'
-        $pass = Invoke-CalibrationDeterministicGrader -Prompt $prompt -ResponseText $exact
+        $directJson = '{"event":"Robotics club demo","date":"2026-09-14","room":"Room B12"}'
+        $pass = Invoke-CalibrationDeterministicGrader -Prompt $prompt -ResponseText " `r`n$directJson`r`n "
         Assert-Equal $pass.outcome 'pass'
         Assert-Equal @($pass.checks | Where-Object { -not $_.passed }).Count 0
 
-        $fenced = Invoke-CalibrationDeterministicGrader -Prompt $prompt -ResponseText @'
+        $fencedJson = @'
 ```json
 {"event":"Robotics club demo","date":"2026-09-14","room":"Room B12"}
 ```
 '@
-        Assert-Equal $fenced.outcome 'pass'
+        $uppercaseFencedJson = @'
+```JSON
+{"event":"Robotics club demo","date":"2026-09-14","room":"Room B12"}
+```
+'@
+        $unlabeledFencedJson = @'
+```
+{"event":"Robotics club demo","date":"2026-09-14","room":"Room B12"}
+```
+'@
+        $leadingProseJson = "Here is the requested JSON:`n$directJson"
+        foreach ($malformedCase in @(
+            [pscustomobject]@{ name = 'fenced json'; response = $fencedJson },
+            [pscustomobject]@{ name = 'uppercase fenced JSON'; response = $uppercaseFencedJson },
+            [pscustomobject]@{ name = 'unlabeled fenced JSON'; response = $unlabeledFencedJson },
+            [pscustomobject]@{ name = 'leading explanatory prose'; response = $leadingProseJson }
+        )) {
+            $malformed = Invoke-CalibrationDeterministicGrader -Prompt $prompt -ResponseText $malformedCase.response
+            Assert-True ($malformed.outcome -ceq 'review_required') `
+                "$($malformedCase.name) must require review, but got '$($malformed.outcome)'."
+            Assert-True ($malformed.reason_code -ceq 'malformed_output') `
+                "$($malformedCase.name) must report malformed_output, but got '$($malformed.reason_code)'."
+        }
 
         $extra = Invoke-CalibrationDeterministicGrader -Prompt $prompt `
             -ResponseText '{"event":"Robotics club demo","date":"2026-09-14","room":"Room B12","extra":true}'
@@ -2263,6 +2285,11 @@ def sum_even(values):
     }
 
     Invoke-Assertion 'operator documentation freezes the option 1 three-launch safety contract' {
+        $extractionRubric = Get-Content -Raw -LiteralPath (Join-Path $rubricsRoot 'extraction-v1.json') |
+            ConvertFrom-Json -Depth 100
+        $expectedExtractionCriterion = 'After trimming surrounding whitespace, the complete output parses directly as the requested JSON value; Markdown fences and explanatory prose fail this criterion.'
+        Assert-Equal ([string]$extractionRubric.criteria[0]) $expectedExtractionCriterion
+
         $readmePath = Join-Path $projectRoot 'router/README.md'
         $readme = [IO.File]::ReadAllText($readmePath).Replace("`r`n", "`n")
         $heading = '## Option 1 three-launch calibration pilot'

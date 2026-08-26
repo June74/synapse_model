@@ -2,7 +2,7 @@
   "id": "extraction",
   "version": "1.0.0",
   "criteria": [
-    "The output is valid JSON with exactly the requested fields.",
+    "After trimming surrounding whitespace, the complete output parses directly as the requested JSON value; Markdown fences and explanatory prose fail this criterion.",
     "Every extracted value matches the supplied text.",
     "No unsupported field or value is added."
   ]
