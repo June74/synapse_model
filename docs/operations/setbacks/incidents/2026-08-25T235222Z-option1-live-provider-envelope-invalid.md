@@ -1,8 +1,8 @@
 # SB-20260825-235222-option1-live-provider-envelope-invalid: Option 1 live candidate returned an invalid provider envelope
 
-- **Status:** contained
+- **Status:** closed
 - **First observed:** 2026-08-25T23:52:22.2693656Z
-- **Last observed:** 2026-08-26T05:00:45.1845601Z
+- **Last observed:** 2026-08-26T16:27:45.8753958Z
 - **Phase/task:** Task 9 approved live acceptance
 - **Environment:** Windows PowerShell, isolated Option 1 worktree
 - **Version/commit:** `98df9e955e51654c5e927229753901a585715e33`
@@ -53,14 +53,16 @@ Run the exact approved command once from the clean approved commit with RunId `o
 
 ## Correction and prevention
 
-- **Correction:** Contained the run at its terminal stopped state and prohibited reuse or retry of the approved RunId.
-- **Prevention:** Before any new live packet, define one canonical response contract shared by the adapter and envelope, cover property-order and provider-declared-failure cases in the composed offline seam, and pin or preflight the launcher binary identity. Add bounded rejection-reason diagnostics that record only a safe field/category code, never raw provider data.
+- **Correction:** Contained the original run at its terminal stopped state, prohibited reuse or retry of its RunId, aligned the Agy adapter and pilot envelope on one exact canonical contract, and rotated the production gate to the proposed but unapproved RunId `option1-live-20260826-002`.
+- **Prevention:** The composed seam now covers property order, exact property-name casing, exact status casing, provider-declared failure, malformed envelopes, and semantic conflicts. Rejections persist only one of nine allowlisted category codes: `execution_shape`, `start_state`, `failure_metadata`, `process_shape`, `process_values`, `usage`, `canonical_shape`, `canonical_values`, or `semantic_conflict`. A reviewed launcher lock and schema bind the exact Agy, Codex, and Claude component identities; the live preflight must verify and hold all identities before any slot claim or invoker call, and drift stops as `source_drift` with zero claims.
 - **Owner:** Codex.
-- **Next diagnostic step:** Choose and implement the shared canonical-response semantics, then verify the composed Agy-adapter-to-envelope seam offline. Any correction still requires a new reviewed commit, new RunId, revised acceptance packet, and new explicit approval before another provider call.
+- **Next diagnostic step:** None for the offline repair. A future live acceptance attempt still requires a new reviewed clean commit, the new RunId, a revised exact acceptance packet, and separate explicit approval before any provider call.
 
 ## Verification and related work
 
 The run directory contains only `.run.claim`, the exact candidate claim, `plan.json`, and `result.json`. Privacy scans passed, no `agy` process remained visible, tracked files were unchanged before incident logging, and all quality-promotion flags remain false.
+
+The offline repair through implementation commit `48b09778bdd04dd815bc033549d9b65375dbe802` passed the final five-suite gate: Pilot 127 assertions with one documented privilege-only symbolic-link skip, Router 355 assertions, SQLite 53 tests, Calibration 64 assertions, and Calibration Security 42 assertions, all with exit code 0. The standalone pilot plan also returned `provider_calls=0`, provider-side requests unobservable, and every profile-promotion, profile-mutation, and production-eligibility flag false. Its canonical plan SHA-256 is `bafd827051db7fa05ec15a77a43e5b24936b0466a494394c0c3e3d8d972803e3`; launcher lock SHA-256 is `aaeb23cdc7c55617f563359e2d7ab184157c9f551bb02a41bc201fc1f608b419`; launcher schema SHA-256 is `cc6f5248724dd53fa50babcf3c77d67c53adbb6a7f180c28cf7f98186af2df20`. No provider, native launcher, network, live calibration, quality-profile, eligibility, or production-routing mutation was used to close the incident. This closes only the offline repair; live acceptance remains unproven.
 
 ## Recurrence history
 
@@ -69,3 +71,4 @@ The run directory contains only `.run.claim`, the exact candidate claim, `plan.j
 - 2026-08-26T00:04:04.9658578Z: Offline composition tests confirmed the adapter/envelope contract inconsistency and rejected ordinary parse/nonzero-exit explanations; read-only launcher metadata confirmed replacement during the live run window.
 - 2026-08-26T04:55:07.0323082Z: Follow-up spec review found that the repaired exact-three gate and validator still used PowerShell's case-insensitive membership operators, allowing `Status`, `Answer`, or `Error` variants to satisfy the canonical shape. Focused RED returned exit code 1 at the validator assertion, while the adapter preservation assertion unexpectedly passed because the shared sequence helper also compares strings case-insensitively. The test issue was contained by requiring ordinal property-name comparisons in this regression before production changes. A subsequent bounded incident search included one unsupported wildcard path argument; it changed no files and printed no sensitive values. No launcher, provider, network, live calibration, or consumed RunId was used.
 - 2026-08-26T05:00:45.1845601Z: The corrected RED failed only the adapter preservation and validator rejection assertions. Case-sensitive exact-property membership then made all three offline suites GREEN: pilot 120 assertions with one privilege-only skip, calibration functional 52 assertions, and calibration security 39 assertions, all at exit code 0. Exact lowercase reordered names remain accepted, while `Status`, `Answer`, and `Error` variants remain unnormalized and are rejected. The incident remains contained pending the broader repair tasks and a separately authorized future acceptance packet.
+- 2026-08-26T16:27:45.8753958Z: Closed after the complete offline repair passed all five final suites, the dry-run plan reported zero provider calls and no mutations, the consumed RunId was proven to fail before Git preflight, launcher preparation, claims, invokers, and writes, and the proposed replacement RunId remained approval-gated. No live acceptance attempt occurred.
