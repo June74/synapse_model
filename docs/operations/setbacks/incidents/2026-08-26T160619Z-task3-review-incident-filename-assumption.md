@@ -49,3 +49,4 @@ The canonical incident was read and updated with the requested recurrence metada
 ## Recurrence history
 
 - 2026-08-26T16:06:19.432654Z: First observed.
+- 2026-08-26T16:29:13.8205439Z: Recurred during final read-only scope verification when a command assumed the active operator README was `calibration/README.md`; `rg --files -g README.md` immediately resolved the checked-in path as `router/README.md`, and the corrected search confirmed the proposed RunId text. The failed lookup changed no state and involved no provider, launcher, network, or live calibration operation.

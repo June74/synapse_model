@@ -49,7 +49,7 @@
 | [SB-20260826-153258-task3-spoof-test-self-collision](incidents/2026-08-26T153258Z-task3-spoof-test-self-collision.md) | Control-code spoof test collided with its own RunId | closed | 2026-08-26T15:32:58.107276Z | 2026-08-26T15:32:58.107276Z |
 | [SB-20260826-153352-task3-multifile-patch-context](incidents/2026-08-26T153352Z-task3-multifile-patch-context.md) | Multi-file setback patch used a stale index context | closed | 2026-08-26T15:33:52.882389Z | 2026-08-26T15:33:52.882389Z |
 | [SB-20260826-155431-task3-nested-parser-expansion](incidents/2026-08-26T155431Z-task3-nested-parser-expansion.md) | Nested PowerShell parser check lost variables to outer expansion | closed | 2026-08-26T15:54:31.942794Z | 2026-08-26T15:54:31.942794Z |
-| [SB-20260826-160619-task3-review-incident-filename-assumption](incidents/2026-08-26T160619Z-task3-review-incident-filename-assumption.md) | Quality-review recurrence lookup used a shorthand incident filename | closed | 2026-08-26T16:06:19.432654Z | 2026-08-26T16:06:19.432654Z |
+| [SB-20260826-160619-task3-review-incident-filename-assumption](incidents/2026-08-26T160619Z-task3-review-incident-filename-assumption.md) | Quality-review recurrence lookup used a shorthand incident filename | closed | 2026-08-26T16:06:19.432654Z | 2026-08-26T16:29:13.8205439Z |
 | SB-2026-08-19-001 | PowerShell DOCX paragraph extraction syntax error | closed | 2026-08-19 | 2026-08-19 |
 | SB-2026-08-19-002 | Current DOCX locked during full-document scan | closed | 2026-08-19 | 2026-08-19 |
 | SB-2026-08-19-003 | Skill path lookup mismatch | closed | 2026-08-19 | 2026-08-26T15:32:58.107276Z |
