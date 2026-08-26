@@ -2,7 +2,7 @@
 
 - **Status:** closed
 - **First observed:** 2026-08-25T19:04:40.2918430Z
-- **Last observed:** 2026-08-25T19:04:40.2918430Z
+- **Last observed:** 2026-08-26T05:44:07.7706432Z
 - **Phase/task:** Task 4 final code-quality review
 - **Environment:** Windows PowerShell, Codex desktop managed workspace
 - **Version/commit:** `09276d4`
@@ -51,3 +51,4 @@ The corrected inspection completed, and the independent Task 4 quality review re
 ## Recurrence history
 
 - 2026-08-25T19:04:40.2918430Z: First observed, corrected, verified, and closed.
+- 2026-08-26T05:44:07.7706432Z: Task 3 refined-design review repeated the ambiguous `[Math]::Min` call during a read-only range inspection; the reviewer switched to corrected narrow reads and continued. No state changed and no launcher, provider, network, or live calibration ran.

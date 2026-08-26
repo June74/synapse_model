@@ -2,7 +2,7 @@
 
 - **Status:** closed
 - **First observed:** 2026-08-25T20:23:24.5926183Z
-- **Last observed:** 2026-08-25T20:26:10.4121215Z
+- **Last observed:** 2026-08-26T05:48:14.2727492Z
 - **Phase/task:** Option 1 Task 6 spec-review final verification
 - **Environment:** Windows PowerShell, isolated Option 1 calibration worktree
 - **Version/commit:** Task 6 spec-review fix worktree before commit
@@ -54,3 +54,4 @@ The sequential functional suite passed 47/47 assertions and the sequential secur
 
 - 2026-08-25T20:23:24.5926183Z: First observed and contained.
 - 2026-08-25T20:26:10.4121215Z: Closed after both sequential suites exited 0 and owned fixture cleanup was verified.
+- 2026-08-26T05:48:14.2727492Z: Task 2 code-quality review initially ran the functional and security suites concurrently and repeated the shared-result-root collision. The reviewer discarded that evidence, reran sequentially, and observed exit code 0 for both suites. No repository edit, launcher, provider, network request, or live calibration occurred.

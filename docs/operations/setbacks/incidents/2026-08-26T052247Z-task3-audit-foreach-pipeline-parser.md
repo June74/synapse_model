@@ -46,4 +46,4 @@ Construct a PowerShell command that attempts to use a `foreach` language stateme
 
 ## Verification and related work
 
-The corrected audit established that the reviewed Codex launcher identity must cover `pwsh.exe`, `codex.ps1`, `node.exe`, `codex.js`, and the platform-native `codex.exe` before Task 3 implementation.
+The corrected audit initially established the current installed chain: `pwsh.exe`, `codex.ps1`, `node.exe`, `codex.js`, and the platform-native `codex.exe`. Independent design review then found that pinning this dynamic chain was still insufficient because `codex.js` resolves its native package at runtime. The superseding Task 3 design verifies the shim, JavaScript entrypoint, platform-package manifest, and native executable as provenance, then runs the locked native executable directly. Because `pwsh.exe` and `node.exe` are no longer executed, they are deliberately omitted from the final lock; the direct path reproduces the reviewed managed-package environment and uses the runner's existing process-tree cleanup.
