@@ -1205,6 +1205,84 @@ if (Test-Path -LiteralPath $implementationPath -PathType Leaf) {
         } finally { Remove-TestCalibrationPilotLedgerRoot -Path $execution.input.results_root }
     }
 
+    Invoke-Assertion 'option 1 native Agy provider-declared failure retains evidence and launches no judges' {
+        $input = New-TestCalibrationPilotLedgerInput
+        $calls = [pscustomobject]@{ candidate = 0; native = 0; grader = 0; judge = 0; execution = $null }
+        $nativeText = [ordered]@{
+            thread_id = 'fixture-thread'
+            session_id = 'fixture-session'
+            status = 'SUCCESS'
+            created_at = '2026-08-25T00:00:00Z'
+            finished_at = '2026-08-25T00:00:01Z'
+            result = ''
+            structured_output = [ordered]@{ answer = ''; error = 'provider declined'; status = 'failure' }
+            usage = [ordered]@{ input_tokens = 160; output_tokens = 57; thinking_tokens = 13; total_tokens = 230 }
+        } | ConvertTo-Json -Compress -Depth 10
+        $nativeInvoker = {
+            param($Command)
+            $calls.native++
+            [pscustomobject]@{
+                exit_code = 0
+                stdout = $nativeText
+                stderr = ''
+                duration_ms = 17
+                timed_out = $false
+                cleanup_failed = $false
+                cleanup_status = 'not_required'
+                process_exited = $true
+            }
+        }.GetNewClosure()
+        $candidateInvoker = {
+            param($Candidate, $Prompt, $LaunchGuard, $RunId)
+            $calls.candidate++
+            $calls.execution = Invoke-PilotCandidate -Candidate $Candidate -Prompt $Prompt -LaunchGuard $LaunchGuard `
+                -RunId $RunId -NativeInvoker $nativeInvoker
+            return $calls.execution
+        }.GetNewClosure()
+        $graderInvoker = { $calls.grader++; throw 'grader must not run after provider-declared failure' }.GetNewClosure()
+        $judgeInvoker = { $calls.judge++; throw 'judge must not run after provider-declared failure' }.GetNewClosure()
+        $gitInvoker = { [pscustomobject]@{ clean = $true; commit = ('c' * 40) } }
+        try {
+            $result = Invoke-Calibration -Pilot -Run -RunId 'option1-live-20260825-001' `
+                -ResultsRoot $input.results_root -CalibrationSetPath $setPath -RubricsRoot $rubricsRoot `
+                -CandidateInvoker $candidateInvoker -GraderInvoker $graderInvoker -JudgeInvoker $judgeInvoker `
+                -PilotGitInvoker $gitInvoker
+
+            Assert-Equal $calls.candidate 1
+            Assert-Equal $calls.native 1
+            Assert-Equal $calls.grader 0
+            Assert-Equal $calls.judge 0
+            $envelope = Test-CalibrationPilotExecutionEnvelope -Execution $calls.execution
+            Assert-True $envelope.valid
+            Assert-False $envelope.success
+            Assert-Equal $envelope.stop_code 'response_contract_invalid'
+            Assert-Equal $calls.execution.failure $null
+            Assert-Equal $calls.execution.diagnostic_note 'provider-declared failure'
+            Assert-Equal $result.run_state 'stopped'
+            Assert-Equal $result.stop_reason 'response_contract_invalid'
+            Assert-Equal $result.slots_consumed.total 1
+            Assert-Equal $result.launcher_processes_started.total 1
+            Assert-Equal $result.attempts[0].state 'failed'
+            Assert-Equal $result.attempts[0].exit_code 0
+            Assert-Equal $result.attempts[0].duration_ms 17
+            Assert-False $result.attempts[0].timed_out
+            Assert-False $result.attempts[0].cleanup_failed
+            Assert-Equal $result.attempts[0].cleanup_status 'not_required'
+            Assert-True $result.attempts[0].process_exited
+            Assert-Equal $result.attempts[0].transport_status 'success'
+            Assert-Equal $result.attempts[0].contract_status 'success'
+            Assert-Equal $result.attempts[0].usage.actual_input_tokens 160
+            Assert-Equal $result.attempts[0].usage.visible_output_tokens 44
+            Assert-Equal $result.attempts[0].usage.reasoning_tokens 13
+            Assert-True $result.attempts[0].usage.complete
+            Assert-Equal $result.attempts[1].state 'skipped'
+            Assert-Equal $result.attempts[2].state 'skipped'
+            $runRoot = Join-Path $input.results_root 'option1-live-20260825-001'
+            Assert-False (Test-Path -LiteralPath (Join-Path $runRoot 'raw/candidate-response.json') -PathType Leaf)
+            Assert-False (Test-Path -LiteralPath (Join-Path $runRoot 'raw/judge-responses.json') -PathType Leaf)
+        } finally { Remove-TestCalibrationPilotLedgerRoot -Path $input.results_root }
+    }
+
     Invoke-Assertion 'option 1 default adapters forward the exact run id and guarded launch without native execution' {
         $input = New-TestCalibrationPilotLedgerInput
         $runId = 'option1-live-20260825-001'

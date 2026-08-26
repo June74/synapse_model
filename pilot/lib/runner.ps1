@@ -196,14 +196,15 @@ function ConvertTo-AgyCanonicalResponse {
     if ($propertyNames.Count -eq 3 -and
         $propertyNames -contains 'status' -and
         $propertyNames -contains 'answer' -and
-        $propertyNames -contains 'error' -and
-        $Response.status -eq 'success' -and
-        $Response.error -is [string] -and
-        [string]::IsNullOrEmpty($Response.error)) {
-        return [pscustomobject]@{
-            status = [string]$Response.status
-            answer = [string]$Response.answer
-            error = $null
+        $propertyNames -contains 'error') {
+        $normalizedError = if ($Response.status -is [string] -and
+            $Response.status -ceq 'success' -and
+            $Response.error -is [string] -and
+            [string]::IsNullOrEmpty($Response.error)) { $null } else { $Response.error }
+        return [pscustomobject][ordered]@{
+            status = $Response.status
+            answer = $Response.answer
+            error = $normalizedError
         }
     }
 
@@ -1591,7 +1592,9 @@ function Invoke-PilotCandidate {
     $record = New-ResultRecord -Candidate $Candidate -ProcessResult $safeProcess -Canonical $canonical `
         -RunId $RunId -DiagnosticNote $note -FailureError $failure -Prompt $Prompt `
         -CliReportedCostUsd $reportedCost
-    if ($record.diagnostic_note -cne 'completed') { $failure = [string]$record.diagnostic_note }
+    if (-not [bool]$record.contract_compliant -and $record.diagnostic_note -cne 'completed') {
+        $failure = [string]$record.diagnostic_note
+    }
 
     $usage = ConvertTo-PilotUsageMetadata -ProcessResult $processResult
     if ($null -eq $usage -and $null -ne $processResult -and

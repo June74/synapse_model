@@ -17,15 +17,15 @@
 - Test: `pilot/tests/runner.tests.ps1:712-757,1719-1743`
 - Test: `calibration/tests/calibration.tests.ps1`
 
-- [ ] **Step 1: Write failing adapter tests**
+- [x] **Step 1: Write failing adapter tests**
 
 Add assertions proving an Agy success and failure with input key order `answer,error,status` return `status,answer,error`; invalid value types remain invalid; and unexpected properties are not discarded.
 
-- [ ] **Step 2: Run the pilot suite and verify RED**
+- [x] **Step 2: Run the pilot suite and verify RED**
 
 Run `pwsh -NoProfile -File .\pilot\tests\runner.tests.ps1`. Expected: the reordered canonical-property assertions fail against the current passthrough behavior.
 
-- [ ] **Step 3: Normalize exact canonical objects without coercion**
+- [x] **Step 3: Normalize exact canonical objects without coercion**
 
 Change `ConvertTo-AgyCanonicalResponse` so exact three-property objects are returned as:
 
@@ -39,15 +39,15 @@ Change `ConvertTo-AgyCanonicalResponse` so exact three-property objects are retu
 
 Return objects with missing or unexpected properties unchanged so `Test-CanonicalResponse` remains the rejection authority.
 
-- [ ] **Step 4: Write and verify the provider-failure RED test**
+- [x] **Step 4: Write and verify the provider-failure RED test**
 
 Use a fully native-shaped fake Agy result with canonical `status = failure`. Assert `failure = $null`, the bounded diagnostic remains `provider-declared failure`, the envelope is valid, its stop code is `response_contract_invalid`, process evidence is available, and no judge is called. Run the focused pilot and calibration suites and confirm the current line that copies every non-completed diagnostic into `failure` causes RED.
 
-- [ ] **Step 5: Implement minimal failure-channel separation**
+- [x] **Step 5: Implement minimal failure-channel separation**
 
 Set `failure` from the record only when `record.contract_compliant` is false. A valid canonical success or canonical failure keeps `failure = $null`.
 
-- [ ] **Step 6: Run GREEN suites and commit**
+- [x] **Step 6: Run GREEN suites and commit**
 
 Run the pilot, calibration functional, and calibration security suites. Commit only Task 1 files with `fix: align pilot canonical response semantics`.
 
@@ -139,4 +139,3 @@ Dispatch a spec-compliance reviewer, fix every gap, then dispatch a code-quality
 - [ ] **Step 5: Prepare but do not execute a new acceptance packet**
 
 Record the new commit, manifest hash, launcher-lock hash, exact route order, proposed new RunId, and maximum three nonrefundable slots. Do not push, create a PR, merge, or execute the packet without explicit user approval.
-

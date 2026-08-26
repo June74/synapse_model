@@ -722,6 +722,32 @@ Invoke-Assertion 'ConvertFrom-AgyOutput normalizes empty success errors to null'
     Assert-Equal $agy.answer '4'
     Assert-Equal $agy.error $null
 }
+
+Invoke-Assertion 'ConvertFrom-AgyOutput normalizes reordered canonical success properties' {
+    $agy = ConvertFrom-AgyOutput '{"status":"SUCCESS","structured_output":{"answer":"4","error":null,"status":"success"}}'
+    Assert-SequenceEqual @($agy.PSObject.Properties.Name) @('status', 'answer', 'error')
+    Assert-True (Test-CanonicalResponse $agy).valid
+}
+
+Invoke-Assertion 'ConvertFrom-AgyOutput normalizes reordered canonical failure properties' {
+    $agy = ConvertFrom-AgyOutput '{"status":"SUCCESS","structured_output":{"answer":"","error":"provider declined","status":"failure"}}'
+    Assert-SequenceEqual @($agy.PSObject.Properties.Name) @('status', 'answer', 'error')
+    Assert-True (Test-CanonicalResponse $agy).valid
+}
+
+Invoke-Assertion 'ConvertFrom-AgyOutput preserves invalid canonical value types' {
+    $agy = ConvertFrom-AgyOutput '{"status":"SUCCESS","structured_output":{"answer":4,"error":"","status":"success"}}'
+    Assert-SequenceEqual @($agy.PSObject.Properties.Name) @('status', 'answer', 'error')
+    Assert-True ($agy.answer -isnot [string])
+    Assert-True (-not (Test-CanonicalResponse $agy).valid)
+}
+
+Invoke-Assertion 'ConvertFrom-AgyOutput preserves unexpected canonical properties for rejection' {
+    $agy = ConvertFrom-AgyOutput '{"status":"SUCCESS","structured_output":{"answer":"4","error":null,"status":"success","extra":"not allowed"}}'
+    Assert-True ($agy.PSObject.Properties.Name -contains 'extra')
+    Assert-True (-not (Test-CanonicalResponse $agy).valid)
+}
+
 Invoke-Assertion 'ConvertFrom-AgyOutput accepts one JSON envelope surrounded by stdout noise' {
     $agy = ConvertFrom-AgyOutput "agy startup`n{""status"":""SUCCESS"",""structured_output"":{""status"":""success"",""answer"":""4"",""error"":null},""response"":""4""}`nagy complete"
     Assert-Equal $agy.status 'success'
@@ -1740,6 +1766,47 @@ Invoke-Assertion 'Invoke-PilotCandidate preserves provider-declared and parse fa
     $serialized = $parseFailure | ConvertTo-Json -Depth 20 -Compress
     Assert-True (-not $serialized.Contains('not provider JSON'))
     Assert-True (-not $serialized.Contains('sensitive raw stderr'))
+}
+
+Invoke-Assertion 'Invoke-PilotCandidate keeps native Agy provider-declared failure out of the failure channel' {
+    $matrix = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'pilot/model_matrix.json') | ConvertFrom-Json
+    $candidate = @($matrix.candidates | Where-Object { $_.route_id -eq 'agy__gemini_3_7_flash_low__low' } | Select-Object -First 1)[0]
+    $nativeText = [ordered]@{
+        thread_id = 'fixture-thread'
+        session_id = 'fixture-session'
+        status = 'SUCCESS'
+        created_at = '2026-08-25T00:00:00Z'
+        finished_at = '2026-08-25T00:00:01Z'
+        result = ''
+        structured_output = [ordered]@{ answer = ''; error = 'provider declined'; status = 'failure' }
+        usage = [ordered]@{ input_tokens = 160; output_tokens = 57; thinking_tokens = 13; total_tokens = 230 }
+    } | ConvertTo-Json -Compress -Depth 10
+
+    $execution = Invoke-PilotCandidate -Candidate $candidate -Prompt 'native Agy provider failure' -RunId 'agy-provider-failure' -NativeInvoker {
+        [pscustomobject]@{
+            exit_code = 0
+            stdout = $nativeText
+            stderr = ''
+            duration_ms = 17
+            timed_out = $false
+            cleanup_failed = $false
+            cleanup_status = 'not_required'
+            process_exited = $true
+        }
+    }
+
+    Assert-SequenceEqual @($execution.canonical.PSObject.Properties.Name) @('status', 'answer', 'error')
+    Assert-True (Test-CanonicalResponse $execution.canonical).valid
+    Assert-Equal $execution.canonical.status 'failure'
+    Assert-Equal $execution.failure $null
+    Assert-Equal $execution.diagnostic_note 'provider-declared failure'
+    Assert-True $execution.record.contract_compliant
+    Assert-Equal $execution.process.exit_code 0
+    Assert-Equal $execution.process.duration_ms 17
+    Assert-Equal $execution.usage.actual_input_tokens 160
+    Assert-Equal $execution.usage.visible_output_tokens 44
+    Assert-Equal $execution.usage.reasoning_tokens 13
+    Assert-True $execution.usage.complete
 }
 
 Invoke-Assertion 'Invoke-PilotCandidate rejects every unsuccessful transport state before parsing' {
