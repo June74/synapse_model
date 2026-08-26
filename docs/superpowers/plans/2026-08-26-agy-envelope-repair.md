@@ -142,10 +142,10 @@ Run the pilot suite, router suite, SQLite unit suite, calibration functional sui
 
 Run `git diff --check`, bounded forbidden-field scans, prompt/credential sentinel scans, and confirm no production profile or eligibility file changed.
 
-- [ ] **Step 5: Obtain spec and code-quality reviews**
+- [x] **Step 5: Obtain spec and code-quality reviews**
 
 Dispatch a spec-compliance reviewer, fix every gap, then dispatch a code-quality reviewer. Repeat review after any material fix.
 
-- [ ] **Step 6: Prepare but do not execute a new acceptance packet**
+- [x] **Step 6: Prepare but do not execute a new acceptance packet**
 
 Record the new commit, manifest hash, launcher-lock hash, exact route order, proposed new RunId `option1-live-20260826-002`, and maximum three nonrefundable slots. Do not push, create a PR, merge, or execute the packet without explicit user approval.
