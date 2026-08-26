@@ -93,3 +93,22 @@
 - **Correction:** Collect the `foreach` output in an explicit result variable, then serialize that collection.
 - **Prevention:** Reuse the established explicit-result-variable pattern for every multi-file metadata probe.
 - **Related verification:** The corrected read-only probe must report current and replaced launcher hashes and version metadata without executing either binary.
+
+## Recurrence: 2026-08-26, offline JSON-rubric adjudication
+
+- **Phase/task:** Read-only calibration JSON-contract comparison
+- **Symptom:** A combined `rg` expression was altered by PowerShell quoting and reached ripgrep as an unclosed regular-expression group.
+- **Impact:** Only the combined reference search failed; the independent JSON parse reproduction completed and no repository product file, calibration artifact, provider, launcher, or network state changed.
+- **Confirmed cause:** The command combined several quoted JSON fragments and regex alternatives inside one PowerShell argument instead of using separate literal searches.
+- **Correction:** Search each symbol and JSON marker independently with fixed strings, then combine the bounded results after retrieval.
+- **Prevention:** Use `rg -F` or separate `rg` calls when searching PowerShell commands for literal quoted JSON syntax.
+- **Related verification:** Corrected searches must identify every exact-fields grader call, prompt using the grader, and shared extraction rubric reference without a parser diagnostic.
+
+### Follow-up: Markdown-fence case-matrix quoting
+
+- **Symptom:** The first offline case-matrix command embedded Markdown backticks in PowerShell double-quoted strings; PowerShell treated them as escape syntax and stopped at parser admission.
+- **Impact:** The case matrix and result-hash read did not run in that invocation. No file, live artifact, provider, launcher, or network state changed.
+- **Confirmed cause:** Dynamic shell quoting was used for literal multiline Markdown fixtures.
+- **Correction:** Construct the fence from the literal backtick character (`[char]96`) and concatenate the multiline fixture without dynamic backtick syntax.
+- **Prevention:** Keep Markdown fence test inputs in checked-in or literal-safe fixtures, never double-quoted command strings containing raw PowerShell backticks.
+- **Related verification:** The corrected literal-fixture matrix must complete and reconfirm the immutable live result hash.

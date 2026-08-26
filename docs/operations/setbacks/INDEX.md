@@ -51,16 +51,17 @@
 | [SB-20260826-155431-task3-nested-parser-expansion](incidents/2026-08-26T155431Z-task3-nested-parser-expansion.md) | Nested PowerShell parser check lost variables to outer expansion | closed | 2026-08-26T15:54:31.942794Z | 2026-08-26T15:54:31.942794Z |
 | [SB-20260826-160619-task3-review-incident-filename-assumption](incidents/2026-08-26T160619Z-task3-review-incident-filename-assumption.md) | Quality-review recurrence lookup used a shorthand incident filename | closed | 2026-08-26T16:06:19.432654Z | 2026-08-26T16:29:13.8205439Z |
 | [SB-20260826-163250-task4-range-array-flattening](incidents/2026-08-26T163250Z-task4-range-array-flattening.md) | Dynamic line range flattened into the surrounding PowerShell array | closed | 2026-08-26T16:32:50.936156Z | 2026-08-26T16:32:50.936156Z |
+| [SB-20260826-175410-exact-fields-date-coercion](incidents/2026-08-26T175410Z-exact-fields-date-coercion.md) | Exact-fields parsing coerces ISO timestamp strings | contained | 2026-08-26T17:54:10.0746877Z | 2026-08-26T17:54:10.0746877Z |
 | SB-2026-08-19-001 | PowerShell DOCX paragraph extraction syntax error | closed | 2026-08-19 | 2026-08-19 |
 | SB-2026-08-19-002 | Current DOCX locked during full-document scan | closed | 2026-08-19 | 2026-08-19 |
-| SB-2026-08-19-003 | Skill path lookup mismatch | closed | 2026-08-19 | 2026-08-26T15:32:58.107276Z |
+| SB-2026-08-19-003 | Skill path lookup mismatch | closed | 2026-08-19 | 2026-08-26T17:51:09.0115027Z |
 | SB-2026-08-19-004 | Claude CLI smoke test did not return within timeout | contained | 2026-08-19 | 2026-08-19 |
 | SB-2026-08-19-005 | Antigravity CLI authentication unavailable in sandbox | contained | 2026-08-19 | 2026-08-19 |
 | SB-2026-08-19-006 | Git index unavailable to sandbox | contained | 2026-08-19 | 2026-08-26T15:55:50.4240433Z |
 | SB-2026-08-19-007 | Plan review command used an invalid PowerShell parameter | contained | 2026-08-19 | 2026-08-19 |
 | SB-2026-08-19-008 | Pre-creation worktree ignore check rejected absent directory | contained | 2026-08-19 | 2026-08-24 |
 | SB-2026-08-19-009 | Existing descendant-drain test was transiently timing-sensitive | closed | 2026-08-19 | 2026-08-19 |
-| SB-2026-08-19-010 | Parser verification command used invalid PowerShell interpolation | closed | 2026-08-19 | 2026-08-26T00:03:21.8543849Z |
+| SB-2026-08-19-010 | Parser verification command used invalid PowerShell interpolation | closed | 2026-08-19 | 2026-08-26T17:53:10.6982045Z |
 | SB-20260822-190417-main-feature-branch-divergence | Fast-forward merge unavailable after main advanced | closed | 2026-08-22 | 2026-08-22 |
 | SB-20260822-190757-merged-main-legacy-result-deletion | Merged main lost required legacy pilot result fixture | closed | 2026-08-22 | 2026-08-22 |
 | SB-20260823-015506-test-json-numeric-precision | Test-Json loses numeric precision at contract boundaries | closed | 2026-08-23 | 2026-08-23 |

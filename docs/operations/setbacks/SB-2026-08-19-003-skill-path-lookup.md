@@ -4,7 +4,7 @@
 - Title: Skill path lookup mismatch
 - Status: closed
 - First observed: 2026-08-19
-- Last observed: 2026-08-26T15:32:58.107276Z
+- Last observed: 2026-08-26T17:51:09.0115027Z
 - Phase/task: Task 9 live acceptance incident logging
 - Environment: Windows PowerShell, Codex desktop
 - Version/commit: Not applicable
@@ -103,3 +103,13 @@ The `scope-gate` and `setback-logger` instructions were read successfully from t
 - Correction: enumerated the skill directory, resolved its exact helper path, and invoked it through the bundled Python runtime.
 - Prevention: resolve every skill-relative resource against the directory containing the selected `SKILL.md` before filesystem access.
 - Verification: the resolved helper printed its usage and created the bounded incident successfully.
+
+### 2026-08-26 - Offline JSON-rubric adjudication preflight recurrence
+
+- Symptom: adjudication preflight first read `scope-gate` beneath the wrong configured skill root, then invoked the repository-relative setback-helper path with an unavailable bare `python` command, and finally repeated the already documented repository-relative helper-path assumption after resolving the bundled runtime.
+- Impact: three read-only lookup or launch attempts failed before rubric inspection. No calibration artifact, product source, provider, launcher, network request, credential, prompt, or response changed or was exposed.
+- Confirmed cause: the commands did not expand the displayed skill-root alias before reading and did not resolve the skill-owned helper relative to `setback-logger/SKILL.md`; the interactive shell also has no bare `python` executable on `PATH`.
+- Correction: read `scope-gate` from its configured `.agents` root, load the repository Python resolver, and update this existing incident manually rather than repeating the helper lookup.
+- Prevention: expand every skill-root alias from the active catalog, resolve skill-owned resources against the loaded `SKILL.md` directory, and use `Resolve-RouterPythonExecutable` for repository Python commands.
+- Verification: the required `scope-gate`, `systematic-debugging`, `domain-logic-contract`, `explaining-unfamiliar-terms`, and `setback-logger` instructions were read successfully; the repository Python resolver returned the bundled interpreter; no provider or launcher process ran.
+- Follow-up recurrence: a setback search passed `docs/operations/setbacks/*.md` as a literal Windows path to `rg`, producing an invalid-filename diagnostic while the explicit directory searches still completed. The corrected searches use directory roots without embedding a wildcard in a literal path. No state or private data changed.
