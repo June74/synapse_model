@@ -118,26 +118,34 @@ Prove matching fake components preserve all-role-prepare/verify-before-first-cla
 ### Task 4: Documentation, complete offline verification, and review
 
 **Files:**
+- Modify: `calibration/run_calibration.ps1`
+- Modify: `router/README.md`
+- Test: `calibration/tests/calibration.tests.ps1`
+- Test: `calibration/tests/calibration_security.tests.ps1`
 - Modify: `docs/operations/setbacks/incidents/2026-08-25T235222Z-option1-live-provider-envelope-invalid.md`
 - Modify: `docs/operations/setbacks/INDEX.md`
-- Modify: operator documentation identified by the existing Option 1 documentation tests
+- Modify: `docs/superpowers/plans/2026-08-26-agy-envelope-repair.md`
 
-- [ ] **Step 1: Update the incident with correction evidence**
+- [x] **Step 1: Freeze a fresh unapproved RunId and reject the consumed ID before side effects**
+
+Change the executable live gate, active Option 1 operator command and text, exact documentation contract, and simulated-live functional and security fixtures to proposed RunId `option1-live-20260826-002`. Preserve historical specifications, plans, and incidents that record consumed RunId `option1-live-20260825-001`. Add an offline fake-only regression proving the consumed ID is rejected before Git preflight, launcher resolution or preparation, run/claim directory creation, candidate or judge invokers, artifact writers, or any result-tree write. The proposed ID is not approval to execute it.
+
+- [ ] **Step 2: Update the incident with correction evidence**
 
 Keep status contained until the composed offline seam and all suites pass. Record exact test counts, launcher-lock hash, and the fact that no provider call occurred.
 
-- [ ] **Step 2: Run all five offline suites sequentially where result roots overlap**
+- [ ] **Step 3: Run all five offline suites sequentially where result roots overlap**
 
 Run the pilot suite, router suite, SQLite unit suite, calibration functional suite, and calibration security suite. Retain every continuation handle and require explicit exit code 0.
 
-- [ ] **Step 3: Run privacy and repository checks**
+- [ ] **Step 4: Run privacy and repository checks**
 
 Run `git diff --check`, bounded forbidden-field scans, prompt/credential sentinel scans, and confirm no production profile or eligibility file changed.
 
-- [ ] **Step 4: Obtain spec and code-quality reviews**
+- [ ] **Step 5: Obtain spec and code-quality reviews**
 
 Dispatch a spec-compliance reviewer, fix every gap, then dispatch a code-quality reviewer. Repeat review after any material fix.
 
-- [ ] **Step 5: Prepare but do not execute a new acceptance packet**
+- [ ] **Step 6: Prepare but do not execute a new acceptance packet**
 
-Record the new commit, manifest hash, launcher-lock hash, exact route order, proposed new RunId, and maximum three nonrefundable slots. Do not push, create a PR, merge, or execute the packet without explicit user approval.
+Record the new commit, manifest hash, launcher-lock hash, exact route order, proposed new RunId `option1-live-20260826-002`, and maximum three nonrefundable slots. Do not push, create a PR, merge, or execute the packet without explicit user approval.

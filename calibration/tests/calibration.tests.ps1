@@ -258,14 +258,14 @@ function Invoke-TestCalibrationPilotRun {
     }.GetNewClosure()
     $graderInvoker = {
         param($Prompt, $ResponseText, $PythonExecutor, $PythonExecutable, $PythonTimeoutMilliseconds)
-        Assert-TestCalibrationPilotGraderBoundary -ResultsRoot $ledgerInput.results_root -RunId 'option1-live-20260825-001'
+        Assert-TestCalibrationPilotGraderBoundary -ResultsRoot $ledgerInput.results_root -RunId 'option1-live-20260826-002'
         $boundaryEvents.Add('grader:candidate_persisted:claims=1')
         $graderCalls.count++
         return Invoke-CalibrationDeterministicGrader -Prompt $Prompt -ResponseText $ResponseText
     }.GetNewClosure()
     $gitInvoker = { [pscustomobject]@{ clean = $true; commit = ('a' * 40) } }
     try {
-        $result = Invoke-Calibration -Pilot -Run -RunId 'option1-live-20260825-001' `
+        $result = Invoke-Calibration -Pilot -Run -RunId 'option1-live-20260826-002' `
             -ResultsRoot $ledgerInput.results_root -CalibrationSetPath $setPath -RubricsRoot $rubricsRoot `
             -CandidateInvoker $candidateInvoker -JudgeInvoker $judgeInvoker -GraderInvoker $graderInvoker `
             -PilotGitInvoker $gitInvoker
@@ -1163,7 +1163,7 @@ if (Test-Path -LiteralPath $implementationPath -PathType Leaf) {
                 Assert-Equal $attempt.contract_status 'success'
                 Assert-Equal $attempt.envelope_rejection_code $null
             }
-            $runRoot = Join-Path $execution.input.results_root 'option1-live-20260825-001'
+            $runRoot = Join-Path $execution.input.results_root 'option1-live-20260826-002'
             $plan = Get-Content -Raw -LiteralPath (Join-Path $runRoot 'plan.json') | ConvertFrom-Json -Depth 100
             Assert-Equal $plan.git_commit ('a' * 40)
             Assert-True (Test-Path -LiteralPath (Join-Path $runRoot 'raw/candidate-response.json') -PathType Leaf)
@@ -1249,7 +1249,7 @@ if (Test-Path -LiteralPath $implementationPath -PathType Leaf) {
         $judgeInvoker = { $calls.judge++; throw 'judge must not run after provider-declared failure' }.GetNewClosure()
         $gitInvoker = { [pscustomobject]@{ clean = $true; commit = ('c' * 40) } }
         try {
-            $result = Invoke-Calibration -Pilot -Run -RunId 'option1-live-20260825-001' `
+            $result = Invoke-Calibration -Pilot -Run -RunId 'option1-live-20260826-002' `
                 -ResultsRoot $input.results_root -CalibrationSetPath $setPath -RubricsRoot $rubricsRoot `
                 -CandidateInvoker $candidateInvoker -GraderInvoker $graderInvoker -JudgeInvoker $judgeInvoker `
                 -PilotGitInvoker $gitInvoker
@@ -1284,7 +1284,7 @@ if (Test-Path -LiteralPath $implementationPath -PathType Leaf) {
             Assert-True $result.attempts[0].usage.complete
             Assert-Equal $result.attempts[1].state 'skipped'
             Assert-Equal $result.attempts[2].state 'skipped'
-            $runRoot = Join-Path $input.results_root 'option1-live-20260825-001'
+            $runRoot = Join-Path $input.results_root 'option1-live-20260826-002'
             Assert-False (Test-Path -LiteralPath (Join-Path $runRoot 'raw/candidate-response.json') -PathType Leaf)
             Assert-False (Test-Path -LiteralPath (Join-Path $runRoot 'raw/judge-responses.json') -PathType Leaf)
         } finally { Remove-TestCalibrationPilotLedgerRoot -Path $input.results_root }
@@ -1431,7 +1431,7 @@ if (Test-Path -LiteralPath $implementationPath -PathType Leaf) {
 
     Invoke-Assertion 'option 1 default adapters forward the exact run id and guarded launch without native execution' {
         $input = New-TestCalibrationPilotLedgerInput
-        $runId = 'option1-live-20260825-001'
+        $runId = 'option1-live-20260826-002'
         $originalText = (Get-Command -Name Invoke-PilotCandidate -CommandType Function -ErrorAction Stop).ScriptBlock.ToString()
         $immutableOriginal = [scriptblock]::Create($originalText)
         $script:PilotDefaultAdapterState = [pscustomobject]@{
@@ -1451,7 +1451,7 @@ if (Test-Path -LiteralPath $implementationPath -PathType Leaf) {
                     [int]$TimeoutSeconds = -1,
                     [scriptblock]$LaunchGuard
                 )
-                Assert-Equal $RunId 'option1-live-20260825-001'
+                Assert-Equal $RunId 'option1-live-20260826-002'
                 Assert-True ($null -ne $LaunchGuard) 'Default adapter omitted the launch guard.'
                 $command = New-TestCalibrationPilotCommand -Candidate $Candidate -Prompt $Prompt
                 $before = $script:PilotDefaultAdapterState.guard_calls
@@ -1477,7 +1477,7 @@ if (Test-Path -LiteralPath $implementationPath -PathType Leaf) {
             $grader = {
                 param($Prompt, $ResponseText, $PythonExecutor, $PythonExecutable, $PythonTimeoutMilliseconds)
                 Assert-TestCalibrationPilotGraderBoundary -ResultsRoot $script:PilotDefaultAdapterState.results_root `
-                    -RunId 'option1-live-20260825-001'
+                    -RunId 'option1-live-20260826-002'
                 $script:PilotDefaultAdapterState.grader_calls++
                 return Invoke-CalibrationDeterministicGrader -Prompt $Prompt -ResponseText $ResponseText
             }
@@ -1537,6 +1537,42 @@ if (Test-Path -LiteralPath $implementationPath -PathType Leaf) {
         }
         foreach ($name in $originalFunctions.Keys) {
             Assert-Equal (Get-Command -Name $name -CommandType Function -ErrorAction Stop).ScriptBlock.ToString() $originalFunctions[$name].ToString()
+        }
+    }
+
+    Invoke-Assertion 'consumed option 1 run id is rejected before git launch preparation invokers or writes' {
+        $resultsRoot = New-CalibrationResultsTestRoot
+        try {
+            $before = Get-CalibrationResultsTreeSnapshot -Root $resultsRoot
+            $calls = [pscustomobject]@{
+                git = 0
+                launcher = 0
+                candidate = 0
+                judge = 0
+                artifact_writer = 0
+            }
+            $gitSpy = { $calls.git++; throw 'consumed run id reached git preflight' }.GetNewClosure()
+            $launcherSpy = { $calls.launcher++; throw 'consumed run id reached launcher preparation' }.GetNewClosure()
+            $candidateSpy = { $calls.candidate++; throw 'consumed run id reached candidate invoker' }.GetNewClosure()
+            $judgeSpy = { $calls.judge++; throw 'consumed run id reached judge invoker' }.GetNewClosure()
+            $artifactWriterSpy = { $calls.artifact_writer++; throw 'consumed run id reached artifact writer' }.GetNewClosure()
+
+            $null = Assert-Throws {
+                Invoke-Calibration -Pilot -Run -RunId 'option1-live-20260825-001' -ResultsRoot $resultsRoot `
+                    -CalibrationSetPath $setPath -RubricsRoot $rubricsRoot `
+                    -PilotGitInvoker $gitSpy -LauncherResolver $launcherSpy `
+                    -CandidateInvoker $candidateSpy -JudgeInvoker $judgeSpy `
+                    -PilotArtifactWriter $artifactWriterSpy | Out-Null
+            } 'pilot_run_id_invalid'
+
+            Assert-Equal $calls.git 0
+            Assert-Equal $calls.launcher 0
+            Assert-Equal $calls.candidate 0
+            Assert-Equal $calls.judge 0
+            Assert-Equal $calls.artifact_writer 0
+            Assert-SequenceEqual (Get-CalibrationResultsTreeSnapshot -Root $resultsRoot) $before
+        } finally {
+            if (Test-Path -LiteralPath $resultsRoot) { Remove-Item -LiteralPath $resultsRoot -Recurse -Force }
         }
     }
 
@@ -1608,7 +1644,7 @@ if (Test-Path -LiteralPath $implementationPath -PathType Leaf) {
             foreach ($arguments in @(
                 @('-NoProfile', '-File', $implementationPath, '-Pilot', '-CalibrationSetPath', $externalSet, '-ResultsRoot', $resultsRoot),
                 @('-NoProfile', '-File', $implementationPath, '-Pilot', '-RubricsRoot', $externalRubrics, '-ResultsRoot', $resultsRoot),
-                @('-NoProfile', '-File', $implementationPath, '-Pilot', '-Run', '-RunId', 'option1-live-20260825-001', '-CalibrationSetPath', $externalSet, '-ResultsRoot', $resultsRoot)
+                @('-NoProfile', '-File', $implementationPath, '-Pilot', '-Run', '-RunId', 'option1-live-20260826-002', '-CalibrationSetPath', $externalSet, '-ResultsRoot', $resultsRoot)
             )) {
                 $capture = Invoke-CalibrationCliCapture -Arguments $arguments
                 Assert-Equal $capture.exit_code 1
@@ -1633,7 +1669,7 @@ if (Test-Path -LiteralPath $implementationPath -PathType Leaf) {
             $spy = { $calls.count++; throw 'external source reached provider seam' }.GetNewClosure()
             $before = Get-CalibrationResultsTreeSnapshot -Root $resultsRoot
             $null = Assert-Throws {
-                Invoke-Calibration -Pilot -Run -RunId 'option1-live-20260825-001' -ResultsRoot $resultsRoot `
+                Invoke-Calibration -Pilot -Run -RunId 'option1-live-20260826-002' -ResultsRoot $resultsRoot `
                     -CalibrationSetPath $externalSet -RubricsRoot $externalRubrics `
                     -CandidateInvoker $spy -JudgeInvoker $spy -PilotGitInvoker $spy | Out-Null
             } 'pilot_source_path_not_canonical'
@@ -2145,7 +2181,7 @@ def sum_even(values):
         $section = $readme.Substring($sectionStart, $sectionEnd - $sectionStart)
         $lines = @($section -split "`n")
         $offlineCommand = 'pwsh -NoProfile -File .\calibration\run_calibration.ps1 -Pilot'
-        $liveCommand = 'pwsh -NoProfile -File .\calibration\run_calibration.ps1 -Pilot -Run -RunId option1-live-20260825-001'
+        $liveCommand = 'pwsh -NoProfile -File .\calibration\run_calibration.ps1 -Pilot -Run -RunId option1-live-20260826-002'
         $orderedRoleBlock = @'
 1. Google candidate: `agy__gemini_3_7_flash_low__low`.
 2. Local exact-fields grading. This local deterministic grader does not consume a launcher slot.
@@ -2172,7 +2208,7 @@ def sum_even(values):
             'never change production eligibility',
             'safe artifacts',
             'exact commit and exact ordered identities',
-            'The current build accepts only `option1-live-20260825-001`.',
+            'The current build accepts only `option1-live-20260826-002`.',
             'Do not edit the command to invent a replacement RunId.',
             'A replacement RunId requires a new reviewed build that accepts it and a revised acceptance packet that freezes and authorizes the exact replacement command, followed by new explicit approval.',
             '`.run.claim`',
@@ -2358,7 +2394,7 @@ Invoke-Assertion 'later-role launcher drift stops before every claim and provide
             return [pscustomobject][ordered]@{ anchor_path = $anchor; resolved_path = [IO.Path]::GetFullPath($fixture.paths[$componentId]) }
         }.GetNewClosure()
         $providerSpy = { $providerCalls.count++; throw 'provider invoker must not run' }.GetNewClosure()
-        $result = Invoke-Calibration -Pilot -Run -RunId 'option1-live-20260825-001' -ResultsRoot $resultsRoot `
+        $result = Invoke-Calibration -Pilot -Run -RunId 'option1-live-20260826-002' -ResultsRoot $resultsRoot `
             -CalibrationSetPath $setPath -RubricsRoot $rubricsRoot -AllowPilotSourceOverridesForTest `
             -LauncherLockPath $fixture.lock_path `
             -LauncherLockSchemaPath (Join-Path $calibrationRoot 'pilots/option1-launchers.schema.json') `
@@ -2369,7 +2405,7 @@ Invoke-Assertion 'later-role launcher drift stops before every claim and provide
         Assert-Equal $result.launcher_processes_started.total 0
         Assert-Equal $providerCalls.count 0
         Assert-SequenceEqual @($resolverCalls) @('agy', 'codex', 'claude')
-        $persisted = Get-Content -Raw -LiteralPath (Join-Path $resultsRoot 'option1-live-20260825-001/result.json')
+        $persisted = Get-Content -Raw -LiteralPath (Join-Path $resultsRoot 'option1-live-20260826-002/result.json')
         $packageRoot = [IO.Path]::GetDirectoryName([IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($fixture.paths.codex_javascript)))
         Assert-False $persisted.Contains($packageRoot, [StringComparison]::OrdinalIgnoreCase)
         $stream = [IO.File]::Open($fixture.paths.agy_native, [IO.FileMode]::Open, [IO.FileAccess]::Write, [IO.FileShare]::None)
@@ -2456,7 +2492,7 @@ Invoke-Assertion 'claim persistence indeterminate propagates through the compose
                 throw
             }
         }.GetNewClosure()
-        $result = Invoke-Calibration -Pilot -Run -RunId 'option1-live-20260825-001' -ResultsRoot $resultsRoot `
+        $result = Invoke-Calibration -Pilot -Run -RunId 'option1-live-20260826-002' -ResultsRoot $resultsRoot `
             -CalibrationSetPath $setPath -RubricsRoot $rubricsRoot -AllowPilotSourceOverridesForTest `
             -LauncherLockPath $fixture.lock_path `
             -LauncherLockSchemaPath (Join-Path $calibrationRoot 'pilots/option1-launchers.schema.json') `
@@ -2468,7 +2504,7 @@ Invoke-Assertion 'claim persistence indeterminate propagates through the compose
         Assert-Equal $result.launcher_processes_started.total 0
         Assert-Equal $nativeCalls.count 0
         Assert-Equal $observedControlFailure.code 'pilot_claim_persistence_indeterminate'
-        Assert-True (Test-Path -LiteralPath (Join-Path $resultsRoot 'option1-live-20260825-001/claims/01-google-candidate.claim'))
+        Assert-True (Test-Path -LiteralPath (Join-Path $resultsRoot 'option1-live-20260826-002/claims/01-google-candidate.claim'))
     } finally {
         Set-Item -Path Function:Invoke-CalibrationPilotAfterSlotClaimHook -Value $originalHook
         if (Test-Path -LiteralPath $resultsRoot) { Remove-Item -LiteralPath $resultsRoot -Recurse -Force }
@@ -2542,7 +2578,7 @@ Invoke-Assertion 'Windows held launcher handles block ancestor replacement from 
                 decision = [pscustomobject]@{ decision = 'pass'; rationale = 'safe evidence' }
             }
         }.GetNewClosure()
-        $result = Invoke-Calibration -Pilot -Run -RunId 'option1-live-20260825-001' -ResultsRoot $resultsRoot `
+        $result = Invoke-Calibration -Pilot -Run -RunId 'option1-live-20260826-002' -ResultsRoot $resultsRoot `
             -CalibrationSetPath $setPath -RubricsRoot $rubricsRoot -AllowPilotSourceOverridesForTest `
             -LauncherLockPath $fixture.lock_path `
             -LauncherLockSchemaPath (Join-Path $calibrationRoot 'pilots/option1-launchers.schema.json') `
@@ -2626,7 +2662,7 @@ Invoke-Assertion 'lock-derived Codex start observer ignores alternate package in
             }
             [pscustomobject]@{ pilot_execution = $execution; decision = $null; stop_code = 'process_start_failed' }
         }.GetNewClosure()
-        $result = Invoke-Calibration -Pilot -Run -RunId 'option1-live-20260825-001' -ResultsRoot $resultsRoot `
+        $result = Invoke-Calibration -Pilot -Run -RunId 'option1-live-20260826-002' -ResultsRoot $resultsRoot `
             -CalibrationSetPath $setPath -RubricsRoot $rubricsRoot -AllowPilotSourceOverridesForTest `
             -LauncherLockPath $fixture.lock_path `
             -LauncherLockSchemaPath (Join-Path $calibrationRoot 'pilots/option1-launchers.schema.json') `
@@ -2710,7 +2746,7 @@ Invoke-Assertion 'prepared launcher handles release after success claim failure 
                 $lockChecks.count++
                 return Invoke-CalibrationDeterministicGrader -Prompt $Prompt -ResponseText $ResponseText
             }.GetNewClosure()
-            $result = Invoke-Calibration -Pilot -Run -RunId 'option1-live-20260825-001' -ResultsRoot $resultsRoot `
+            $result = Invoke-Calibration -Pilot -Run -RunId 'option1-live-20260826-002' -ResultsRoot $resultsRoot `
                 -CalibrationSetPath $setPath -RubricsRoot $rubricsRoot -AllowPilotSourceOverridesForTest `
                 -LauncherLockPath $fixture.lock_path `
                 -LauncherLockSchemaPath (Join-Path $calibrationRoot 'pilots/option1-launchers.schema.json') `

@@ -3188,7 +3188,7 @@ function Invoke-CalibrationPilotRun {
         [scriptblock]$PilotGitInvoker,
         [scriptblock]$PilotArtifactWriter
     )
-    if ($RunId -cne 'option1-live-20260825-001' -or -not (Test-CalibrationSafeLeafName $RunId)) {
+    if ($RunId -cne 'option1-live-20260826-002' -or -not (Test-CalibrationSafeLeafName $RunId)) {
         throw 'pilot_run_id_invalid'
     }
     if ($null -eq $PilotGitInvoker) { $PilotGitInvoker = ${function:Get-CalibrationPilotGitSnapshot} }

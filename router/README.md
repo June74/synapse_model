@@ -265,7 +265,7 @@ The live command is frozen as follows, but it must not be run merely because it 
 
 ```powershell
 # Live only after explicit approval of the exact commit and exact ordered identities
-pwsh -NoProfile -File .\calibration\run_calibration.ps1 -Pilot -Run -RunId option1-live-20260825-001
+pwsh -NoProfile -File .\calibration\run_calibration.ps1 -Pilot -Run -RunId option1-live-20260826-002
 ```
 
 Running that exact command requires separate explicit approval of the exact commit and exact ordered identities in the final acceptance packet. Approval of development or offline tests is not approval to execute the live command.
@@ -281,7 +281,7 @@ The local grade runs between the candidate and the judges but is not a provider 
 
 Application launch slots are a local safety ceiling, not a claim about provider-internal behavior. The pilot records `provider_side_requests.observable: false` and `provider_side_requests.count: null` because a launcher does not reveal how many provider-side requests or internal retries it may make.
 
-No retry, fallback, or resume is allowed. The pilot never substitutes another model, repeats a role, adds a fourth launch, or continues after a technical stop. A stopped or indeterminate run requires a new RunId and new explicit approval; the same run ID cannot be resumed. The current build accepts only `option1-live-20260825-001`. Do not edit the command to invent a replacement RunId. A replacement RunId requires a new reviewed build that accepts it and a revised acceptance packet that freezes and authorizes the exact replacement command, followed by new explicit approval.
+No retry, fallback, or resume is allowed. The pilot never substitutes another model, repeats a role, adds a fourth launch, or continues after a technical stop. A stopped or indeterminate run requires a new RunId and new explicit approval; the same run ID cannot be resumed. The current build accepts only `option1-live-20260826-002`. Do not edit the command to invent a replacement RunId. A replacement RunId requires a new reviewed build that accepts it and a revised acceptance packet that freezes and authorizes the exact replacement command, followed by new explicit approval.
 
 On a technically completed run, the complete persistent shape of the bounded safe artifacts is:
 

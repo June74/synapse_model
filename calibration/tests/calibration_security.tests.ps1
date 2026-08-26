@@ -434,7 +434,7 @@ function Invoke-SecurityPilotFailureCase {
     $parameters = @{
         Pilot = $true
         Run = $true
-        RunId = 'option1-live-20260825-001'
+        RunId = 'option1-live-20260826-002'
         ResultsRoot = $input.results_root
         CalibrationSetPath = $setPath
         RubricsRoot = $rubricsRoot
@@ -1071,7 +1071,7 @@ Invoke-Assertion 'option 1 rejects malformed candidate and judge execution envel
             Assert-SequenceEqual @($execution.result.attempts.state) $expectedStates
             $failedAttempt = if ($case.role -ceq 'candidate') { $execution.result.attempts[0] } else { $execution.result.attempts[1] }
             Assert-Equal $failedAttempt.envelope_rejection_code $case.category
-            $runRoot = Join-Path $execution.input.results_root 'option1-live-20260825-001'
+            $runRoot = Join-Path $execution.input.results_root 'option1-live-20260826-002'
             $persisted = Get-Content -Raw -LiteralPath (Join-Path $runRoot 'result.json') | ConvertFrom-Json -Depth 100
             Assert-Equal $persisted.stop_reason 'provider_envelope_invalid'
             Assert-SequenceEqual @($persisted.attempts.state) $expectedStates
@@ -1118,7 +1118,7 @@ Invoke-Assertion 'option 1 persists only bounded envelope categories and omits m
             foreach ($later in @($execution.result.attempts | Select-Object -Skip 1)) {
                 Assert-Equal $later.envelope_rejection_code $null
             }
-            $runRoot = Join-Path $execution.input.results_root 'option1-live-20260825-001'
+            $runRoot = Join-Path $execution.input.results_root 'option1-live-20260826-002'
             $persistedText = @(Get-ChildItem -LiteralPath $runRoot -File -Recurse | ForEach-Object {
                 Get-Content -Raw -LiteralPath $_.FullName
             }) -join "`n"
@@ -1149,7 +1149,7 @@ Invoke-Assertion 'option 1 strictly validates deterministic grader results befor
             Assert-Equal $execution.result.launcher_processes_started.total 1
             Assert-SequenceEqual @($execution.result.attempts.state) @('succeeded', 'skipped', 'skipped')
             Assert-True ($null -eq $execution.result.quality.deterministic_result)
-            $runRoot = Join-Path $execution.input.results_root 'option1-live-20260825-001'
+            $runRoot = Join-Path $execution.input.results_root 'option1-live-20260826-002'
             Assert-Equal @(Get-ChildItem -LiteralPath (Join-Path $runRoot 'claims') -File -Force).Count 1
             $persisted = Get-Content -Raw -LiteralPath (Join-Path $runRoot 'result.json') | ConvertFrom-Json -Depth 100
             Assert-Equal $persisted.stop_reason 'response_contract_invalid'
@@ -1264,7 +1264,7 @@ Invoke-Assertion 'option 1 technical failures stop at each exact role and durabl
             Assert-True ($execution.result.launcher_processes_started.total -eq $case.claims) `
                 "$($case.role) expected $($case.claims) starts, got $($execution.result.launcher_processes_started.total)."
             Assert-SequenceEqual @($execution.result.attempts.state) @($case.states)
-            $runRoot = Join-Path $execution.input.results_root 'option1-live-20260825-001'
+            $runRoot = Join-Path $execution.input.results_root 'option1-live-20260826-002'
             Assert-Equal @(Get-ChildItem -LiteralPath (Join-Path $runRoot 'claims') -File -Force).Count $case.claims
             $persisted = Get-Content -Raw -LiteralPath (Join-Path $runRoot 'result.json') | ConvertFrom-Json -Depth 100
             Assert-Equal $persisted.stop_reason $case.code
@@ -1302,7 +1302,7 @@ Invoke-Assertion 'option 1 persists normalized timeout cleanup and nonzero-exit 
             Assert-Equal $attempt.transport_status 'failed'
             Assert-Equal $attempt.contract_status 'not_evaluated'
             Assert-Equal $attempt.usage.actual_input_tokens 21
-            $runRoot = Join-Path $execution.input.results_root 'option1-live-20260825-001'
+            $runRoot = Join-Path $execution.input.results_root 'option1-live-20260826-002'
             $persistedText = @(Get-ChildItem -LiteralPath $runRoot -File -Recurse | ForEach-Object {
                 Get-Content -Raw -LiteralPath $_.FullName
             }) -join "`n"
@@ -1330,7 +1330,7 @@ Invoke-Assertion 'option 1 preclaim and postclaim failures preserve exact non-re
             Assert-Equal $execution.result.slots_consumed.total $case.claims
             Assert-Equal $execution.result.launcher_processes_started.total 0
             Assert-SequenceEqual @($execution.result.attempts.state) @($case.states)
-            $runRoot = Join-Path $execution.input.results_root 'option1-live-20260825-001'
+            $runRoot = Join-Path $execution.input.results_root 'option1-live-20260826-002'
             $persistedText = @(Get-ChildItem -LiteralPath $runRoot -File -Recurse | ForEach-Object {
                 Get-Content -Raw -LiteralPath $_.FullName
             }) -join "`n"
@@ -1360,13 +1360,13 @@ Invoke-Assertion 'option 1 artifact failure after confirmed start becomes indete
         $resumeCalls = [pscustomobject]@{ count = 0 }
         $resumeSpy = { $resumeCalls.count++; throw 'resume reached invoker' }.GetNewClosure()
         $null = Assert-Throws {
-            Invoke-Calibration -Pilot -Run -RunId 'option1-live-20260825-001' `
+            Invoke-Calibration -Pilot -Run -RunId 'option1-live-20260826-002' `
                 -ResultsRoot $execution.input.results_root -CalibrationSetPath $setPath -RubricsRoot $rubricsRoot `
                 -CandidateInvoker $resumeSpy -JudgeInvoker $resumeSpy `
                 -PilotGitInvoker { [pscustomobject]@{ clean = $true; commit = ('d' * 40) } } | Out-Null
         } 'pilot_run_collision'
         Assert-Equal $resumeCalls.count 0
-        $runRoot = Join-Path $execution.input.results_root 'option1-live-20260825-001'
+        $runRoot = Join-Path $execution.input.results_root 'option1-live-20260826-002'
         $persistedText = @(Get-ChildItem -LiteralPath $runRoot -File -Recurse | ForEach-Object {
             Get-Content -Raw -LiteralPath $_.FullName
         }) -join "`n"
@@ -1418,7 +1418,7 @@ Invoke-Assertion 'every post-launch ledger transition recovers one-shot persiste
             Assert-False $execution.result.profile_promotion_allowed
             Assert-False $execution.result.profile_mutated
             Assert-False $execution.result.production_eligibility_changed
-            $runRoot = Join-Path $execution.input.results_root 'option1-live-20260825-001'
+            $runRoot = Join-Path $execution.input.results_root 'option1-live-20260826-002'
             $persisted = Get-Content -Raw -LiteralPath (Join-Path $runRoot 'result.json') | ConvertFrom-Json -Depth 100
             Assert-Equal @(Get-ChildItem -LiteralPath (Join-Path $runRoot 'claims') -File -Force).Count $case.claims
             Assert-Equal $persisted.run_state 'indeterminate'
@@ -1435,7 +1435,7 @@ Invoke-Assertion 'every post-launch ledger transition recovers one-shot persiste
             $resumeCalls = [pscustomobject]@{ count = 0 }
             $resumeSpy = { $resumeCalls.count++; throw 'resume reached invoker' }.GetNewClosure()
             $null = Assert-Throws {
-                Invoke-Calibration -Pilot -Run -RunId 'option1-live-20260825-001' `
+                Invoke-Calibration -Pilot -Run -RunId 'option1-live-20260826-002' `
                     -ResultsRoot $execution.input.results_root -CalibrationSetPath $setPath -RubricsRoot $rubricsRoot `
                     -CandidateInvoker $resumeSpy -JudgeInvoker $resumeSpy `
                     -PilotGitInvoker { [pscustomobject]@{ clean = $true; commit = ('d' * 40) } } | Out-Null
@@ -1477,7 +1477,7 @@ Invoke-Assertion 'swallowed launch-guard persistence failures recover exact cand
             Assert-Equal $execution.result.slots_consumed.total $case.claims
             Assert-Equal $execution.result.launcher_processes_started.total $case.starts
             Assert-SequenceEqual @($execution.result.attempts.state) @($case.states)
-            $runRoot = Join-Path $execution.input.results_root 'option1-live-20260825-001'
+            $runRoot = Join-Path $execution.input.results_root 'option1-live-20260826-002'
             Assert-Equal @(Get-ChildItem -LiteralPath (Join-Path $runRoot 'claims') -File -Force).Count $case.claims
             $persisted = Get-Content -Raw -LiteralPath (Join-Path $runRoot 'result.json') | ConvertFrom-Json -Depth 100
             Assert-Equal $persisted.run_state 'indeterminate'
@@ -1487,7 +1487,7 @@ Invoke-Assertion 'swallowed launch-guard persistence failures recover exact cand
             $resumeCalls = [pscustomobject]@{ count = 0 }
             $resumeSpy = { $resumeCalls.count++; throw 'resume reached invoker' }.GetNewClosure()
             $null = Assert-Throws {
-                Invoke-Calibration -Pilot -Run -RunId 'option1-live-20260825-001' `
+                Invoke-Calibration -Pilot -Run -RunId 'option1-live-20260826-002' `
                     -ResultsRoot $execution.input.results_root -CalibrationSetPath $setPath -RubricsRoot $rubricsRoot `
                     -CandidateInvoker $resumeSpy -JudgeInvoker $resumeSpy `
                     -PilotGitInvoker { [pscustomobject]@{ clean = $true; commit = ('d' * 40) } } | Out-Null
@@ -1537,7 +1537,7 @@ Invoke-Assertion 'swallowed launch-guard write-then-throw recovery rebases exact
             }
             Assert-Equal (Get-CalibrationObjectSha256 -Value $execution.result.quality) `
                 (Get-CalibrationObjectSha256 -Value $fault.persisted.quality)
-            $runRoot = Join-Path $execution.input.results_root 'option1-live-20260825-001'
+            $runRoot = Join-Path $execution.input.results_root 'option1-live-20260826-002'
             Assert-Equal @(Get-ChildItem -LiteralPath (Join-Path $runRoot 'claims') -File -Force).Count $case.claims
             $persisted = Get-Content -Raw -LiteralPath (Join-Path $runRoot 'result.json') | ConvertFrom-Json -Depth 100
             Assert-Equal $persisted.run_state 'indeterminate'
@@ -1547,7 +1547,7 @@ Invoke-Assertion 'swallowed launch-guard write-then-throw recovery rebases exact
             $resumeCalls = [pscustomobject]@{ count = 0 }
             $resumeSpy = { $resumeCalls.count++; throw 'resume reached invoker' }.GetNewClosure()
             $null = Assert-Throws {
-                Invoke-Calibration -Pilot -Run -RunId 'option1-live-20260825-001' `
+                Invoke-Calibration -Pilot -Run -RunId 'option1-live-20260826-002' `
                     -ResultsRoot $execution.input.results_root -CalibrationSetPath $setPath -RubricsRoot $rubricsRoot `
                     -CandidateInvoker $resumeSpy -JudgeInvoker $resumeSpy `
                     -PilotGitInvoker { [pscustomobject]@{ clean = $true; commit = ('d' * 40) } } | Out-Null
@@ -1669,7 +1669,7 @@ Invoke-Assertion 'option 1 failure artifacts exclude unsafe fields and do not mu
         Assert-Equal $execution.result.stop_reason 'response_contract_invalid'
         Assert-False $execution.result.profile_mutated
         Assert-False $execution.result.production_eligibility_changed
-        $runRoot = Join-Path $execution.input.results_root 'option1-live-20260825-001'
+        $runRoot = Join-Path $execution.input.results_root 'option1-live-20260826-002'
         $artifacts = @(Get-ChildItem -LiteralPath $runRoot -File -Recurse | Where-Object {
             $_.Name -in @('plan.json', 'result.json', 'candidate-response.json', 'judge-responses.json')
         })
