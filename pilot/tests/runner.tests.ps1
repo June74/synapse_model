@@ -735,6 +735,36 @@ Invoke-Assertion 'ConvertFrom-AgyOutput normalizes reordered canonical failure p
     Assert-True (Test-CanonicalResponse $agy).valid
 }
 
+Invoke-Assertion 'ConvertFrom-AgyOutput preserves case-variant canonical property names for rejection' {
+    $cases = @(
+        [pscustomobject]@{ json = '{"status":"SUCCESS","structured_output":{"Status":"success","answer":"4","error":null}}'; names = @('Status', 'answer', 'error') }
+        [pscustomobject]@{ json = '{"status":"SUCCESS","structured_output":{"status":"success","Answer":"4","error":null}}'; names = @('status', 'Answer', 'error') }
+        [pscustomobject]@{ json = '{"status":"SUCCESS","structured_output":{"status":"success","answer":"4","Error":null}}'; names = @('status', 'answer', 'Error') }
+    )
+    foreach ($case in $cases) {
+        $agy = ConvertFrom-AgyOutput $case.json
+        $actualNames = @($agy.PSObject.Properties.Name)
+        Assert-Equal $actualNames.Count @($case.names).Count
+        for ($index = 0; $index -lt @($case.names).Count; $index++) {
+            Assert-True ([string]::Equals(
+                    [string]$actualNames[$index], [string]$case.names[$index], [StringComparison]::Ordinal))
+        }
+    }
+}
+
+Invoke-Assertion 'Test-CanonicalResponse rejects case-variant canonical property names' {
+    $cases = @(
+        [pscustomobject]@{ value = [pscustomobject][ordered]@{ Status = 'success'; answer = '4'; error = $null }; missing = 'status' }
+        [pscustomobject]@{ value = [pscustomobject][ordered]@{ status = 'success'; Answer = '4'; error = $null }; missing = 'answer' }
+        [pscustomobject]@{ value = [pscustomobject][ordered]@{ status = 'success'; answer = '4'; Error = $null }; missing = 'error' }
+    )
+    foreach ($case in $cases) {
+        $validation = Test-CanonicalResponse $case.value
+        Assert-True (-not $validation.valid)
+        Assert-Contains $validation.reason "Missing required property '$($case.missing)'."
+    }
+}
+
 Invoke-Assertion 'ConvertFrom-AgyOutput preserves invalid canonical value types' {
     $agy = ConvertFrom-AgyOutput '{"status":"SUCCESS","structured_output":{"answer":4,"error":"","status":"success"}}'
     Assert-SequenceEqual @($agy.PSObject.Properties.Name) @('status', 'answer', 'error')

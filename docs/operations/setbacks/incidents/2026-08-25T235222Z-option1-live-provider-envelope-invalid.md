@@ -2,7 +2,7 @@
 
 - **Status:** contained
 - **First observed:** 2026-08-25T23:52:22.2693656Z
-- **Last observed:** 2026-08-26T00:04:04.9658578Z
+- **Last observed:** 2026-08-26T05:00:45.1845601Z
 - **Phase/task:** Task 9 approved live acceptance
 - **Environment:** Windows PowerShell, isolated Option 1 worktree
 - **Version/commit:** `98df9e955e51654c5e927229753901a585715e33`
@@ -67,3 +67,5 @@ The run directory contains only `.run.claim`, the exact candidate claim, `plan.j
 - 2026-08-25T23:52:22.2693656Z: First live occurrence; contained without retry.
 - 2026-08-25T23:55:02.5686300Z: Corrected a read-only verification label and reconfirmed the exact approved commit from the immutable plan.
 - 2026-08-26T00:04:04.9658578Z: Offline composition tests confirmed the adapter/envelope contract inconsistency and rejected ordinary parse/nonzero-exit explanations; read-only launcher metadata confirmed replacement during the live run window.
+- 2026-08-26T04:55:07.0323082Z: Follow-up spec review found that the repaired exact-three gate and validator still used PowerShell's case-insensitive membership operators, allowing `Status`, `Answer`, or `Error` variants to satisfy the canonical shape. Focused RED returned exit code 1 at the validator assertion, while the adapter preservation assertion unexpectedly passed because the shared sequence helper also compares strings case-insensitively. The test issue was contained by requiring ordinal property-name comparisons in this regression before production changes. A subsequent bounded incident search included one unsupported wildcard path argument; it changed no files and printed no sensitive values. No launcher, provider, network, live calibration, or consumed RunId was used.
+- 2026-08-26T05:00:45.1845601Z: The corrected RED failed only the adapter preservation and validator rejection assertions. Case-sensitive exact-property membership then made all three offline suites GREEN: pilot 120 assertions with one privilege-only skip, calibration functional 52 assertions, and calibration security 39 assertions, all at exit code 0. Exact lowercase reordered names remain accepted, while `Status`, `Answer`, and `Error` variants remain unnormalized and are rejected. The incident remains contained pending the broader repair tasks and a separately authorized future acceptance packet.

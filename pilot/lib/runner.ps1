@@ -194,9 +194,9 @@ function ConvertTo-AgyCanonicalResponse {
 
     $propertyNames = @($Response.PSObject.Properties.Name)
     if ($propertyNames.Count -eq 3 -and
-        $propertyNames -contains 'status' -and
-        $propertyNames -contains 'answer' -and
-        $propertyNames -contains 'error') {
+        $propertyNames -ccontains 'status' -and
+        $propertyNames -ccontains 'answer' -and
+        $propertyNames -ccontains 'error') {
         $normalizedError = if ($Response.status -is [string] -and
             $Response.status -ceq 'success' -and
             $Response.error -is [string] -and
@@ -268,14 +268,14 @@ function Test-CanonicalResponse {
     } else {
         $propertyNames = @($Response.PSObject.Properties.Name)
         foreach ($required in @('status', 'answer', 'error')) {
-            if ($required -notin $propertyNames) {
+            if ($required -cnotin $propertyNames) {
                 $reason = "Missing required property '$required'."
                 break
             }
         }
 
         if ($null -eq $reason) {
-            $unexpected = @($propertyNames | Where-Object { $_ -notin @('status', 'answer', 'error') })
+            $unexpected = @($propertyNames | Where-Object { $_ -cnotin @('status', 'answer', 'error') })
             if ($unexpected.Count -gt 0) {
                 $reason = "Unexpected properties: $($unexpected -join ', ')."
             }
