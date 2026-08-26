@@ -1,0 +1,156 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "calibration-option1-launcher-lock/v1",
+  "title": "Option 1 reviewed launcher identities",
+  "type": "object",
+  "required": ["lock_version", "pilot_id", "roles"],
+  "properties": {
+    "lock_version": { "const": "calibration-launcher-lock/v1" },
+    "pilot_id": { "const": "option1-three-launch-v1" },
+    "roles": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "prefixItems": [
+        { "$ref": "#/$defs/agyRole" },
+        { "$ref": "#/$defs/codexRole" },
+        { "$ref": "#/$defs/claudeRole" }
+      ],
+      "items": false
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "locator": {
+      "type": "object",
+      "required": ["anchor", "relative_path"],
+      "properties": {
+        "anchor": { "const": "resolved_launcher_dir" },
+        "relative_path": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^(?![A-Za-z]:)(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*[%$*?\\[\\]{}\\\\])[A-Za-z0-9@._+-]+(?:/[A-Za-z0-9@._+-]+)*$"
+        }
+      },
+      "additionalProperties": false
+    },
+    "componentBase": {
+      "type": "object",
+      "required": ["id", "kind", "purpose", "locator", "sha256"],
+      "properties": {
+        "id": { "type": "string" },
+        "kind": { "enum": ["powershell_shim", "javascript_entrypoint", "package_manifest", "native_executable"] },
+        "purpose": { "enum": ["provenance", "executed"] },
+        "locator": { "$ref": "#/$defs/locator" },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      },
+      "additionalProperties": false
+    },
+    "agyNative": { "allOf": [
+      { "$ref": "#/$defs/componentBase" },
+      { "properties": {
+        "id": { "const": "agy_native" }, "kind": { "const": "native_executable" },
+        "purpose": { "const": "executed" },
+        "locator": { "properties": { "anchor": { "const": "resolved_launcher_dir" }, "relative_path": { "const": "agy.exe" } } }
+      } }
+    ] },
+    "codexShim": { "allOf": [
+      { "$ref": "#/$defs/componentBase" },
+      { "properties": {
+        "id": { "const": "codex_shim" }, "kind": { "const": "powershell_shim" },
+        "purpose": { "const": "provenance" },
+        "locator": { "properties": { "anchor": { "const": "resolved_launcher_dir" }, "relative_path": { "const": "codex.ps1" } } }
+      } }
+    ] },
+    "codexJavascript": { "allOf": [
+      { "$ref": "#/$defs/componentBase" },
+      { "properties": {
+        "id": { "const": "codex_javascript" }, "kind": { "const": "javascript_entrypoint" },
+        "purpose": { "const": "provenance" },
+        "locator": { "properties": { "anchor": { "const": "resolved_launcher_dir" }, "relative_path": { "const": "node_modules/@openai/codex/bin/codex.js" } } }
+      } }
+    ] },
+    "codexPlatformManifest": { "allOf": [
+      { "$ref": "#/$defs/componentBase" },
+      { "properties": {
+        "id": { "const": "codex_platform_manifest" }, "kind": { "const": "package_manifest" },
+        "purpose": { "const": "provenance" },
+        "locator": { "properties": { "anchor": { "const": "resolved_launcher_dir" }, "relative_path": { "const": "node_modules/@openai/codex/node_modules/@openai/codex-win32-x64/package.json" } } }
+      } }
+    ] },
+    "codexNative": { "allOf": [
+      { "$ref": "#/$defs/componentBase" },
+      { "properties": {
+        "id": { "const": "codex_native" }, "kind": { "const": "native_executable" },
+        "purpose": { "const": "executed" },
+        "locator": { "properties": { "anchor": { "const": "resolved_launcher_dir" }, "relative_path": { "const": "node_modules/@openai/codex/node_modules/@openai/codex-win32-x64/vendor/x86_64-pc-windows-msvc/bin/codex.exe" } } }
+      } }
+    ] },
+    "claudeShim": { "allOf": [
+      { "$ref": "#/$defs/componentBase" },
+      { "properties": {
+        "id": { "const": "claude_shim" }, "kind": { "const": "powershell_shim" },
+        "purpose": { "const": "provenance" },
+        "locator": { "properties": { "anchor": { "const": "resolved_launcher_dir" }, "relative_path": { "const": "claude.ps1" } } }
+      } }
+    ] },
+    "claudeNative": { "allOf": [
+      { "$ref": "#/$defs/componentBase" },
+      { "properties": {
+        "id": { "const": "claude_native" }, "kind": { "const": "native_executable" },
+        "purpose": { "const": "executed" },
+        "locator": { "properties": { "anchor": { "const": "resolved_launcher_dir" }, "relative_path": { "const": "node_modules/@anthropic-ai/claude-code/bin/claude.exe" } } }
+      } }
+    ] },
+    "agyRole": {
+      "type": "object",
+      "required": ["ordinal", "role", "launcher", "route_id", "components"],
+      "properties": {
+        "ordinal": { "const": 1 },
+        "role": { "const": "candidate" },
+        "launcher": { "const": "agy" },
+        "route_id": { "const": "agy__gemini_3_7_flash_low__low" },
+        "components": {
+          "type": "array", "minItems": 1, "maxItems": 1,
+          "prefixItems": [{ "$ref": "#/$defs/agyNative" }], "items": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "codexRole": {
+      "type": "object",
+      "required": ["ordinal", "role", "launcher", "route_id", "components"],
+      "properties": {
+        "ordinal": { "const": 2 },
+        "role": { "const": "judge_1" },
+        "launcher": { "const": "codex" },
+        "route_id": { "const": "codex__gpt_5_6_sol__max" },
+        "components": {
+          "type": "array", "minItems": 4, "maxItems": 4,
+          "prefixItems": [
+            { "$ref": "#/$defs/codexShim" }, { "$ref": "#/$defs/codexJavascript" },
+            { "$ref": "#/$defs/codexPlatformManifest" }, { "$ref": "#/$defs/codexNative" }
+          ],
+          "items": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "claudeRole": {
+      "type": "object",
+      "required": ["ordinal", "role", "launcher", "route_id", "components"],
+      "properties": {
+        "ordinal": { "const": 3 },
+        "role": { "const": "judge_2" },
+        "launcher": { "const": "claude" },
+        "route_id": { "const": "claude__claude_opus_5__max" },
+        "components": {
+          "type": "array", "minItems": 2, "maxItems": 2,
+          "prefixItems": [{ "$ref": "#/$defs/claudeShim" }, { "$ref": "#/$defs/claudeNative" }],
+          "items": false
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

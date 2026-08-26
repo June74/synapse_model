@@ -688,6 +688,90 @@ function Resolve-RunnerNativeCommand {
     }
 }
 
+function Test-RunnerExactPropertySet {
+    param([AllowNull()][object]$Value, [Parameter(Mandatory)][string[]]$Names)
+    if ($null -eq $Value -or $Value -is [string] -or $Value -is [Collections.IDictionary] -or
+        $Value -is [Collections.IList]) { return $false }
+    $actual = @($Value.PSObject.Properties.Name)
+    if ($actual.Count -ne $Names.Count) { return $false }
+    for ($index = 0; $index -lt $Names.Count; $index++) {
+        if ($actual[$index] -cne $Names[$index]) { return $false }
+    }
+    return $true
+}
+
+function Test-RunnerPreparedLauncherIdentity {
+    param([AllowNull()][object]$Identity, [Parameter(Mandatory)][object]$Command)
+    if (-not (Test-RunnerExactPropertySet -Value $Identity -Names @(
+            'prepared_launcher_version', 'ordinal', 'role', 'launcher', 'route_id', 'executed_component_id',
+            'executable', 'environment'))) { return $false }
+    $expectedBindings = @(
+        @('candidate', 'agy', 'agy__gemini_3_7_flash_low__low', 'agy_native'),
+        @('judge_1', 'codex', 'codex__gpt_5_6_sol__max', 'codex_native'),
+        @('judge_2', 'claude', 'claude__claude_opus_5__max', 'claude_native')
+    )
+    $expected = if ($Identity.ordinal -is [int] -and $Identity.ordinal -ge 1 -and $Identity.ordinal -le 3) {
+        $expectedBindings[$Identity.ordinal - 1]
+    } else { $null }
+    if ($Identity.prepared_launcher_version -isnot [string] -or
+        $Identity.prepared_launcher_version -cne 'calibration-prepared-launcher/v1' -or
+        $Identity.ordinal -isnot [int] -or $Identity.ordinal -lt 1 -or $Identity.ordinal -gt 3 -or
+        $null -eq $expected -or $Identity.role -isnot [string] -or $Identity.role -cne $expected[0] -or
+        $Identity.launcher -isnot [string] -or $Identity.launcher -cne $expected[1] -or
+        $Identity.launcher -cne [string]$Command.tool -or
+        $Identity.route_id -isnot [string] -or $Identity.route_id -cne $expected[2] -or
+        $Identity.route_id -cne [string]$Command.route_id -or
+        $Identity.executed_component_id -isnot [string] -or
+        $Identity.executed_component_id -cne $expected[3] -or
+        $Identity.executable -isnot [string] -or
+        -not [IO.Path]::IsPathFullyQualified([string]$Identity.executable) -or
+        [IO.Path]::GetFullPath([string]$Identity.executable) -cne [string]$Identity.executable) { return $false }
+    if (-not (Test-RunnerExactPropertySet -Value $Identity.environment -Names @('clear', 'set')) -or
+        $Identity.environment.clear -isnot [Collections.IList] -or
+        $Identity.environment.set -isnot [pscustomobject]) { return $false }
+    $expectedClear = if ($Identity.launcher -ceq 'codex') {
+        @('CODEX_MANAGED_BY_NPM', 'CODEX_MANAGED_BY_BUN', 'CODEX_MANAGED_BY_PNPM')
+    } else { @() }
+    if (@($Identity.environment.clear).Count -ne $expectedClear.Count) { return $false }
+    for ($index = 0; $index -lt $expectedClear.Count; $index++) {
+        if ($Identity.environment.clear[$index] -isnot [string] -or
+            $Identity.environment.clear[$index] -cne $expectedClear[$index]) { return $false }
+    }
+    $setNames = @($Identity.environment.set.PSObject.Properties | ForEach-Object { [string]$_.Name })
+    if ($Identity.launcher -ceq 'codex') {
+        if ($setNames.Count -ne 2 -or $setNames[0] -cne 'CODEX_MANAGED_PACKAGE_ROOT' -or
+            $setNames[1] -cne 'CODEX_MANAGED_BY_NPM' -or
+            $Identity.environment.set.CODEX_MANAGED_PACKAGE_ROOT -isnot [string] -or
+            -not [IO.Path]::IsPathFullyQualified([string]$Identity.environment.set.CODEX_MANAGED_PACKAGE_ROOT) -or
+            [IO.Path]::GetFullPath([string]$Identity.environment.set.CODEX_MANAGED_PACKAGE_ROOT) -cne
+                [string]$Identity.environment.set.CODEX_MANAGED_PACKAGE_ROOT -or
+            $Identity.environment.set.CODEX_MANAGED_BY_NPM -isnot [string] -or
+            $Identity.environment.set.CODEX_MANAGED_BY_NPM -cne '1') { return $false }
+    } elseif ($setNames.Count -ne 0) { return $false }
+    return $true
+}
+
+function Bind-RunnerPreparedCommand {
+    param(
+        [Parameter(Mandatory)][object]$Command,
+        [Parameter(Mandatory)][object]$PreparedIdentity
+    )
+    if (-not (Test-RunnerPreparedLauncherIdentity -Identity $PreparedIdentity -Command $Command)) {
+        throw 'prepared_launcher_identity_invalid'
+    }
+    return [pscustomobject][ordered]@{
+        prepared = $true
+        executable = [string]$PreparedIdentity.executable
+        arguments = @($Command.arguments)
+        prompt = [string]$Command.prompt
+        tool = [string]$Command.tool
+        route_id = [string]$Command.route_id
+        working_directory = [string]$Command.working_directory
+        environment = $PreparedIdentity.environment
+        prepared_identity = $PreparedIdentity
+    }
+}
+
 function ConvertTo-RunnerNormalizedLineEndings {
     param([AllowNull()][string]$Text)
 
@@ -939,10 +1023,25 @@ function Invoke-NativeCandidate {
     param(
         [Parameter(Mandatory)][object]$Command,
         [int]$TimeoutSeconds = 0,
-        [switch]$PreserveRawOutput
+        [switch]$PreserveRawOutput,
+        [scriptblock]$StartInfoObserver
     )
 
-    $resolvedCommand = Resolve-RunnerNativeCommand -Command $Command
+    $isPrepared = $Command.PSObject.Properties.Name -ccontains 'prepared' -and
+        $Command.prepared -is [bool] -and [bool]$Command.prepared
+    if ($isPrepared) {
+        if (-not (Test-RunnerExactPropertySet -Value $Command -Names @(
+                'prepared', 'executable', 'arguments', 'prompt', 'tool', 'route_id', 'working_directory',
+                'environment', 'prepared_identity')) -or
+            -not (Test-RunnerPreparedLauncherIdentity -Identity $Command.prepared_identity -Command $Command) -or
+            $Command.executable -isnot [string] -or
+            $Command.executable -cne $Command.prepared_identity.executable) {
+            throw 'prepared_launcher_command_invalid'
+        }
+        $resolvedCommand = $Command
+    } else {
+        $resolvedCommand = Resolve-RunnerNativeCommand -Command $Command
+    }
     $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
     $startInfo.FileName = [string]$resolvedCommand.executable
     $startInfo.WorkingDirectory = [string]$resolvedCommand.working_directory
@@ -953,8 +1052,19 @@ function Invoke-NativeCandidate {
     $utf8Encoding = [System.Text.UTF8Encoding]::new($false)
     $startInfo.StandardOutputEncoding = $utf8Encoding
     $startInfo.StandardErrorEncoding = $utf8Encoding
+    if ($isPrepared) {
+        foreach ($name in @($resolvedCommand.environment.clear)) {
+            [void]$startInfo.Environment.Remove([string]$name)
+        }
+        foreach ($property in $resolvedCommand.environment.set.PSObject.Properties) {
+            $startInfo.Environment[[string]$property.Name] = [string]$property.Value
+        }
+    }
     foreach ($argument in @($resolvedCommand.arguments)) {
         [void]$startInfo.ArgumentList.Add([string]$argument)
+    }
+    if ($null -ne $StartInfoObserver) {
+        $null = & $StartInfoObserver $startInfo $resolvedCommand
     }
 
     $promptProperty = $Command.PSObject.Properties['prompt']
@@ -1533,7 +1643,13 @@ function Invoke-PilotCandidate {
     $note = 'completed'
     try {
         $command = New-CandidateCommand -Candidate $Candidate -Prompt $Prompt
-        if ($null -ne $LaunchGuard) { $null = & $LaunchGuard $Candidate $command }
+        if ($null -ne $LaunchGuard) {
+            $guardResult = & $LaunchGuard $Candidate $command
+            if ($guardResult -is [pscustomobject] -and
+                $guardResult.PSObject.Properties.Name -ccontains 'prepared_launcher_version') {
+                $command = Bind-RunnerPreparedCommand -Command $command -PreparedIdentity $guardResult
+            }
+        }
         $processResult = if ($null -ne $NativeInvoker) {
             & $NativeInvoker $command
         } else {

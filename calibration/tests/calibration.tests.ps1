@@ -233,7 +233,7 @@ function Invoke-TestCalibrationPilotRun {
     $candidateInvoker = {
         param($Candidate, $Prompt, $LaunchGuard, $RunId)
         $command = New-TestCalibrationPilotCommand -Candidate $Candidate -Prompt $Prompt
-        & $LaunchGuard $Candidate $command
+        $null = & $LaunchGuard $Candidate $command
         Assert-TestCalibrationPilotLaunchBoundary -ResultsRoot $ledgerInput.results_root -RunId $RunId -Ordinal 1 -ExpectedClaimCount 1
         $boundaryEvents.Add('candidate:slot_reserved:claims=1')
         $invocations.Add([string]$Candidate.route_id)
@@ -243,7 +243,7 @@ function Invoke-TestCalibrationPilotRun {
         param($JudgeProfileId, $JudgePayload, $PromptDefinition, $LaunchGuard, $RunId)
         $resolved = Get-CalibrationProfileAndCandidate -ConfigurationId $JudgeProfileId
         $command = New-TestCalibrationPilotCommand -Candidate $resolved.candidate -Prompt 'anonymized-judge-payload'
-        & $LaunchGuard $resolved.candidate $command
+        $null = & $LaunchGuard $resolved.candidate $command
         $ordinal = if ($JudgeProfileId -ceq 'gpt-5.6-sol__max') { 2 } else { 3 }
         Assert-TestCalibrationPilotLaunchBoundary -ResultsRoot $ledgerInput.results_root -RunId $RunId `
             -Ordinal $ordinal -ExpectedClaimCount $ordinal
@@ -706,7 +706,8 @@ if (Test-Path -LiteralPath $implementationPath -PathType Leaf) {
             -CalibrationSetPath $setPath -RubricsRoot $rubricsRoot
         foreach ($source in @(
             $bundle.sources.manifest, $bundle.sources.manifest_schema, $bundle.sources.matrix, $bundle.sources.calibration_set,
-            $bundle.sources.model_profile_schema, $bundle.sources.response_schema
+            $bundle.sources.model_profile_schema, $bundle.sources.response_schema,
+            $bundle.sources.launcher_lock, $bundle.sources.launcher_lock_schema
         )) {
             Assert-True ($source.bytes -is [byte[]]) 'A source snapshot must retain its original bytes.'
             Assert-True ($source.text -is [string]) 'A source snapshot must retain its strict UTF-8 text.'
@@ -863,7 +864,8 @@ if (Test-Path -LiteralPath $implementationPath -PathType Leaf) {
             Assert-False ([bool]$result.profile_promotion_allowed)
             Assert-False ([bool]$result.profile_mutated)
             Assert-False ([bool]$result.production_eligibility_changed)
-            $hashNames = @('manifest', 'matrix', 'candidate_profile', 'calibration_set', 'prompt_definition', 'rubric', 'response_schema')
+            $hashNames = @('manifest', 'matrix', 'candidate_profile', 'calibration_set', 'prompt_definition', 'rubric',
+                'response_schema', 'launcher_lock', 'launcher_lock_schema')
             Assert-SequenceEqual @($result.source_hashes.PSObject.Properties.Name) $hashNames
             $validatedSources = Import-CalibrationPilotManifest -Path $pilotManifestPath -SchemaPath $pilotManifestSchemaPath `
                 -CalibrationSetPath $setPath -RubricsRoot $rubricsRoot
@@ -876,6 +878,8 @@ if (Test-Path -LiteralPath $implementationPath -PathType Leaf) {
                 prompt_definition = Get-TestCalibrationObjectSha256 -Value $validatedSources.prompt
                 rubric = Get-TestCalibrationObjectSha256 -Value $validatedSources.rubric
                 response_schema = (Get-FileHash -LiteralPath (Join-Path $projectRoot 'pilot/shared/response_schema.json') -Algorithm SHA256).Hash.ToLowerInvariant()
+                launcher_lock = (Get-FileHash -LiteralPath (Join-Path $calibrationRoot 'pilots/option1-launchers-v1.json') -Algorithm SHA256).Hash.ToLowerInvariant()
+                launcher_lock_schema = (Get-FileHash -LiteralPath (Join-Path $calibrationRoot 'pilots/option1-launchers.schema.json') -Algorithm SHA256).Hash.ToLowerInvariant()
             }
             foreach ($name in $hashNames) {
                 $hash = [string]$result.source_hashes.$name
@@ -1451,7 +1455,7 @@ if (Test-Path -LiteralPath $implementationPath -PathType Leaf) {
                 Assert-True ($null -ne $LaunchGuard) 'Default adapter omitted the launch guard.'
                 $command = New-TestCalibrationPilotCommand -Candidate $Candidate -Prompt $Prompt
                 $before = $script:PilotDefaultAdapterState.guard_calls
-                & $LaunchGuard $Candidate $command
+                $null = & $LaunchGuard $Candidate $command
                 $script:PilotDefaultAdapterState.guard_calls++
                 Assert-Equal $script:PilotDefaultAdapterState.guard_calls ($before + 1)
                 $ordinal = switch ([string]$Candidate.route_id) {
@@ -2204,6 +2208,268 @@ def sum_even(values):
                 Assert-True $threw "Expected unsafe run id '$unsafe' to be rejected."
             }
         } finally { }
+    }
+}
+
+function New-TestCalibrationLauncherFixture {
+    $root = New-TestDirectory
+    $anchors = [ordered]@{
+        agy = Join-Path $root 'agy-bin'
+        codex = Join-Path $root 'npm-bin'
+        claude = Join-Path $root 'npm-bin'
+    }
+    $relative = [ordered]@{
+        agy_native = 'agy.exe'
+        codex_shim = 'codex.ps1'
+        codex_javascript = 'node_modules/@openai/codex/bin/codex.js'
+        codex_platform_manifest = 'node_modules/@openai/codex/node_modules/@openai/codex-win32-x64/package.json'
+        codex_native = 'node_modules/@openai/codex/node_modules/@openai/codex-win32-x64/vendor/x86_64-pc-windows-msvc/bin/codex.exe'
+        claude_shim = 'claude.ps1'
+        claude_native = 'node_modules/@anthropic-ai/claude-code/bin/claude.exe'
+    }
+    $componentRole = [ordered]@{
+        agy_native = 'agy'; codex_shim = 'codex'; codex_javascript = 'codex'
+        codex_platform_manifest = 'codex'; codex_native = 'codex'
+        claude_shim = 'claude'; claude_native = 'claude'
+    }
+    $paths = @{}
+    foreach ($id in $relative.Keys) {
+        $path = Join-Path $anchors[$componentRole[$id]] ($relative[$id].Replace('/', [IO.Path]::DirectorySeparatorChar))
+        $null = New-Item -ItemType Directory -Path (Split-Path -Parent $path) -Force
+        [IO.File]::WriteAllText($path, "fixture-$id", [Text.UTF8Encoding]::new($false))
+        $paths[$id] = $path
+    }
+    function New-TestComponent([string]$Id, [string]$Kind, [string]$Purpose) {
+        [pscustomobject][ordered]@{
+            id = $Id; kind = $Kind; purpose = $Purpose
+            locator = [pscustomobject][ordered]@{ anchor = 'resolved_launcher_dir'; relative_path = $relative[$Id] }
+            sha256 = (Get-FileHash -LiteralPath $paths[$Id] -Algorithm SHA256).Hash.ToLowerInvariant()
+        }
+    }
+    $lock = [pscustomobject][ordered]@{
+        lock_version = 'calibration-launcher-lock/v1'
+        pilot_id = 'option1-three-launch-v1'
+        roles = @(
+            [pscustomobject][ordered]@{ ordinal = 1; role = 'candidate'; launcher = 'agy'; route_id = 'agy__gemini_3_7_flash_low__low'; components = @(
+                (New-TestComponent 'agy_native' 'native_executable' 'executed')) }
+            [pscustomobject][ordered]@{ ordinal = 2; role = 'judge_1'; launcher = 'codex'; route_id = 'codex__gpt_5_6_sol__max'; components = @(
+                (New-TestComponent 'codex_shim' 'powershell_shim' 'provenance'),
+                (New-TestComponent 'codex_javascript' 'javascript_entrypoint' 'provenance'),
+                (New-TestComponent 'codex_platform_manifest' 'package_manifest' 'provenance'),
+                (New-TestComponent 'codex_native' 'native_executable' 'executed')) }
+            [pscustomobject][ordered]@{ ordinal = 3; role = 'judge_2'; launcher = 'claude'; route_id = 'claude__claude_opus_5__max'; components = @(
+                (New-TestComponent 'claude_shim' 'powershell_shim' 'provenance'),
+                (New-TestComponent 'claude_native' 'native_executable' 'executed')) }
+        )
+    }
+    $lockPath = Join-Path $root 'launchers.json'
+    $lock | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $lockPath -Encoding utf8NoBOM
+    return [pscustomobject]@{ root = $root; anchors = $anchors; paths = $paths; lock = $lock; lock_path = $lockPath }
+}
+
+Invoke-Assertion 'pilot plan binds launcher lock and schema bytes without resolving installed launchers' {
+    $resolverCalls = [Collections.Generic.List[string]]::new()
+    $resolver = { param($role, $lockRole) $resolverCalls.Add([string]$role.launcher); throw 'offline plan resolved a launcher' }.GetNewClosure()
+    $plan = Invoke-Calibration -Pilot -CalibrationSetPath $setPath -RubricsRoot $rubricsRoot -LauncherResolver $resolver
+    Assert-Equal $resolverCalls.Count 0
+    Assert-SequenceEqual @($plan.source_hashes.PSObject.Properties.Name) @(
+        'manifest', 'matrix', 'candidate_profile', 'calibration_set', 'prompt_definition', 'rubric',
+        'response_schema', 'launcher_lock', 'launcher_lock_schema')
+    Assert-Equal $plan.source_hashes.launcher_lock `
+        (Get-FileHash -LiteralPath (Join-Path $calibrationRoot 'pilots/option1-launchers-v1.json') -Algorithm SHA256).Hash.ToLowerInvariant()
+    Assert-Equal $plan.source_hashes.launcher_lock_schema `
+        (Get-FileHash -LiteralPath (Join-Path $calibrationRoot 'pilots/option1-launchers.schema.json') -Algorithm SHA256).Hash.ToLowerInvariant()
+}
+
+Invoke-Assertion 'launcher preparation verifies all ordered fake roles, locks every component, and builds direct native commands' {
+    $fixture = New-TestCalibrationLauncherFixture
+    $prepared = $null
+    try {
+        $bundle = New-CalibrationPilotSourceBundle -PilotManifestPath $pilotManifestPath `
+            -PilotManifestSchemaPath $pilotManifestSchemaPath -CalibrationSetPath $setPath -RubricsRoot $rubricsRoot `
+            -LauncherLockPath $fixture.lock_path `
+            -LauncherLockSchemaPath (Join-Path $calibrationRoot 'pilots/option1-launchers.schema.json')
+        $plan = New-CalibrationPilotPlan -SourceBundle $bundle
+        $events = [Collections.Generic.List[string]]::new()
+        $resolver = {
+            param($role, $lockRole)
+            $events.Add("resolve:$($role.launcher)")
+            $anchor = [string]$fixture.anchors[[string]$role.launcher]
+            $componentId = [string]$lockRole.components[0].id
+            return [pscustomobject][ordered]@{ anchor_path = $anchor; resolved_path = [IO.Path]::GetFullPath($fixture.paths[$componentId]) }
+        }.GetNewClosure()
+        $prepared = New-CalibrationPilotPreparedLaunches -Plan $plan -SourceBundle $bundle -LauncherResolver $resolver
+        Assert-SequenceEqual @($events) @('resolve:agy', 'resolve:codex', 'resolve:claude')
+        Assert-SequenceEqual @($prepared.roles.launcher) @('agy', 'codex', 'claude')
+        Assert-Equal $prepared.roles[0].executable ([IO.Path]::GetFullPath($fixture.paths.agy_native))
+        Assert-Equal $prepared.roles[1].executable ([IO.Path]::GetFullPath($fixture.paths.codex_native))
+        Assert-Equal $prepared.roles[2].executable ([IO.Path]::GetFullPath($fixture.paths.claude_native))
+        Assert-SequenceEqual @($prepared.roles[1].environment.clear) @(
+            'CODEX_MANAGED_BY_NPM', 'CODEX_MANAGED_BY_BUN', 'CODEX_MANAGED_BY_PNPM')
+        $expectedPackageRoot = [IO.Path]::GetDirectoryName([IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($fixture.paths.codex_javascript)))
+        Assert-SequenceEqual @($prepared.roles[1].environment.set.PSObject.Properties.Name) @(
+            'CODEX_MANAGED_PACKAGE_ROOT', 'CODEX_MANAGED_BY_NPM')
+        Assert-Equal $prepared.roles[1].environment.set.CODEX_MANAGED_PACKAGE_ROOT $expectedPackageRoot
+        Assert-Equal $prepared.roles[1].environment.set.CODEX_MANAGED_BY_NPM '1'
+        $null = Assert-Throws {
+            $stream = [IO.File]::Open($fixture.paths.codex_native, [IO.FileMode]::Open, [IO.FileAccess]::Write, [IO.FileShare]::None)
+            $stream.Dispose()
+        } $null
+    } finally {
+        if ($null -ne $prepared) { Close-CalibrationPilotPreparedLaunches -PreparedLaunches $prepared }
+        if (Test-Path -LiteralPath $fixture.root) { Remove-Item -LiteralPath $fixture.root -Recurse -Force }
+    }
+}
+
+Invoke-Assertion 'later-role launcher drift stops before every claim and provider invoker and releases opened handles' {
+    $fixture = New-TestCalibrationLauncherFixture
+    $resultsRoot = New-CalibrationResultsTestRoot
+    try {
+        [IO.File]::WriteAllText($fixture.paths.claude_native, 'drifted', [Text.UTF8Encoding]::new($false))
+        $resolverCalls = [Collections.Generic.List[string]]::new()
+        $providerCalls = [pscustomobject]@{ count = 0 }
+        $resolver = {
+            param($role, $lockRole)
+            $resolverCalls.Add([string]$role.launcher)
+            $anchor = [string]$fixture.anchors[[string]$role.launcher]
+            $componentId = [string]$lockRole.components[0].id
+            return [pscustomobject][ordered]@{ anchor_path = $anchor; resolved_path = [IO.Path]::GetFullPath($fixture.paths[$componentId]) }
+        }.GetNewClosure()
+        $providerSpy = { $providerCalls.count++; throw 'provider invoker must not run' }.GetNewClosure()
+        $result = Invoke-Calibration -Pilot -Run -RunId 'option1-live-20260825-001' -ResultsRoot $resultsRoot `
+            -CalibrationSetPath $setPath -RubricsRoot $rubricsRoot -AllowPilotSourceOverridesForTest `
+            -LauncherLockPath $fixture.lock_path `
+            -LauncherLockSchemaPath (Join-Path $calibrationRoot 'pilots/option1-launchers.schema.json') `
+            -LauncherResolver $resolver -CandidateInvoker $providerSpy -JudgeInvoker $providerSpy `
+            -PilotGitInvoker { [pscustomobject]@{ clean = $true; commit = ('a' * 40) } }
+        Assert-Equal $result.stop_reason 'source_drift'
+        Assert-Equal $result.slots_consumed.total 0
+        Assert-Equal $result.launcher_processes_started.total 0
+        Assert-Equal $providerCalls.count 0
+        Assert-SequenceEqual @($resolverCalls) @('agy', 'codex', 'claude')
+        $persisted = Get-Content -Raw -LiteralPath (Join-Path $resultsRoot 'option1-live-20260825-001/result.json')
+        $packageRoot = [IO.Path]::GetDirectoryName([IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($fixture.paths.codex_javascript)))
+        Assert-False $persisted.Contains($packageRoot, [StringComparison]::OrdinalIgnoreCase)
+        $stream = [IO.File]::Open($fixture.paths.agy_native, [IO.FileMode]::Open, [IO.FileAccess]::Write, [IO.FileShare]::None)
+        $stream.Dispose()
+    } finally {
+        if (Test-Path -LiteralPath $resultsRoot) { Remove-Item -LiteralPath $resultsRoot -Recurse -Force }
+        if (Test-Path -LiteralPath $fixture.root) { Remove-Item -LiteralPath $fixture.root -Recurse -Force }
+    }
+}
+
+Invoke-Assertion 'prepared launcher handles release after success claim failure invoker failure and timeout' {
+    foreach ($caseName in @('success', 'claim_failure', 'invoker_failure', 'timeout')) {
+        $fixture = New-TestCalibrationLauncherFixture
+        $resultsRoot = New-CalibrationResultsTestRoot
+        $originalClaim = ${function:New-CalibrationPilotSlotClaim}
+        try {
+            $lockChecks = [pscustomobject]@{ count = 0 }
+            $resolver = {
+                param($role, $lockRole)
+                $anchor = [string]$fixture.anchors[[string]$role.launcher]
+                $componentId = [string]$lockRole.components[0].id
+                return [pscustomobject][ordered]@{ anchor_path = $anchor; resolved_path = [IO.Path]::GetFullPath($fixture.paths[$componentId]) }
+            }.GetNewClosure()
+            if ($caseName -ceq 'claim_failure') {
+                Set-Item -Path Function:New-CalibrationPilotSlotClaim -Value { throw 'claim_failure_test' }
+            }
+            $candidateInvoker = {
+                param($Candidate, $Prompt, $LaunchGuard, $RunId)
+                $preparedIdentity = & $LaunchGuard $Candidate (New-TestCalibrationPilotCommand -Candidate $Candidate -Prompt $Prompt)
+                Assert-Equal $preparedIdentity.route_id $Candidate.route_id
+                $null = Assert-Throws {
+                    $stream = [IO.File]::Open($fixture.paths.agy_native, [IO.FileMode]::Open, [IO.FileAccess]::Write, [IO.FileShare]::None)
+                    $stream.Dispose()
+                } $null
+                $lockChecks.count++
+                if ($caseName -ceq 'invoker_failure') { throw 'process_start_failed' }
+                $execution = New-TestCalibrationPilotExecution -Candidate $Candidate `
+                    -Answer '{"invoice_id":"INV-1042","total":"138.50","currency":"USD"}' -RunId $RunId
+                if ($caseName -ceq 'timeout') {
+                    $execution.process.timed_out = $true
+                    $execution.process.exit_code = $null
+                }
+                return $execution
+            }.GetNewClosure()
+            $judgeInvoker = {
+                param($JudgeProfileId, $JudgePayload, $PromptDefinition, $LaunchGuard, $RunId)
+                $resolved = Get-CalibrationProfileAndCandidate -ConfigurationId $JudgeProfileId
+                $preparedIdentity = & $LaunchGuard $resolved.candidate `
+                    (New-TestCalibrationPilotCommand -Candidate $resolved.candidate -Prompt 'safe judge payload')
+                Assert-Equal $preparedIdentity.route_id $resolved.candidate.route_id
+                return [pscustomobject]@{
+                    pilot_execution = New-TestCalibrationPilotExecution -Candidate $resolved.candidate `
+                        -Answer '{"decision":"pass","rationale":"safe evidence"}' -RunId $RunId
+                    decision = [pscustomobject]@{ decision = 'pass'; rationale = 'safe evidence' }
+                }
+            }.GetNewClosure()
+            $graderInvoker = {
+                param($Prompt, $ResponseText, $PythonExecutor, $PythonExecutable, $PythonTimeoutMilliseconds)
+                $null = Assert-Throws {
+                    $stream = [IO.File]::Open($fixture.paths.codex_native, [IO.FileMode]::Open, [IO.FileAccess]::Write, [IO.FileShare]::None)
+                    $stream.Dispose()
+                } $null
+                $lockChecks.count++
+                return Invoke-CalibrationDeterministicGrader -Prompt $Prompt -ResponseText $ResponseText
+            }.GetNewClosure()
+            $result = Invoke-Calibration -Pilot -Run -RunId 'option1-live-20260825-001' -ResultsRoot $resultsRoot `
+                -CalibrationSetPath $setPath -RubricsRoot $rubricsRoot -AllowPilotSourceOverridesForTest `
+                -LauncherLockPath $fixture.lock_path `
+                -LauncherLockSchemaPath (Join-Path $calibrationRoot 'pilots/option1-launchers.schema.json') `
+                -LauncherResolver $resolver -CandidateInvoker $candidateInvoker -JudgeInvoker $judgeInvoker `
+                -GraderInvoker $graderInvoker -PilotGitInvoker { [pscustomobject]@{ clean = $true; commit = ('b' * 40) } }
+            if ($caseName -ceq 'success') {
+                Assert-Equal $result.run_state 'completed'
+                Assert-True ($lockChecks.count -ge 2)
+            } else {
+                Assert-True ($result.run_state -cin @('stopped', 'indeterminate'))
+            }
+            $stream = [IO.File]::Open($fixture.paths.agy_native, [IO.FileMode]::Open, [IO.FileAccess]::Write, [IO.FileShare]::None)
+            $stream.Dispose()
+            $stream = [IO.File]::Open($fixture.paths.codex_native, [IO.FileMode]::Open, [IO.FileAccess]::Write, [IO.FileShare]::None)
+            $stream.Dispose()
+        } finally {
+            Set-Item -Path Function:New-CalibrationPilotSlotClaim -Value $originalClaim
+            if (Test-Path -LiteralPath $resultsRoot) { Remove-Item -LiteralPath $resultsRoot -Recurse -Force }
+            if (Test-Path -LiteralPath $fixture.root) { Remove-Item -LiteralPath $fixture.root -Recurse -Force }
+        }
+    }
+}
+
+Invoke-Assertion 'launcher preparation rejects reparse components and releases prior verified handles' {
+    $fixture = New-TestCalibrationLauncherFixture
+    $junctionPath = Join-Path $fixture.anchors.codex 'node_modules'
+    $targetPath = Join-Path $fixture.root 'outside-node_modules'
+    $prepared = $null
+    try {
+        Move-Item -LiteralPath $junctionPath -Destination $targetPath
+        $null = New-Item -ItemType Junction -Path $junctionPath -Target $targetPath -ErrorAction Stop
+        $bundle = New-CalibrationPilotSourceBundle -PilotManifestPath $pilotManifestPath `
+            -PilotManifestSchemaPath $pilotManifestSchemaPath -CalibrationSetPath $setPath -RubricsRoot $rubricsRoot `
+            -LauncherLockPath $fixture.lock_path `
+            -LauncherLockSchemaPath (Join-Path $calibrationRoot 'pilots/option1-launchers.schema.json')
+        $plan = New-CalibrationPilotPlan -SourceBundle $bundle
+        $resolver = {
+            param($role, $lockRole)
+            $anchor = [string]$fixture.anchors[[string]$role.launcher]
+            $componentId = [string]$lockRole.components[0].id
+            return [pscustomobject][ordered]@{
+                anchor_path = $anchor
+                resolved_path = [IO.Path]::GetFullPath($fixture.paths[$componentId])
+            }
+        }.GetNewClosure()
+        $null = Assert-Throws {
+            New-CalibrationPilotPreparedLaunches -Plan $plan -SourceBundle $bundle -LauncherResolver $resolver | Out-Null
+        } 'source_drift'
+        foreach ($path in @($fixture.paths.agy_native, $fixture.paths.codex_shim)) {
+            $stream = [IO.File]::Open($path, [IO.FileMode]::Open, [IO.FileAccess]::Write, [IO.FileShare]::None)
+            $stream.Dispose()
+        }
+    } finally {
+        if (Test-Path -LiteralPath $junctionPath) { Remove-Item -LiteralPath $junctionPath -Force }
+        if (Test-Path -LiteralPath $targetPath) { Remove-Item -LiteralPath $targetPath -Recurse -Force }
+        if (Test-Path -LiteralPath $fixture.root) { Remove-Item -LiteralPath $fixture.root -Recurse -Force }
     }
 }
 

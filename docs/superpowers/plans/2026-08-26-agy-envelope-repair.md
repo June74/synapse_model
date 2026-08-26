@@ -89,27 +89,29 @@ Inject prompt, canonical error, path, and credential sentinels into malformed in
 - Test: `calibration/tests/calibration.tests.ps1`
 - Test: `calibration/tests/calibration_security.tests.ps1`
 
-- [ ] **Step 1: Write launcher-lock schema and mismatch RED tests**
+- [x] **Step 1: Write launcher-lock schema and mismatch RED tests**
 
 Define exactly three ordered manifest-bound roles and exact component IDs, kinds, provenance/executed purposes, locators, and hashes. Reject duplicate or extra properties, wrong role/component order or case, malformed hashes, absolute or parent-traversing paths, environment expansion, wildcards, missing files, changed bytes, shim-only locks, omitted Codex package/native components, and external override attempts. Assert drift in any role returns `source_drift` before every slot claim and invoker.
 
-- [ ] **Step 2: Verify RED without executing launchers**
+- [x] **Step 2: Verify RED without executing launchers**
 
 Use temporary fake executables and shims through injected resolution/start seams. Run the focused suites and confirm lock admission/prepared launch functions do not yet exist.
 
-- [ ] **Step 3: Load and bind the reviewed lock**
+- [x] **Step 3: Load and bind the reviewed lock**
 
 Validate the checked-in lock with duplicate-key rejection and its schema, include both repository lock hashes in `plan.source_hashes`, and bind exact role and component order. Codex records the reviewed shim, JavaScript entrypoint, platform-package manifest, and platform-native executable; Claude records its reviewed shim and native executable. Only the declared native component is executable. Offline plan mode hashes only repository lock inputs and performs zero installed-launcher resolution.
 
-- [ ] **Step 4: Prepare immutable launcher identities**
+Reviewed repository byte hashes: launcher lock `aaeb23cdc7c55617f563359e2d7ab184157c9f551bb02a41bc201fc1f608b419`; launcher schema `cc6f5248724dd53fa50babcf3c77d67c53adbb6a7f180c28cf7f98186af2df20`.
+
+- [x] **Step 4: Prepare immutable launcher identities**
 
 Before the first claim, prepare all three identities, reject reparse components, verify every declared component from the same read handles, and hold those handles with write/delete sharing denied until the run is terminal. Build direct native commands for Codex and Claude so neither shim nor JavaScript can choose another branch. Reproduce Codex's reviewed npm managed-package environment. The launch guard returns the role's prepared identity after the durable claim; `Invoke-PilotCandidate` binds the already-built provider arguments and passes that exact prepared command into `Invoke-NativeCandidate`. The prepared path never calls `Resolve-RunnerNativeCommand`.
 
-- [ ] **Step 5: Preserve the non-refundable ordering**
+- [x] **Step 5: Preserve the non-refundable ordering**
 
 All three identities are verified before the first guard can run. Each launch guard binds the exact prepared role identity, then calls `New-CalibrationPilotSlotClaim`; the process starts only after the durable claim. Any identity mismatch stops with `source_drift`, zero total slots, and zero processes.
 
-- [ ] **Step 6: Verify matching and replacement-race GREEN cases**
+- [x] **Step 6: Verify matching and replacement-race GREEN cases**
 
 Prove matching fake components preserve all-role-prepare/verify-before-first-claim-before-start order; later-role drift yields zero total claims and invokers; the start seam receives the exact locked native Codex executable and prepared object; alternate package injection cannot affect the direct path; concurrent replacement fails after preflight, after claim, and through process completion; and every handle is released after success, source drift, claim failure, start failure, timeout, and invoker failure. Run all three PowerShell suites and commit with `fix: bind pilot launches to reviewed identities`.
 

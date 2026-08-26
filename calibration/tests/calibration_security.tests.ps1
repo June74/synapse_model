@@ -369,7 +369,7 @@ function Invoke-SecurityPilotFailureCase {
             throw (@($Sentinels) -join '|')
         }
         try {
-            & $LaunchGuard $Candidate (New-SecurityPilotCommand -Candidate $Candidate -Prompt $Prompt)
+            $null = & $LaunchGuard $Candidate (New-SecurityPilotCommand -Candidate $Candidate -Prompt $Prompt)
         } catch {
             if (-not $SwallowGuardFailure) { throw }
             if ($null -ne $GuardFailureMutation) { & $GuardFailureMutation $resultsRootForGuardMutation $RunId 1 }
@@ -392,7 +392,7 @@ function Invoke-SecurityPilotFailureCase {
         $calls.Add($role)
         $resolved = Get-CalibrationProfileAndCandidate -ConfigurationId $JudgeProfileId
         try {
-            & $LaunchGuard $resolved.candidate (New-SecurityPilotCommand -Candidate $resolved.candidate -Prompt 'safe judge payload')
+            $null = & $LaunchGuard $resolved.candidate (New-SecurityPilotCommand -Candidate $resolved.candidate -Prompt 'safe judge payload')
         } catch {
             if (-not $SwallowGuardFailure) { throw }
             $ordinal = if ($role -ceq 'judge_1') { 2 } else { 3 }
@@ -1864,6 +1864,65 @@ Invoke-Assertion 'security failure fixtures leave no owned pilot result roots' {
         $_.Name -match '^pilot-ledger-security-[0-9a-f]{32}$'
     })
     Assert-Equal $ownedRoots.Count 0
+}
+
+Invoke-Assertion 'launcher lock admission rejects duplicate keys, extra fields, unsafe locators, malformed hashes, and structural omissions' {
+    $temporary = Join-Path ([IO.Path]::GetTempPath()) ('launcher-lock-security-{0}' -f [guid]::NewGuid().ToString('N'))
+    $schemaPath = Join-Path $calibrationRoot 'pilots/option1-launchers.schema.json'
+    $canonicalPath = Join-Path $calibrationRoot 'pilots/option1-launchers-v1.json'
+    $manifest = Get-Content -Raw -LiteralPath (Join-Path $calibrationRoot 'pilots/option1-three-launch-v1.json') |
+        ConvertFrom-Json -Depth 100
+    try {
+        $null = New-Item -ItemType Directory -Path $temporary
+        $canonical = Get-Content -Raw -LiteralPath $canonicalPath | ConvertFrom-Json -Depth 100
+        $cases = @(
+            [pscustomobject]@{ name = 'extra-root'; mutate = { param($v) $v | Add-Member extra 'SENSITIVE_SENTINEL' } },
+            [pscustomobject]@{ name = 'wrong-role-order'; mutate = { param($v) $first=$v.roles[0]; $v.roles[0]=$v.roles[1]; $v.roles[1]=$first } },
+            [pscustomobject]@{ name = 'wrong-role-case'; mutate = { param($v) $v.roles[0].role = 'Candidate' } },
+            [pscustomobject]@{ name = 'wrong-route'; mutate = { param($v) $v.roles[1].route_id = 'codex__gpt_5_6_sol__low' } },
+            [pscustomobject]@{ name = 'wrong-component-order'; mutate = { param($v) $first=$v.roles[1].components[0]; $v.roles[1].components[0]=$v.roles[1].components[1]; $v.roles[1].components[1]=$first } },
+            [pscustomobject]@{ name = 'wrong-component-case'; mutate = { param($v) $v.roles[1].components[0].id = 'Codex_Shim' } },
+            [pscustomobject]@{ name = 'wrong-kind'; mutate = { param($v) $v.roles[1].components[1].kind = 'package_manifest' } },
+            [pscustomobject]@{ name = 'malformed-hash'; mutate = { param($v) $v.roles[0].components[0].sha256 = 'abc' } },
+            [pscustomobject]@{ name = 'absolute'; mutate = { param($v) $v.roles[0].components[0].locator.relative_path = 'C:/private/agy.exe' } },
+            [pscustomobject]@{ name = 'parent'; mutate = { param($v) $v.roles[0].components[0].locator.relative_path = '../agy.exe' } },
+            [pscustomobject]@{ name = 'environment'; mutate = { param($v) $v.roles[0].components[0].locator.relative_path = '%LOCALAPPDATA%/agy.exe' } },
+            [pscustomobject]@{ name = 'wildcard'; mutate = { param($v) $v.roles[0].components[0].locator.relative_path = 'agy*.exe' } },
+            [pscustomobject]@{ name = 'wrong-locator'; mutate = { param($v) $v.roles[2].components[1].locator.relative_path = 'claude.exe' } },
+            [pscustomobject]@{ name = 'shim-only-codex'; mutate = { param($v) $v.roles[1].components = @($v.roles[1].components[0]) } },
+            [pscustomobject]@{ name = 'codex-native-omitted'; mutate = { param($v) $v.roles[1].components = @($v.roles[1].components[0..2]) } },
+            [pscustomobject]@{ name = 'wrong-purpose'; mutate = { param($v) $v.roles[1].components[0].purpose = 'executed' } }
+        )
+        foreach ($case in $cases) {
+            $value = $canonical | ConvertTo-Json -Depth 100 | ConvertFrom-Json -Depth 100
+            $null = & $case.mutate $value
+            $path = Join-Path $temporary ($case.name + '.json')
+            $value | ConvertTo-Json -Depth 100 | Set-Content -LiteralPath $path -Encoding utf8NoBOM
+            $exception = Assert-Throws {
+                Import-CalibrationPilotLauncherLock -Path $path -SchemaPath $schemaPath -Manifest $manifest | Out-Null
+            } 'pilot_launcher_lock_invalid'
+            Assert-False $exception.Message.Contains('SENSITIVE_SENTINEL', [StringComparison]::Ordinal)
+            Assert-False $exception.Message.Contains($temporary, [StringComparison]::Ordinal)
+        }
+        $duplicatePath = Join-Path $temporary 'duplicate.json'
+        $duplicate = (Get-Content -Raw -LiteralPath $canonicalPath).Replace(
+            '"lock_version": "calibration-launcher-lock/v1",',
+            '"lock_version": "calibration-launcher-lock/v1", "lock_version": "calibration-launcher-lock/v1",')
+        [IO.File]::WriteAllText($duplicatePath, $duplicate, [Text.UTF8Encoding]::new($false))
+        $null = Assert-Throws {
+            Import-CalibrationPilotLauncherLock -Path $duplicatePath -SchemaPath $schemaPath -Manifest $manifest | Out-Null
+        } 'pilot_launcher_lock_invalid'
+    } finally { Remove-TestPath -Path $temporary }
+}
+
+Invoke-Assertion 'launcher lock source paths cannot be externally overridden without the explicit test seam' {
+    $external = Join-Path ([IO.Path]::GetTempPath()) ('external-launcher-lock-{0}.json' -f [guid]::NewGuid().ToString('N'))
+    try {
+        Copy-Item -LiteralPath (Join-Path $calibrationRoot 'pilots/option1-launchers-v1.json') -Destination $external
+        $null = Assert-Throws {
+            Invoke-Calibration -Pilot -LauncherLockPath $external | Out-Null
+        } 'pilot_source_path_not_canonical'
+    } finally { Remove-TestPath -Path $external }
 }
 
 if ($script:Failures.Count -gt 0) {

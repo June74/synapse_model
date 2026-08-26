@@ -1741,6 +1741,127 @@ Invoke-Assertion 'Invoke-PilotCandidate sinks successful LaunchGuard output' {
     Assert-True (-not $serialized.Contains('GUARD_OUTPUT_SENTINEL'))
 }
 
+Invoke-Assertion 'Invoke-PilotCandidate binds and forwards the exact prepared launcher identity without re-resolution' {
+    $matrix = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'pilot/model_matrix.json') | ConvertFrom-Json
+    $candidate = @($matrix.candidates | Where-Object { $_.route_id -ceq 'codex__gpt_5_6_sol__max' })[0]
+    $preparedExecutable = [IO.Path]::GetFullPath((Join-Path ([IO.Path]::GetTempPath()) 'locked-codex.exe'))
+    $managedRoot = [IO.Path]::GetFullPath((Join-Path ([IO.Path]::GetTempPath()) 'locked-codex-package'))
+    $preparedIdentity = [pscustomobject][ordered]@{
+        prepared_launcher_version = 'calibration-prepared-launcher/v1'
+        ordinal = 2
+        role = 'judge_1'
+        launcher = 'codex'
+        route_id = 'codex__gpt_5_6_sol__max'
+        executed_component_id = 'codex_native'
+        executable = $preparedExecutable
+        environment = [pscustomobject][ordered]@{
+            clear = @('CODEX_MANAGED_BY_NPM', 'CODEX_MANAGED_BY_BUN', 'CODEX_MANAGED_BY_PNPM')
+            set = [pscustomobject][ordered]@{ CODEX_MANAGED_PACKAGE_ROOT = $managedRoot; CODEX_MANAGED_BY_NPM = '1' }
+        }
+    }
+    $seen = [Collections.Generic.List[object]]::new()
+    $nativeInvoker = {
+        param($command)
+        $seen.Add($command)
+        $canonicalJson = [pscustomobject]@{ status = 'success'; answer = 'prepared answer'; error = $null } | ConvertTo-Json -Compress
+        $providerOutput = [pscustomobject]@{
+            type = 'item.completed'
+            item = [pscustomobject]@{ type = 'agent_message'; text = $canonicalJson }
+        } | ConvertTo-Json -Compress
+        [pscustomobject]@{ exit_code = 0; stdout = $providerOutput; stderr = ''; duration_ms = 1 }
+    }
+
+    $execution = Invoke-PilotCandidate -Candidate $candidate -Prompt 'prepared prompt' `
+        -LaunchGuard { param($guardCandidate, $logicalCommand) return $preparedIdentity }.GetNewClosure() `
+        -NativeInvoker $nativeInvoker -RunId 'prepared-launcher-test'
+
+    Assert-Equal $seen.Count 1
+    Assert-Equal $seen[0].prepared $true
+    Assert-Equal $seen[0].executable $preparedExecutable
+    Assert-True ([object]::ReferenceEquals($seen[0].prepared_identity, $preparedIdentity))
+    Assert-SequenceEqual @($seen[0].environment.clear) @('CODEX_MANAGED_BY_NPM', 'CODEX_MANAGED_BY_BUN', 'CODEX_MANAGED_BY_PNPM')
+    Assert-SequenceEqual @($seen[0].environment.set.PSObject.Properties.Name) @('CODEX_MANAGED_PACKAGE_ROOT', 'CODEX_MANAGED_BY_NPM')
+    Assert-Equal $seen[0].environment.set.CODEX_MANAGED_PACKAGE_ROOT $managedRoot
+    Assert-Equal $seen[0].environment.set.CODEX_MANAGED_BY_NPM '1'
+    Assert-Equal $execution.canonical.answer 'prepared answer'
+}
+
+Invoke-Assertion 'Invoke-PilotCandidate rejects a prepared identity for another route before the native seam' {
+    $matrix = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'pilot/model_matrix.json') | ConvertFrom-Json
+    $candidate = @($matrix.candidates | Where-Object { $_.route_id -ceq 'codex__gpt_5_6_sol__max' })[0]
+    $nativeCalls = [pscustomobject]@{ count = 0 }
+    $wrong = [pscustomobject][ordered]@{
+        prepared_launcher_version = 'calibration-prepared-launcher/v1'
+        ordinal = 2; role = 'judge_1'; launcher = 'codex'
+        route_id = 'codex__gpt_5_6_sol__low'; executed_component_id = 'codex_native'
+        executable = [IO.Path]::GetFullPath((Join-Path ([IO.Path]::GetTempPath()) 'locked-codex.exe'))
+        environment = [pscustomobject][ordered]@{
+            clear = @('CODEX_MANAGED_BY_NPM', 'CODEX_MANAGED_BY_BUN', 'CODEX_MANAGED_BY_PNPM')
+            set = [pscustomobject][ordered]@{
+                CODEX_MANAGED_PACKAGE_ROOT = [IO.Path]::GetFullPath((Join-Path ([IO.Path]::GetTempPath()) 'locked-codex-package'))
+                CODEX_MANAGED_BY_NPM = '1'
+            }
+        }
+    }
+    $execution = Invoke-PilotCandidate -Candidate $candidate -Prompt 'wrong prepared route' `
+        -LaunchGuard { param($c, $command) $wrong }.GetNewClosure() `
+        -NativeInvoker { param($command) $nativeCalls.count++; throw 'must not start' }.GetNewClosure() `
+        -RunId 'prepared-route-mismatch'
+    Assert-Equal $nativeCalls.count 0
+    Assert-Equal $execution.diagnostic_note 'execution failure'
+    Assert-Equal $execution.failure 'execution failure'
+}
+
+Invoke-Assertion 'Invoke-NativeCandidate builds exact prepared start info without resolution or a real process start' {
+    $matrix = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'pilot/model_matrix.json') | ConvertFrom-Json
+    $candidate = @($matrix.candidates | Where-Object { $_.route_id -ceq 'codex__gpt_5_6_sol__max' })[0]
+    $logical = New-CandidateCommand -Candidate $candidate -Prompt 'start-info-only'
+    $managedRoot = [IO.Path]::GetFullPath((Join-Path ([IO.Path]::GetTempPath()) 'verified-codex-root'))
+    $executable = [IO.Path]::GetFullPath((Join-Path $managedRoot 'native/codex.exe'))
+    $identity = [pscustomobject][ordered]@{
+        prepared_launcher_version = 'calibration-prepared-launcher/v1'
+        ordinal = 2; role = 'judge_1'; launcher = 'codex'; route_id = 'codex__gpt_5_6_sol__max'
+        executed_component_id = 'codex_native'; executable = $executable
+        environment = [pscustomobject][ordered]@{
+            clear = @('CODEX_MANAGED_BY_NPM', 'CODEX_MANAGED_BY_BUN', 'CODEX_MANAGED_BY_PNPM')
+            set = [pscustomobject][ordered]@{ CODEX_MANAGED_PACKAGE_ROOT = $managedRoot; CODEX_MANAGED_BY_NPM = '1' }
+        }
+    }
+    $prepared = Bind-RunnerPreparedCommand -Command $logical -PreparedIdentity $identity
+    $originalResolver = ${function:Resolve-RunnerNativeCommand}
+    $oldNpm = $env:CODEX_MANAGED_BY_NPM
+    $oldBun = $env:CODEX_MANAGED_BY_BUN
+    $oldPnpm = $env:CODEX_MANAGED_BY_PNPM
+    try {
+        $env:CODEX_MANAGED_BY_NPM = 'inherited-npm'
+        $env:CODEX_MANAGED_BY_BUN = 'inherited-bun'
+        $env:CODEX_MANAGED_BY_PNPM = 'inherited-pnpm'
+        Set-Item -Path Function:Resolve-RunnerNativeCommand -Value { throw 'resolver_must_not_run_for_prepared_command' }
+        $observed = [pscustomobject]@{ count = 0 }
+        $observer = {
+            param($startInfo, $command)
+            $observed.count++
+            Assert-Equal $startInfo.FileName $executable
+            Assert-Equal $command.prepared_identity $identity
+            Assert-Equal $startInfo.Environment.CODEX_MANAGED_PACKAGE_ROOT $managedRoot
+            Assert-Equal $startInfo.Environment.CODEX_MANAGED_BY_NPM '1'
+            Assert-True (-not $startInfo.Environment.ContainsKey('CODEX_MANAGED_BY_BUN'))
+            Assert-True (-not $startInfo.Environment.ContainsKey('CODEX_MANAGED_BY_PNPM'))
+            throw 'start_info_observed_without_start'
+        }.GetNewClosure()
+        $caught = $null
+        try { Invoke-NativeCandidate -Command $prepared -StartInfoObserver $observer | Out-Null }
+        catch { $caught = $_.Exception.Message }
+        Assert-Equal $caught 'start_info_observed_without_start'
+        Assert-Equal $observed.count 1
+    } finally {
+        Set-Item -Path Function:Resolve-RunnerNativeCommand -Value $originalResolver
+        $env:CODEX_MANAGED_BY_NPM = $oldNpm
+        $env:CODEX_MANAGED_BY_BUN = $oldBun
+        $env:CODEX_MANAGED_BY_PNPM = $oldPnpm
+    }
+}
+
 Invoke-Assertion 'Invoke-PilotCandidate preserves positional RunId and TimeoutSeconds binding without a guard' {
     $matrix = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'pilot/model_matrix.json') | ConvertFrom-Json
     $candidate = @($matrix.candidates | Where-Object { $_.tool -eq 'codex' } | Select-Object -First 1)[0]

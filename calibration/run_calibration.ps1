@@ -330,19 +330,25 @@ function Assert-CalibrationPilotCanonicalSourcePaths {
         [Parameter(Mandatory)][string]$CalibrationSetPath,
         [Parameter(Mandatory)][string]$RubricsRoot,
         [Parameter(Mandatory)][string]$PilotManifestPath,
-        [Parameter(Mandatory)][string]$PilotManifestSchemaPath
+        [Parameter(Mandatory)][string]$PilotManifestSchemaPath,
+        [Parameter(Mandatory)][string]$LauncherLockPath,
+        [Parameter(Mandatory)][string]$LauncherLockSchemaPath
     )
     $approved = [ordered]@{
         CalibrationSetPath = Join-Path $script:CalibrationRoot 'calibration-set-v1.json'
         RubricsRoot = Join-Path $script:CalibrationRoot 'rubrics'
         PilotManifestPath = Join-Path $script:CalibrationRoot 'pilots/option1-three-launch-v1.json'
         PilotManifestSchemaPath = Join-Path $script:CalibrationRoot 'pilots/option1-three-launch-manifest.schema.json'
+        LauncherLockPath = Join-Path $script:CalibrationRoot 'pilots/option1-launchers-v1.json'
+        LauncherLockSchemaPath = Join-Path $script:CalibrationRoot 'pilots/option1-launchers.schema.json'
     }
     $actual = [ordered]@{
         CalibrationSetPath = $CalibrationSetPath
         RubricsRoot = $RubricsRoot
         PilotManifestPath = $PilotManifestPath
         PilotManifestSchemaPath = $PilotManifestSchemaPath
+        LauncherLockPath = $LauncherLockPath
+        LauncherLockSchemaPath = $LauncherLockSchemaPath
     }
     foreach ($name in $approved.Keys) {
         $value = [string]$actual[$name]
@@ -678,6 +684,73 @@ function Read-CalibrationPilotJsonSnapshot {
     }
 }
 
+function Import-CalibrationPilotLauncherLock {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$SchemaPath,
+        [Parameter(Mandatory)][object]$Manifest
+    )
+    try {
+        $source = Read-CalibrationPilotJsonSnapshot -Path $Path
+        $schemaSource = Read-CalibrationPilotJsonSnapshot -Path $SchemaPath
+        if ($schemaSource.value -isnot [pscustomobject]) { throw 'schema' }
+        if (-not (Test-Json -Json $source.text -Schema $schemaSource.text -ErrorAction Stop)) { throw 'schema' }
+        $lock = $source.value
+        Assert-CalibrationExactProperties -Value $lock -Names @('lock_version', 'pilot_id', 'roles') `
+            -ErrorCode 'pilot_launcher_lock_invalid'
+        if ($lock.lock_version -isnot [string] -or $lock.lock_version -cne 'calibration-launcher-lock/v1' -or
+            $lock.pilot_id -isnot [string] -or $lock.pilot_id -cne 'option1-three-launch-v1' -or
+            $lock.roles -isnot [Collections.IList] -or @($lock.roles).Count -ne 3 -or
+            $Manifest.roles -isnot [Collections.IList] -or @($Manifest.roles).Count -ne 3) { throw 'shape' }
+        $expectedComponents = @(
+            ,@([pscustomobject]@{ id = 'agy_native'; kind = 'native_executable'; purpose = 'executed'; relative_path = 'agy.exe' }),
+            @(
+                [pscustomobject]@{ id = 'codex_shim'; kind = 'powershell_shim'; purpose = 'provenance'; relative_path = 'codex.ps1' },
+                [pscustomobject]@{ id = 'codex_javascript'; kind = 'javascript_entrypoint'; purpose = 'provenance'; relative_path = 'node_modules/@openai/codex/bin/codex.js' },
+                [pscustomobject]@{ id = 'codex_platform_manifest'; kind = 'package_manifest'; purpose = 'provenance'; relative_path = 'node_modules/@openai/codex/node_modules/@openai/codex-win32-x64/package.json' },
+                [pscustomobject]@{ id = 'codex_native'; kind = 'native_executable'; purpose = 'executed'; relative_path = 'node_modules/@openai/codex/node_modules/@openai/codex-win32-x64/vendor/x86_64-pc-windows-msvc/bin/codex.exe' }
+            ),
+            @(
+                [pscustomobject]@{ id = 'claude_shim'; kind = 'powershell_shim'; purpose = 'provenance'; relative_path = 'claude.ps1' },
+                [pscustomobject]@{ id = 'claude_native'; kind = 'native_executable'; purpose = 'executed'; relative_path = 'node_modules/@anthropic-ai/claude-code/bin/claude.exe' }
+            )
+        )
+        for ($roleIndex = 0; $roleIndex -lt 3; $roleIndex++) {
+            $role = $lock.roles[$roleIndex]
+            $manifestRole = $Manifest.roles[$roleIndex]
+            Assert-CalibrationExactProperties -Value $role -Names @('ordinal', 'role', 'launcher', 'route_id', 'components') `
+                -ErrorCode 'pilot_launcher_lock_invalid'
+            if (-not (Test-CalibrationPilotOrdinal $role.ordinal ($roleIndex + 1)) -or
+                $role.role -isnot [string] -or $role.role -cne $manifestRole.role -or
+                $role.launcher -isnot [string] -or $role.launcher -cne $manifestRole.launcher -or
+                $role.route_id -isnot [string] -or $role.route_id -cne $manifestRole.route_id -or
+                $role.components -isnot [Collections.IList] -or
+                @($role.components).Count -ne $expectedComponents[$roleIndex].Count) { throw 'role' }
+            for ($componentIndex = 0; $componentIndex -lt $expectedComponents[$roleIndex].Count; $componentIndex++) {
+                $component = $role.components[$componentIndex]
+                $expected = $expectedComponents[$roleIndex][$componentIndex]
+                Assert-CalibrationExactProperties -Value $component -Names @('id', 'kind', 'purpose', 'locator', 'sha256') `
+                    -ErrorCode 'pilot_launcher_lock_invalid'
+                Assert-CalibrationExactProperties -Value $component.locator -Names @('anchor', 'relative_path') `
+                    -ErrorCode 'pilot_launcher_lock_invalid'
+                if ($component.id -isnot [string] -or $component.id -cne $expected.id -or
+                    $component.kind -isnot [string] -or $component.kind -cne $expected.kind -or
+                    $component.purpose -isnot [string] -or $component.purpose -cne $expected.purpose -or
+                    $component.locator.anchor -isnot [string] -or
+                    $component.locator.anchor -cne 'resolved_launcher_dir' -or
+                    $component.locator.relative_path -isnot [string] -or
+                    $component.locator.relative_path -cne $expected.relative_path -or
+                    $component.sha256 -isnot [string] -or
+                    $component.sha256 -cnotmatch '^[0-9a-f]{64}$') { throw 'component' }
+            }
+        }
+        return [pscustomobject][ordered]@{ lock = $lock; source = $source; schema_source = $schemaSource }
+    } catch {
+        throw 'pilot_launcher_lock_invalid'
+    }
+}
+
 function Assert-CalibrationPilotExactValue {
     param([object]$Actual, [object]$Expected, [string]$Name)
     if ($Expected -is [string] -and ($Actual -isnot [string] -or [string]::IsNullOrWhiteSpace($Actual))) {
@@ -703,6 +776,8 @@ function New-CalibrationPilotSourceBundle {
         [string]$ProfilesRoot = (Join-Path $script:CalibrationProjectRoot 'profiles'),
         [string]$ModelProfileSchemaPath = (Join-Path $script:CalibrationProjectRoot 'router/schemas/model-profile.schema.json'),
         [string]$ResponseSchemaPath = (Join-Path $script:CalibrationProjectRoot 'pilot/shared/response_schema.json'),
+        [string]$LauncherLockPath = (Join-Path $script:CalibrationRoot 'pilots/option1-launchers-v1.json'),
+        [string]$LauncherLockSchemaPath = (Join-Path $script:CalibrationRoot 'pilots/option1-launchers.schema.json'),
         [AllowNull()][object]$ManifestOverride
     )
 
@@ -763,6 +838,8 @@ function New-CalibrationPilotSourceBundle {
     $set = $setValidation.set
 
     $manifest = $manifestSource.value
+    $launcherLock = Import-CalibrationPilotLauncherLock -Path $LauncherLockPath `
+        -SchemaPath $LauncherLockSchemaPath -Manifest $manifest
     $approvedRoles = @(
         [pscustomobject][ordered]@{ ordinal = 1; role = 'candidate'; family = 'google'; launcher = 'agy'; route_id = 'agy__gemini_3_7_flash_low__low'; configuration_id = 'gemini-3.7-flash-low__low'; model = 'gemini-3.7-flash-low'; effort = 'low' }
         [pscustomobject][ordered]@{ ordinal = 2; role = 'judge_1'; family = 'openai'; launcher = 'codex'; route_id = 'codex__gpt_5_6_sol__max'; configuration_id = 'gpt-5.6-sol__max'; model = 'gpt-5.6-sol'; effort = 'max' }
@@ -842,10 +919,11 @@ function New-CalibrationPilotSourceBundle {
         throw 'Pilot judge pair differs from calibration policy.'
     }
     return [pscustomobject][ordered]@{
-        manifest = $manifest; calibration_set = $set; prompt = $prompts[0]; rubric = $setValidation.rubrics[$prompts[0].grading.rubric_ref]
+        manifest = $manifest; launcher_lock = $launcherLock.lock; calibration_set = $set; prompt = $prompts[0]; rubric = $setValidation.rubrics[$prompts[0].grading.rubric_ref]
         roles = @($resolvedRoles); hashes = [pscustomobject][ordered]@{
             manifest = $manifestSource.sha256; matrix = $matrixSource.sha256; calibration_set = $setSource.sha256
             response_schema = $responseSchemaSource.sha256; candidate_profile_file_sha256 = $profileSources[$resolvedRoles[0].configuration_id].sha256
+            launcher_lock = $launcherLock.source.sha256; launcher_lock_schema = $launcherLock.schema_source.sha256
         }
         sources = [pscustomobject][ordered]@{
             manifest = $manifestSource
@@ -854,6 +932,8 @@ function New-CalibrationPilotSourceBundle {
             calibration_set = $setSource
             model_profile_schema = $modelProfileSchemaSource
             response_schema = $responseSchemaSource
+            launcher_lock = $launcherLock.source
+            launcher_lock_schema = $launcherLock.schema_source
             profiles = $profileSources
             rubrics = $rubricSources
         }
@@ -937,6 +1017,8 @@ function New-CalibrationPilotPlan {
             prompt_definition = Get-CalibrationObjectSha256 -Value $SourceBundle.prompt
             rubric = Get-CalibrationObjectSha256 -Value $SourceBundle.rubric
             response_schema = $SourceBundle.hashes.response_schema
+            launcher_lock = $SourceBundle.hashes.launcher_lock
+            launcher_lock_schema = $SourceBundle.hashes.launcher_lock_schema
         }
         provider_calls = 0
         provider_side_requests = [pscustomobject][ordered]@{
@@ -1554,7 +1636,8 @@ function Assert-CalibrationPilotPlanContract {
         }
     }
     Assert-CalibrationExactProperties -Value $Plan.source_hashes -Names @(
-        'manifest', 'matrix', 'candidate_profile', 'calibration_set', 'prompt_definition', 'rubric', 'response_schema'
+        'manifest', 'matrix', 'candidate_profile', 'calibration_set', 'prompt_definition', 'rubric', 'response_schema',
+        'launcher_lock', 'launcher_lock_schema'
     ) -ErrorCode $errorCode
     foreach ($property in $Plan.source_hashes.PSObject.Properties) {
         if ($property.Value -isnot [string] -or $property.Value -cnotmatch '^[0-9a-f]{64}$') { throw $errorCode }
@@ -2747,6 +2830,164 @@ function Get-CalibrationPilotGitSnapshot {
     return [pscustomobject][ordered]@{ clean = ($status.Count -eq 0); commit = $commit }
 }
 
+function Resolve-CalibrationPilotLauncherAnchor {
+    param(
+        [Parameter(Mandatory)][object]$Role,
+        [Parameter(Mandatory)][object]$LockRole
+    )
+    $commandInfo = @(Get-Command -Name ([string]$Role.launcher) -ErrorAction Stop |
+        Where-Object { $_.CommandType -in @('Application', 'ExternalScript') } |
+        Select-Object -First 1)[0]
+    if ($null -eq $commandInfo) { throw 'source_drift' }
+    $resolvedPath = if (-not [string]::IsNullOrWhiteSpace([string]$commandInfo.Path)) {
+        [string]$commandInfo.Path
+    } else { [string]$commandInfo.Source }
+    if ([string]::IsNullOrWhiteSpace($resolvedPath)) { throw 'source_drift' }
+    $fullResolvedPath = [IO.Path]::GetFullPath($resolvedPath)
+    return [pscustomobject][ordered]@{
+        anchor_path = [IO.Path]::GetDirectoryName($fullResolvedPath)
+        resolved_path = $fullResolvedPath
+    }
+}
+
+function Test-CalibrationPilotSafeLauncherRelativePath {
+    param([AllowNull()][object]$Value)
+    if ($Value -isnot [string] -or [string]::IsNullOrWhiteSpace($Value) -or
+        [IO.Path]::IsPathFullyQualified($Value) -or $Value.Contains('\', [StringComparison]::Ordinal) -or
+        $Value -match '(^|/)\.\.(/|$)' -or $Value -match '[%$*?\[\]{}:]' -or
+        $Value -notmatch '^[A-Za-z0-9@._+-]+(?:/[A-Za-z0-9@._+-]+)*$') { return $false }
+    return $true
+}
+
+function Get-CalibrationPilotOpenHandleSha256 {
+    param([Parameter(Mandatory)][IO.FileStream]$Stream)
+    $algorithm = [Security.Cryptography.SHA256]::Create()
+    try {
+        $Stream.Position = 0
+        $hash = $algorithm.ComputeHash($Stream)
+        $Stream.Position = 0
+        return [Convert]::ToHexString($hash).ToLowerInvariant()
+    } finally { $algorithm.Dispose() }
+}
+
+function Close-CalibrationPilotPreparedLaunches {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][object]$PreparedLaunches)
+    if ($PreparedLaunches.is_closed -eq $true) { return }
+    $failed = $false
+    foreach ($handle in @($PreparedLaunches.handles)) {
+        if ($null -eq $handle) { continue }
+        try { $handle.Dispose() } catch { $failed = $true }
+    }
+    $PreparedLaunches.is_closed = $true
+    if ($failed) { throw 'pilot_launcher_handle_release_failed' }
+}
+
+function New-CalibrationPilotPreparedLaunches {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][object]$Plan,
+        [Parameter(Mandatory)][object]$SourceBundle,
+        [scriptblock]$LauncherResolver
+    )
+    Assert-CalibrationPilotPlanContract -Plan $Plan
+    if ($null -eq $LauncherResolver) { $LauncherResolver = ${function:Resolve-CalibrationPilotLauncherAnchor} }
+    $handles = [Collections.Generic.List[IO.FileStream]]::new()
+    $preparedRoles = [Collections.Generic.List[object]]::new()
+    try {
+        if ($SourceBundle.launcher_lock -isnot [pscustomobject] -or
+            $Plan.source_hashes.launcher_lock -cne $SourceBundle.hashes.launcher_lock -or
+            $Plan.source_hashes.launcher_lock_schema -cne $SourceBundle.hashes.launcher_lock_schema -or
+            $SourceBundle.sources.launcher_lock.sha256 -cne $SourceBundle.hashes.launcher_lock -or
+            $SourceBundle.sources.launcher_lock_schema.sha256 -cne $SourceBundle.hashes.launcher_lock_schema) {
+            throw 'source_drift'
+        }
+        for ($roleIndex = 0; $roleIndex -lt 3; $roleIndex++) {
+            $role = $Plan.roles[$roleIndex]
+            $lockRole = $SourceBundle.launcher_lock.roles[$roleIndex]
+            $resolvedLocator = & $LauncherResolver $role $lockRole
+            if ($resolvedLocator -isnot [pscustomobject]) { throw 'source_drift' }
+            Assert-CalibrationExactProperties -Value $resolvedLocator -Names @('anchor_path', 'resolved_path') `
+                -ErrorCode 'source_drift'
+            $anchorValue = $resolvedLocator.anchor_path
+            $resolvedPathValue = $resolvedLocator.resolved_path
+            if ($anchorValue -isnot [string] -or [string]::IsNullOrWhiteSpace($anchorValue) -or
+                -not [IO.Path]::IsPathFullyQualified($anchorValue) -or
+                $resolvedPathValue -isnot [string] -or [string]::IsNullOrWhiteSpace($resolvedPathValue) -or
+                -not [IO.Path]::IsPathFullyQualified($resolvedPathValue)) { throw 'source_drift' }
+            $anchor = [IO.Path]::GetFullPath($anchorValue).TrimEnd(
+                [IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+            $resolvedPath = [IO.Path]::GetFullPath($resolvedPathValue)
+            if ($anchor -cne $anchorValue.TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar) -or
+                $resolvedPath -cne $resolvedPathValue -or
+                -not (Test-Path -LiteralPath $anchor -PathType Container)) { throw 'source_drift' }
+            Assert-CalibrationNoReparseComponents -Path $anchor
+            $executed = $null
+            $codexPackageRoot = $null
+            $resolvedComponentPath = $null
+            foreach ($component in @($lockRole.components)) {
+                if (-not (Test-CalibrationPilotSafeLauncherRelativePath $component.locator.relative_path)) {
+                    throw 'source_drift'
+                }
+                $relativeNative = ([string]$component.locator.relative_path).Replace('/', [IO.Path]::DirectorySeparatorChar)
+                $path = [IO.Path]::GetFullPath((Join-Path $anchor $relativeNative))
+                if (-not (Test-CalibrationPathUnderRoot -Path $path -Root $anchor) -or
+                    -not (Test-Path -LiteralPath $path -PathType Leaf)) { throw 'source_drift' }
+                Assert-CalibrationNoReparseComponents -Path $path
+                $stream = [IO.File]::Open($path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+                $handles.Add($stream)
+                if ([IO.Path]::GetFullPath($stream.Name) -cne $path -or
+                    (Get-CalibrationPilotOpenHandleSha256 -Stream $stream) -cne [string]$component.sha256) {
+                    throw 'source_drift'
+                }
+                if ($component.id -ceq 'codex_javascript') {
+                    $codexPackageRoot = [IO.Path]::GetDirectoryName([IO.Path]::GetDirectoryName($path))
+                }
+                if ($null -eq $resolvedComponentPath) { $resolvedComponentPath = $path }
+                if ($component.purpose -ceq 'executed') {
+                    if ($null -ne $executed -or $component.kind -cne 'native_executable') { throw 'source_drift' }
+                    $executed = [pscustomobject]@{ id = [string]$component.id; path = $path }
+                }
+            }
+            if ($null -eq $executed -or $null -eq $resolvedComponentPath -or
+                $resolvedPath -cne $resolvedComponentPath) { throw 'source_drift' }
+            $environment = if ($role.launcher -ceq 'codex') {
+                if ([string]::IsNullOrWhiteSpace($codexPackageRoot) -or
+                    -not (Test-CalibrationPathUnderRoot -Path $codexPackageRoot -Root $anchor)) { throw 'source_drift' }
+                [pscustomobject][ordered]@{
+                    clear = @('CODEX_MANAGED_BY_NPM', 'CODEX_MANAGED_BY_BUN', 'CODEX_MANAGED_BY_PNPM')
+                    set = [pscustomobject][ordered]@{
+                        CODEX_MANAGED_PACKAGE_ROOT = $codexPackageRoot
+                        CODEX_MANAGED_BY_NPM = '1'
+                    }
+                }
+            } else {
+                [pscustomobject][ordered]@{ clear = @(); set = [pscustomobject][ordered]@{} }
+            }
+            $preparedRoles.Add([pscustomobject][ordered]@{
+                prepared_launcher_version = 'calibration-prepared-launcher/v1'
+                ordinal = [int]$role.ordinal
+                role = [string]$role.role
+                launcher = [string]$role.launcher
+                route_id = [string]$role.route_id
+                executed_component_id = [string]$executed.id
+                executable = [string]$executed.path
+                environment = $environment
+            })
+        }
+        $roleHashes = @($preparedRoles | ForEach-Object { Get-CalibrationObjectSha256 -Value $_ })
+        return [pscustomobject][ordered]@{
+            roles = @($preparedRoles)
+            role_hashes = $roleHashes
+            handles = $handles
+            is_closed = $false
+        }
+    } catch {
+        foreach ($handle in @($handles)) { try { $handle.Dispose() } catch { } }
+        throw 'source_drift'
+    }
+}
+
 function Add-CalibrationPilotGitCommitToPlan {
     param(
         [Parameter(Mandatory)][object]$Plan,
@@ -2802,16 +3043,25 @@ function New-CalibrationPilotLaunchGuard {
     )
     $run = $Context
     $expectedRole = $Role
+    if (-not (Test-CalibrationProperty $run 'prepared_launches') -or $null -eq $run.prepared_launches) {
+        throw 'source_drift'
+    }
+    $preparedSet = $run.prepared_launches
     return {
         param($runtimeCandidate, $command)
         $planRole = $run.plan.roles[[int]$expectedRole.ordinal - 1]
         if ((Get-CalibrationObjectSha256 -Value $planRole) -cne
             (Get-CalibrationObjectSha256 -Value $expectedRole)) { throw 'pilot_runtime_role_mismatch' }
         Assert-CalibrationPilotRoleMatch -Expected $expectedRole -Candidate $runtimeCandidate -Command $command
+        if ($preparedSet.is_closed -ne $false) { throw 'source_drift' }
+        $preparedIdentity = $preparedSet.roles[[int]$expectedRole.ordinal - 1]
+        if ((Get-CalibrationObjectSha256 -Value $preparedIdentity) -cne
+            [string]$preparedSet.role_hashes[[int]$expectedRole.ordinal - 1]) { throw 'source_drift' }
         $null = New-CalibrationPilotSlotClaim -Context $run -Ordinal $expectedRole.ordinal -Identity $expectedRole
         if ($run.result.attempts[[int]$expectedRole.ordinal - 1].state -cne 'slot_reserved') {
             throw 'pilot_slot_reservation_not_persisted'
         }
+        return $preparedIdentity
     }.GetNewClosure()
 }
 
@@ -2933,6 +3183,7 @@ function Invoke-CalibrationPilotRun {
         [scriptblock]$CandidateInvoker,
         [scriptblock]$GraderInvoker,
         [scriptblock]$JudgeInvoker,
+        [scriptblock]$LauncherResolver,
         [scriptblock]$PilotGitInvoker,
         [scriptblock]$PilotArtifactWriter
     )
@@ -2947,10 +3198,19 @@ function Invoke-CalibrationPilotRun {
         $gitState.commit -cnotmatch '^[0-9a-f]{40}$') { throw 'pilot_git_worktree_not_clean' }
     $livePlan = Add-CalibrationPilotGitCommitToPlan -Plan $Plan -Commit ([string]$gitState.commit)
     $context = $null
+    $preparedLaunches = $null
     try {
         $context = New-CalibrationPilotRun -ResultsRoot $ResultsRoot -RunId $RunId -Plan $livePlan
         Set-CalibrationPilotRunState -Context $context -State 'preflight_passed'
         Set-CalibrationPilotRunState -Context $context -State 'running'
+
+        try {
+            $preparedLaunches = New-CalibrationPilotPreparedLaunches -Plan $livePlan `
+                -SourceBundle $SourceBundle -LauncherResolver $LauncherResolver
+            $context | Add-Member -NotePropertyName prepared_launches -NotePropertyValue $preparedLaunches
+        } catch {
+            return Complete-CalibrationPilotFailure -Context $context -Ordinal 1 -StopCode 'source_drift'
+        }
 
         if ($null -eq $CandidateInvoker) {
             $CandidateInvoker = {
@@ -3158,6 +3418,9 @@ function Invoke-CalibrationPilotRun {
         }
         return Copy-CalibrationJsonValue $context.result
     } finally {
+        if ($null -ne $preparedLaunches) {
+            try { Close-CalibrationPilotPreparedLaunches -PreparedLaunches $preparedLaunches } catch { }
+        }
         if ($null -ne $context) { Close-CalibrationPilotRun -Context $context }
     }
 }
@@ -3178,6 +3441,8 @@ function Invoke-Calibration {
         [string]$ResultsRoot = $script:CalibrationResultsRoot,
         [string]$PilotManifestPath = (Join-Path $script:CalibrationRoot 'pilots/option1-three-launch-v1.json'),
         [string]$PilotManifestSchemaPath = (Join-Path $script:CalibrationRoot 'pilots/option1-three-launch-manifest.schema.json'),
+        [string]$LauncherLockPath = (Join-Path $script:CalibrationRoot 'pilots/option1-launchers-v1.json'),
+        [string]$LauncherLockSchemaPath = (Join-Path $script:CalibrationRoot 'pilots/option1-launchers.schema.json'),
         [switch]$AllowPilotSourceOverridesForTest,
         [scriptblock]$CandidateInvoker,
         [scriptblock]$PilotGitInvoker,
@@ -3186,6 +3451,7 @@ function Invoke-Calibration {
         [scriptblock]$RouterInvoker,
         [scriptblock]$GraderInvoker,
         [scriptblock]$JudgeInvoker,
+        [scriptblock]$LauncherResolver,
         [scriptblock]$PythonExecutor,
         [AllowNull()][string]$PythonExecutable,
         [ValidateRange(100, 10000)][int]$PythonTimeoutMilliseconds = 2000
@@ -3200,15 +3466,18 @@ function Invoke-Calibration {
         if (-not $AllowPilotSourceOverridesForTest) {
             Assert-CalibrationPilotCanonicalSourcePaths -CalibrationSetPath $CalibrationSetPath `
                 -RubricsRoot $RubricsRoot -PilotManifestPath $PilotManifestPath `
-                -PilotManifestSchemaPath $PilotManifestSchemaPath
+                -PilotManifestSchemaPath $PilotManifestSchemaPath -LauncherLockPath $LauncherLockPath `
+                -LauncherLockSchemaPath $LauncherLockSchemaPath
         }
         $sourceBundle = New-CalibrationPilotSourceBundle -PilotManifestPath $PilotManifestPath `
-            -PilotManifestSchemaPath $PilotManifestSchemaPath -CalibrationSetPath $CalibrationSetPath -RubricsRoot $RubricsRoot
+            -PilotManifestSchemaPath $PilotManifestSchemaPath -CalibrationSetPath $CalibrationSetPath -RubricsRoot $RubricsRoot `
+            -LauncherLockPath $LauncherLockPath -LauncherLockSchemaPath $LauncherLockSchemaPath
         $pilotPlan = New-CalibrationPilotPlan -SourceBundle $sourceBundle
         if (-not $Run) { return $pilotPlan }
         return Invoke-CalibrationPilotRun -RunId $RunId -ResultsRoot $ResultsRoot -SourceBundle $sourceBundle `
             -Plan $pilotPlan -CandidateInvoker $CandidateInvoker -GraderInvoker $GraderInvoker `
-            -JudgeInvoker $JudgeInvoker -PilotGitInvoker $PilotGitInvoker -PilotArtifactWriter $PilotArtifactWriter
+            -JudgeInvoker $JudgeInvoker -LauncherResolver $LauncherResolver -PilotGitInvoker $PilotGitInvoker `
+            -PilotArtifactWriter $PilotArtifactWriter
     }
     $loaded = Import-CalibrationSet -Path $CalibrationSetPath -RubricsRoot $RubricsRoot
     if (-not $loaded.valid) {

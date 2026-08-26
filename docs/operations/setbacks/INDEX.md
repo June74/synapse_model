@@ -2,16 +2,20 @@
 
 | ID | Title | Status | First observed | Last observed |
 |---|---|---|---|---|
+| [SB-20260826-145905-task3-empty-property-name-count](incidents/2026-08-26T145905Z-task3-empty-property-name-count.md) | Empty prepared environment counted as one null name | closed | 2026-08-26T14:59:05Z | 2026-08-26T14:59:05Z |
+| [SB-20260826-145519-task3-component-tuple-array-unrolling](incidents/2026-08-26T145519Z-task3-component-tuple-array-unrolling.md) | Component contract tuple was flattened by PowerShell | closed | 2026-08-26T14:55:19Z | 2026-08-26T14:55:19Z |
+| [SB-20260826-145435-task3-schema-structure-checker-draft-gap](incidents/2026-08-26T145435Z-task3-schema-structure-checker-draft-gap.md) | Router schema checker rejected valid launcher schema keywords | closed | 2026-08-26T14:54:35Z | 2026-08-26T14:54:35Z |
+| [SB-20260826-145312-task3-launcher-source-map-omission](incidents/2026-08-26T145312Z-task3-launcher-source-map-omission.md) | Launcher source path map omitted two admitted inputs | closed | 2026-08-26T14:53:12Z | 2026-08-26T14:53:12Z |
 | [SB-20260824-182757-task8-quality-boundaries](incidents/2026-08-24T182757Z-task8-quality-boundaries.md) | Task 8 boundary and transport quality gaps | closed | 2026-08-24 | 2026-08-26T04:47:29.7950456Z |
 | [SB-20260824-015530-router-pricing-fail-open](incidents/2026-08-24T015530Z-router-pricing-fail-open.md) | Task 6 pricing accepted missing snapshots and free routes | closed | 2026-08-24 | 2026-08-24 |
-| [SB-20260824-012823-apply-patch-duplicate-target](incidents/2026-08-24T012823Z-apply-patch-duplicate-target.md) | Patch request repeated one target file in multiple update blocks | closed | 2026-08-24 | 2026-08-25T19:55:35.3677309Z |
+| [SB-20260824-012823-apply-patch-duplicate-target](incidents/2026-08-24T012823Z-apply-patch-duplicate-target.md) | Patch request repeated one target file in multiple update blocks | closed | 2026-08-24 | 2026-08-26T14:53:12Z |
 | [SB-20260823-232717-requirements-profile-path-format-parser](incidents/2026-08-23T232717Z-requirements-profile-path-format-parser.md) | Requirements profile-path format expression caused a parser error | closed | 2026-08-23 | 2026-08-23 |
 | [SB-20260823-234012-minimal-profile-fixture-path](incidents/2026-08-23T234012Z-minimal-profile-fixture-path.md) | Assumed minimal-profile fixture filename caused a path-not-found error | closed | 2026-08-23 | 2026-08-24 |
 | [SB-20260824-031922-baseline-session-id-not-retained](incidents/2026-08-24T031922Z-baseline-session-id-not-retained.md) | Baseline test session identifier was not retained | closed | 2026-08-24 | 2026-08-26T04:30:39.5990506Z |
 | [SB-20260824-033023-sqlite-test-connection-not-closed](incidents/2026-08-24T033023Z-sqlite-test-connection-not-closed.md) | SQLite test reader left Windows file handles open | closed | 2026-08-24 | 2026-08-24 |
 | [SB-20260824-035416-sqlite-schema-admission-atomicity](incidents/2026-08-24T035416Z-sqlite-schema-admission-atomicity.md) | SQLite schema admission was not exact or atomic | closed | 2026-08-24 | 2026-08-24 |
 | [SB-20260824-044250-sqlite-trace-quality-review](incidents/2026-08-24T044250Z-sqlite-trace-quality-review.md) | SQLite trace admission and bridge durability gaps | closed | 2026-08-24 | 2026-08-24 |
-| [SB-20260824-051403-python-alias-unavailable](incidents/2026-08-24T051403Z-python-alias-unavailable.md) | Python alias unavailable during storage baseline | closed | 2026-08-24 | 2026-08-26T05:24:28.365954Z |
+| [SB-20260824-051403-python-alias-unavailable](incidents/2026-08-24T051403Z-python-alias-unavailable.md) | Python alias unavailable during storage baseline | closed | 2026-08-24 | 2026-08-26T14:53:12Z |
 | [SB-20260824-052419-nullable-trace-id-diagnostic](incidents/2026-08-24T052419Z-nullable-trace-id-diagnostic.md) | Nullable trace ID test expected a leaf diagnostic | closed | 2026-08-24 | 2026-08-24 |
 | [SB-20260824-052700-patch-tool-call-omitted](incidents/2026-08-24T052700Z-patch-tool-call-omitted.md) | Pricing patch text was not sent to the edit tool | closed | 2026-08-24 | 2026-08-24 |
 | [SB-20260824-052823-router-test-assert-helper](incidents/2026-08-24T052823Z-router-test-assert-helper.md) | Task 8 pricing test used an unavailable assertion helper | closed | 2026-08-24 | 2026-08-24 |
