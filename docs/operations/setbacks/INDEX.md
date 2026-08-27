@@ -15,7 +15,7 @@
 | [SB-20260824-033023-sqlite-test-connection-not-closed](incidents/2026-08-24T033023Z-sqlite-test-connection-not-closed.md) | SQLite test reader left Windows file handles open | closed | 2026-08-24 | 2026-08-24 |
 | [SB-20260824-035416-sqlite-schema-admission-atomicity](incidents/2026-08-24T035416Z-sqlite-schema-admission-atomicity.md) | SQLite schema admission was not exact or atomic | closed | 2026-08-24 | 2026-08-24 |
 | [SB-20260824-044250-sqlite-trace-quality-review](incidents/2026-08-24T044250Z-sqlite-trace-quality-review.md) | SQLite trace admission and bridge durability gaps | closed | 2026-08-24 | 2026-08-24 |
-| [SB-20260824-051403-python-alias-unavailable](incidents/2026-08-24T051403Z-python-alias-unavailable.md) | Python alias unavailable during storage baseline | closed | 2026-08-24 | 2026-08-26T15:32:58.107276Z |
+| [SB-20260824-051403-python-alias-unavailable](incidents/2026-08-24T051403Z-python-alias-unavailable.md) | Python alias unavailable during storage baseline | closed | 2026-08-24 | 2026-08-27T03:44:11.5952989Z |
 | [SB-20260824-052419-nullable-trace-id-diagnostic](incidents/2026-08-24T052419Z-nullable-trace-id-diagnostic.md) | Nullable trace ID test expected a leaf diagnostic | closed | 2026-08-24 | 2026-08-24 |
 | [SB-20260824-052700-patch-tool-call-omitted](incidents/2026-08-24T052700Z-patch-tool-call-omitted.md) | Pricing patch text was not sent to the edit tool | closed | 2026-08-24 | 2026-08-24 |
 | [SB-20260824-052823-router-test-assert-helper](incidents/2026-08-24T052823Z-router-test-assert-helper.md) | Task 8 pricing test used an unavailable assertion helper | closed | 2026-08-24 | 2026-08-26T15:31:27.1651876Z |

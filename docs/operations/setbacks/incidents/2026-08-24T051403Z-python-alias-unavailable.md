@@ -2,8 +2,8 @@
 
 - **Status:** closed
 - **First observed:** 2026-08-24T05:14:03Z
-- **Last observed:** 2026-08-26T15:32:58.107276Z
-- **Phase/task:** Task 8 pre-implementation baseline
+- **Last observed:** 2026-08-27T03:44:11.5952989Z
+- **Phase/task:** Calibration JSON repair controller final verification
 - **Environment:** Windows PowerShell, Codex desktop managed workspace
 - **Version/commit:** `50ca437`
 
@@ -51,6 +51,7 @@ The bundled interpreter completed all 52 storage tests with exit code 0 in 15.59
 
 ## Recurrence history
 
+- 2026-08-27T03:44:11.5952989Z: The direct `python -m unittest router.storage.test_sqlite_store` acceptance command failed before discovery because the managed shell still exposes no `python` alias. No repository, provider, launcher, network, live-calibration, or result state changed. The repository-approved resolver then ran all 53 tests successfully in 15.097 seconds with exit code 0.
 - 2026-08-26T15:32:58.107276Z: The unavailable `py` alias recurred while invoking the correctly resolved setback helper. The bundled Python path from the workspace dependency inventory then ran the helper successfully; no provider, launcher, network, or live calibration path ran.
 - 2026-08-26T14:53:12Z: The unavailable `python` alias recurred while attempting to invoke the setback helper during Task 3. The helper was not present at the expected repository path, so the new incident was recorded directly with the repository template contract. Work remained offline; no provider, launcher, network, or live calibration path ran.
 - 2026-08-26T05:24:28.365954Z: The unavailable `python` alias recurred while locating the setback helper during Task 2. Work remained offline and contained. The bundled Python runtime was resolved through the workspace dependency inventory and successfully ran the helper; no provider, launcher, network, or live calibration path ran.
