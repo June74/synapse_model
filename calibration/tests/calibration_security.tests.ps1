@@ -7,6 +7,9 @@ $implementationPath = Join-Path $calibrationRoot 'run_calibration.ps1'
 $setPath = Join-Path $calibrationRoot 'calibration-set-v1.json'
 $rubricsRoot = Join-Path $calibrationRoot 'rubrics'
 $resultsRoot = Join-Path $calibrationRoot 'results'
+$launcherLockSchemaPath = Join-Path $calibrationRoot 'pilots/option1-launchers.schema.json'
+
+. (Join-Path $PSScriptRoot 'launcher-fixture.ps1')
 
 function Assert-True {
     param([bool]$Condition, [string]$Message = 'Expected condition to be true.')
@@ -35,7 +38,10 @@ function Invoke-Assertion {
 
 function Assert-SequenceEqual {
     param([object[]]$Actual, [object[]]$Expected)
-    Assert-Equal $Actual.Count $Expected.Count
+    if ($Actual.Count -ne $Expected.Count) {
+        throw ("Expected a sequence of {0} item(s) [{1}] but got {2} item(s) [{3}]." -f
+            $Expected.Count, ($Expected -join ', '), $Actual.Count, ($Actual -join ', '))
+    }
     for ($index = 0; $index -lt $Expected.Count; $index++) {
         Assert-Equal $Actual[$index] $Expected[$index]
     }
@@ -360,6 +366,7 @@ function Invoke-SecurityPilotFailureCase {
         [scriptblock]$GuardFailureMutation
     )
     $input = New-SecurityPilotLedgerInput
+    $fixture = New-TestCalibrationLauncherFixture
     $resultsRootForGuardMutation = [string]$input.results_root
     $calls = [Collections.Generic.List[string]]::new()
     $candidate = {
@@ -436,7 +443,11 @@ function Invoke-SecurityPilotFailureCase {
         Run = $true
         RunId = 'option1-live-20260826-002'
         ResultsRoot = $input.results_root
+        AllowPilotSourceOverridesForTest = $true
         AllowPilotResultsRootOverrideForTest = $true
+        LauncherLockPath = $fixture.lock_path
+        LauncherLockSchemaPath = $launcherLockSchemaPath
+        LauncherResolver = (New-TestCalibrationLauncherResolver -Fixture $fixture)
         CalibrationSetPath = $setPath
         RubricsRoot = $rubricsRoot
         CandidateInvoker = $candidate
@@ -447,11 +458,16 @@ function Invoke-SecurityPilotFailureCase {
     if ($null -ne $ArtifactWriter) { $parameters.PilotArtifactWriter = $ArtifactWriter }
     try {
         $result = Invoke-Calibration @parameters
+        Assert-TestCalibrationPilotLaunchPrepared -Result $result
         return [pscustomobject]@{ input = $input; result = $result; calls = @($calls) }
     } catch {
         $_.Exception.Data['pilot_test_calls'] = @($calls)
         Remove-SecurityPilotLedgerRoot -Path $input.results_root
         throw
+    } finally {
+        # The run closes its prepared launcher handles before returning, and no caller
+        # inspects the tree afterwards, so the fixture is done the moment the run is.
+        Remove-TestCalibrationLauncherFixture -Fixture $fixture
     }
 }
 
