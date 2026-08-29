@@ -2,7 +2,7 @@
 
 - **Status:** contained
 - **First observed:** 2026-08-19
-- **Last observed:** 2026-08-24
+- **Last observed:** 2026-08-26T15:55:50.4240433Z
 - **Symptom:** A scoped `git add`/`git commit` for the design specification failed because Git could not create `C:\Users\2006i\projects\router_model\.git\index.lock` due to permission denial.
 - **Confirmed:** The design file was written successfully; no commit was created and no existing files were overwritten.
 - **Correction:** Leave the specification uncommitted in the shared workspace. If a commit is desired, run the Git command from the user's personal terminal where the repository permissions are available.
@@ -116,3 +116,84 @@
 - **Correction:** Retry only the bounded documentation staging and commit through approved Git-metadata access.
 - **Prevention:** Continue treating this worktree's staging and commit operations as requiring approved Git-metadata access.
 - **Related verification:** Corrected route-only acceptance exited 0 with 24 routes and zero provider calls; both temporary acceptance directories were removed.
+
+## Recurrence: 2026-08-25, Option 1 implementation plan
+
+- **Phase/task:** Option 1 three-launch calibration pilot implementation planning commit.
+- **Symptom:** Scoped staging of the verified plan and setback records could not create `.git/worktrees/option1-calibration-pilot/index.lock`; Git returned permission denied.
+- **Confirmed cause:** The isolated worktree is writable, while its Git index metadata is stored under the parent repository `.git` directory outside the managed write boundary.
+- **Impact:** No file was staged and no commit was created. The verified plan and closed setback records remain intact; no implementation or provider execution occurred.
+- **Correction:** Retry only the bounded staging and planning commit with approved Git-metadata access.
+- **Prevention:** Treat this worktree's staging and commit operations as requiring approved Git-metadata access.
+- **Related verification:** The plan contract check reported 9 tasks and 48 checkbox steps; the narrowed marker scan and `git diff --check` passed before staging.
+
+## Recurrence: 2026-08-25, Option 1 Task 5 commits
+
+- **Phase/task:** Option 1 three-launch calibration pilot Task 5, setback and feature commits.
+- **Symptom:** Scoped staging could not create `.git/worktrees/option1-calibration-pilot/index.lock`; Git returned permission denied.
+- **Confirmed cause:** The isolated worktree files are writable, while its Git index metadata remains under the parent repository `.git` directory outside the managed write boundary.
+- **Impact:** No file was staged and no commit was created by the failed command. The verified Task 5 code, tests, and closed setback records remain intact; no provider or native launcher ran.
+- **Correction:** Retry only the bounded documentation and product staging/commit commands through approved Git-metadata access.
+- **Prevention:** Continue treating this worktree's staging and commit operations as requiring approved Git-metadata access.
+- **Related verification:** The functional suite completed with every assertion passing, the adjacent security suite completed with 22/22 passing assertions, and `git diff --check` passed before staging.
+
+## Recurrence: 2026-08-25, Option 1 Task 6 commits
+
+- **Phase/task:** Option 1 three-launch calibration pilot Task 6, setback and product commits.
+- **Symptom:** Scoped staging could not create `.git/worktrees/option1-calibration-pilot/index.lock`; Git returned permission denied.
+- **Confirmed cause:** The isolated worktree files are writable, while its Git index metadata remains under the parent repository `.git` directory outside the managed write boundary.
+- **Impact:** No file was staged and no commit was created by the failed command. The verified Task 6 implementation, tests, and closed setback records remain intact; no provider, native launcher, network, API, local model, or live CLI ran.
+- **Correction:** Retry only the bounded documentation and product staging/commit commands through approved Git-metadata access.
+- **Prevention:** Continue treating this worktree's staging and commit operations as requiring approved Git-metadata access.
+- **Related verification:** The functional suite passed 47/47 assertions, the security suite passed 28/28 assertions, `git diff --check` passed, and `calibration/results` contained only `.gitkeep` before staging.
+
+## Recurrence: 2026-08-25, Option 1 Task 7 commits
+
+- **Phase/task:** Option 1 three-launch calibration pilot Task 7, operator documentation and setback commits.
+- **Symptom:** Scoped staging could not create `.git/worktrees/option1-calibration-pilot/index.lock`; Git returned permission denied.
+- **Confirmed cause:** The isolated worktree files are writable, while its Git index metadata remains under the parent repository `.git` directory outside the managed write boundary.
+- **Impact:** No file was staged and no commit was created by the failed command. The verified README, documentation contract, and closed setback records remain intact; no provider, native launcher, network, API, local model, or live CLI ran.
+- **Correction:** Retry only the bounded documentation and product staging/commit commands through approved Git-metadata access.
+- **Prevention:** Continue treating this worktree's staging and commit operations as requiring approved Git-metadata access.
+- **Related verification:** The functional calibration suite passed, the offline `-Pilot` plan reported zero provider calls and three roles, `calibration/results` remained unchanged, and `git diff --check` passed before staging.
+
+## Recurrence: 2026-08-25, Option 1 Task 8 acceptance setback commit
+
+- **Phase/task:** Option 1 three-launch calibration pilot Task 8, mandatory setback recurrence commit.
+- **Symptom:** Scoped staging and commit of the two acceptance setback records could not create `.git/worktrees/option1-calibration-pilot/index.lock`; Git returned permission denied.
+- **Confirmed cause:** The isolated worktree files are writable, while its Git index metadata remains under the parent repository `.git` directory outside the managed write boundary.
+- **Impact:** No file was staged and no commit was created by the failed command. The verified offline suites, CLI evidence, and safe recurrence records remain intact; no provider, native launcher, network, API, local model, or live CLI ran.
+- **Correction:** Retry only the bounded three-file documentation staging and commit through approved Git-metadata access.
+- **Prevention:** Continue treating this worktree's staging and commit operations as requiring approved Git-metadata access.
+- **Related verification:** All five offline suites exited 0, the real offline `-Pilot` command emitted one JSON object with zero provider calls and no result-tree change, and both the branch diff and uncommitted documentation passed `git diff --check` before staging.
+
+## Recurrence: 2026-08-26, Agy envelope repair Task 2
+
+- **Phase/task:** Agy envelope repair Task 2 bounded diagnostics commit.
+- **Symptom:** Scoped staging could not create `.git/worktrees/option1-calibration-pilot/index.lock`; Git returned permission denied.
+- **Confirmed cause:** The isolated worktree files are writable, while its shared Git index metadata remains under the parent repository `.git` directory outside the managed write boundary.
+- **Impact:** No file was staged and no commit was created by the failed command. The verified Task 2 implementation, tests, and closed setback records remain intact; no provider, launcher, network, or live calibration path ran.
+- **Correction:** Retry only the bounded selective staging and commit through approved Git-metadata access.
+- **Prevention:** Continue treating this worktree's staging and commit operations as requiring approved Git-metadata access.
+- **Related verification:** The functional calibration suite passed 54/54 assertions, the security suite passed 40/40 assertions, the production script parsed without error, and `git diff --check` passed before staging.
+- **Selective-staging note:** Interactive hunk editing was unavailable because the managed terminal had no editor, and an attempted stdin patch could not signal end-of-file through the pseudo-terminal. Both attempts were aborted without changing the index. An exact one-row patch file was then applied directly to the index, and the temporary patch file was removed.
+
+## Recurrence: 2026-08-26, launcher identity design refinement
+
+- **Phase/task:** Agy envelope repair Task 3 design refinement and audit setback commit.
+- **Symptom:** Scoped staging could not create `.git/worktrees/option1-calibration-pilot/index.lock`; Git returned permission denied.
+- **Confirmed cause:** The worktree files are writable, while Git metadata remains outside the managed write boundary under the parent repository `.git` directory.
+- **Impact:** No file was staged and no commit was created by the failed command. The design, plan, and closed audit-setback files remain intact; no launcher, provider, network request, or live calibration ran.
+- **Correction:** Retry only the bounded documentation staging and commit through approved Git-metadata access.
+- **Prevention:** Continue treating this worktree's index and commit operations as requiring approved Git-metadata access.
+- **Related verification:** The scoped documentation diff passed `git diff --check` before the failed staging attempt.
+
+## Recurrence: 2026-08-26, Task 3 launcher identity follow-up
+
+- **Phase/task:** Task 3 launcher identity control-boundary and Windows handle-race follow-up commit.
+- **Symptom:** Scoped staging could not create `.git/worktrees/option1-calibration-pilot/index.lock`; Git returned permission denied.
+- **Confirmed cause:** The worktree files are writable, while its Git index metadata remains under the parent repository `.git` directory outside the managed write boundary.
+- **Impact:** No file was staged and no commit was created by the failed command. The verified production changes, tests, and closed setback records remain intact; no provider, native launcher, network, API, local model, or live calibration ran.
+- **Correction:** Retry only the explicit scoped staging and commit commands through approved Git-metadata access.
+- **Prevention:** Continue treating this worktree's staging and commit operations as requiring approved Git-metadata access.
+- **Related verification:** Pilot, calibration functional, and calibration security suites all exited 0 sequentially; the offline `-Pilot` plan reported zero provider calls; parser checks and `git diff --check` passed before staging.

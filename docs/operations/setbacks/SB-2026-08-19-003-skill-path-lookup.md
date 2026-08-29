@@ -4,8 +4,8 @@
 - Title: Skill path lookup mismatch
 - Status: closed
 - First observed: 2026-08-19
-- Last observed: 2026-08-23
-- Phase/task: Task 7 SQLite trace storage preflight
+- Last observed: 2026-08-26T17:51:09.0115027Z
+- Phase/task: Task 9 live acceptance incident logging
 - Environment: Windows PowerShell, Codex desktop
 - Version/commit: Not applicable
 
@@ -58,3 +58,58 @@ The `scope-gate` and `setback-logger` instructions were read successfully from t
 - Correction: use the exact schema paths from `router/tests/router.tests.ps1` and verify them through a directory listing before reading.
 - Prevention: copy live path variables verbatim; never normalize or abbreviate repository filenames.
 - Verification: the corrected literal-path reads loaded all three schema filenames and the full request and response schemas successfully.
+
+### 2026-08-25 - setback helper location assumption
+
+- Symptom: Task 5 attempted to run `new_setback.py` beneath the repository incident directory, but the helper is installed beneath the resolved `setback-logger` skill directory.
+- Impact: one read-only helper invocation failed before creating the Task 5 incident. No product file, provider, native launcher, network request, or private data was involved.
+- Confirmed cause: the command treated the skill's relative `scripts/` reference as repository-relative instead of resolving it against the skill directory.
+- Correction: enumerate the resolved skill directory and invoke its exact `scripts/new_setback.py` path with the bundled Python runtime.
+- Prevention: resolve relative resources against the directory containing `SKILL.md`, as required by the skill-loading contract.
+- Verification: the helper's `--help` completed with exit code 0 from the resolved skill path.
+
+### 2026-08-25 - repository instruction and incident filename assumptions
+
+- Symptom: Task 6 first attempted to read a repository-root `AGENTS.md` that is not present in this worktree, then derived this incident filename from its index title instead of enumerating the exact path.
+- Impact: two read-only commands reported path-not-found errors. No product file, provider, native launcher, network request, or private data was involved.
+- Confirmed cause: the commands assumed literal paths without first resolving them from the repository tree.
+- Correction: enumerate `AGENTS.md` and setback files before opening them. The only `AGENTS.md` is scoped beneath `pilot/providers/openai/` and does not govern the Task 6 files.
+- Prevention: use `rg --files` before literal reads whenever the requested repository instruction or incident path has not already been verified.
+- Verification: repository enumeration identified the exact scoped instruction and incident paths; Task 6 preflight continued without applying unrelated provider-scoped instructions.
+
+### 2026-08-25 - Task 7 setback-helper and Windows path assumptions
+
+- Symptom: Task 7 first looked for the setback helper beneath the repository incident directory, then attempted to execute the located Python file as a native Windows program. A later search passed a wildcard as part of a literal Windows path and reported an invalid filename.
+- Impact: three read-only lookup or launch attempts failed before Task 7 edits. No product file, provider, native launcher, network request, result artifact, or private data was involved.
+- Confirmed cause: commands constructed unverified relative or wildcard paths and did not invoke the Python helper through the repository-resolved Python runtime.
+- Correction: enumerate the skill directory, read the exact helper path, resolve Python through `Resolve-RouterPythonExecutable`, and search explicit directories without a literal Windows wildcard path.
+- Prevention: resolve every relative skill resource against the loaded `SKILL.md` directory, invoke `.py` helpers through the resolved Python executable, and use `rg` directory roots or `Get-ChildItem` for Windows wildcard expansion.
+- Verification: the exact helper source and `--help` completed through the resolved Python runtime; the explicit incident and index searches completed without using the invalid wildcard path.
+
+### 2026-08-25 - Task 9 setback-helper and resolver-scope recurrence
+
+- Symptom: live-incident logging again looked for `scripts/new_setback.py` beneath the repository setback directory and called `Resolve-RouterPythonExecutable` without first loading its defining module.
+- Impact: one read-only lookup command failed before incident creation. No runtime artifact, provider process, tracked product file, credential, prompt, or response was modified or exposed.
+- Confirmed cause: the command repeated the repository-relative helper assumption and treated a module-scoped resolver as globally available.
+- Correction: enumerated repository files, updated this recurrence, and created the bounded live incident manually because the repository contains no local helper script.
+- Prevention: resolve skill-owned resources against the loaded skill directory and load a function's defining module before calling it; otherwise use the documented manual incident contract.
+- Verification: the existing incident was found by exact path, the new live incident and index row were created with bounded evidence only, and no live command was repeated.
+
+### 2026-08-26 - Task 3 setback-helper location recurrence
+
+- Symptom: the first lookup again treated the setback helper's relative `scripts/` path as repository-relative.
+- Impact: one read-only lookup failed before incident creation. No product process, provider, network request, credential, prompt, or response was affected.
+- Confirmed cause: the relative helper resource was not resolved against the already loaded `setback-logger/SKILL.md` directory.
+- Correction: enumerated the skill directory, resolved its exact helper path, and invoked it through the bundled Python runtime.
+- Prevention: resolve every skill-relative resource against the directory containing the selected `SKILL.md` before filesystem access.
+- Verification: the resolved helper printed its usage and created the bounded incident successfully.
+
+### 2026-08-26 - Offline JSON-rubric adjudication preflight recurrence
+
+- Symptom: adjudication preflight first read `scope-gate` beneath the wrong configured skill root, then invoked the repository-relative setback-helper path with an unavailable bare `python` command, and finally repeated the already documented repository-relative helper-path assumption after resolving the bundled runtime.
+- Impact: three read-only lookup or launch attempts failed before rubric inspection. No calibration artifact, product source, provider, launcher, network request, credential, prompt, or response changed or was exposed.
+- Confirmed cause: the commands did not expand the displayed skill-root alias before reading and did not resolve the skill-owned helper relative to `setback-logger/SKILL.md`; the interactive shell also has no bare `python` executable on `PATH`.
+- Correction: read `scope-gate` from its configured `.agents` root, load the repository Python resolver, and update this existing incident manually rather than repeating the helper lookup.
+- Prevention: expand every skill-root alias from the active catalog, resolve skill-owned resources against the loaded `SKILL.md` directory, and use `Resolve-RouterPythonExecutable` for repository Python commands.
+- Verification: the required `scope-gate`, `systematic-debugging`, `domain-logic-contract`, `explaining-unfamiliar-terms`, and `setback-logger` instructions were read successfully; the repository Python resolver returned the bundled interpreter; no provider or launcher process ran.
+- Follow-up recurrence: a setback search passed `docs/operations/setbacks/*.md` as a literal Windows path to `rg`, producing an invalid-filename diagnostic while the explicit directory searches still completed. The corrected searches use directory roots without embedding a wildcard in a literal path. No state or private data changed.

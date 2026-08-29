@@ -36,23 +36,8 @@ function Test-CalibrationEvidenceNegated {
 function Get-CalibrationJsonPayload {
     param([Parameter(Mandatory)][string]$ResponseText)
     $trimmed = $ResponseText.Trim()
-    $jsonText = $null
-    if ($trimmed.StartsWith('{', [StringComparison]::Ordinal) -or
-        $trimmed.StartsWith('[', [StringComparison]::Ordinal)) {
-        $jsonText = $trimmed
-    } else {
-        $match = [regex]::Match(
-            $trimmed,
-            '\A```json[ \t]*\r?\n(?<json>[\s\S]*?)\r?\n```\z',
-            [Text.RegularExpressions.RegexOptions]::IgnoreCase
-        )
-        if (-not $match.Success) {
-            return [pscustomobject]@{ valid = $false; value = $null }
-        }
-        $jsonText = $match.Groups['json'].Value.Trim()
-    }
     try {
-        $document = [Text.Json.JsonDocument]::Parse($jsonText)
+        $document = [Text.Json.JsonDocument]::Parse($trimmed)
         try {
             if (@(Find-RouterDuplicateJsonPropertyPath -Element $document.RootElement).Count -gt 0) {
                 return [pscustomobject]@{ valid = $false; value = $null }
@@ -60,7 +45,7 @@ function Get-CalibrationJsonPayload {
         } finally {
             $document.Dispose()
         }
-        $value = $jsonText | ConvertFrom-Json -Depth 100 -NoEnumerate -ErrorAction Stop
+        $value = $trimmed | ConvertFrom-Json -Depth 100 -NoEnumerate -DateKind String -ErrorAction Stop
         if ($null -eq $value) { throw 'null is not an extraction result' }
         return [pscustomobject]@{ valid = $true; value = $value }
     } catch {

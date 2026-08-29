@@ -1,0 +1,16 @@
+{
+  "manifest_version": "calibration-pilot-manifest/v1",
+  "pilot_id": "option1-three-launch-v1",
+  "mode": "option_1_workflow_validation",
+  "selection_mode": "calibration_only_exact_pin",
+  "prompt": { "id": "extraction-low-general-v1", "version": "1.0.0" },
+  "roles": [
+    { "ordinal": 1, "role": "candidate", "family": "google", "launcher": "agy", "route_id": "agy__gemini_3_7_flash_low__low", "configuration_id": "gemini-3.7-flash-low__low", "model": "gemini-3.7-flash-low", "effort": "low" },
+    { "ordinal": 2, "role": "judge_1", "family": "openai", "launcher": "codex", "route_id": "codex__gpt_5_6_sol__max", "configuration_id": "gpt-5.6-sol__max", "model": "gpt-5.6-sol", "effort": "max" },
+    { "ordinal": 3, "role": "judge_2", "family": "anthropic", "launcher": "claude", "route_id": "claude__claude_opus_5__max", "configuration_id": "claude-opus-5__max", "model": "claude-opus-5", "effort": "max" }
+  ],
+  "deterministic_grader": "exact_fields",
+  "limits": { "total": 3, "provider_family": { "google": 1, "openai": 1, "anthropic": 1 }, "application_retries": 0 },
+  "raw_content_policy": "synthetic_prompt_and_credential_sanitized_outputs_only",
+  "profile_promotion_allowed": false
+}

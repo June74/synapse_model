@@ -722,6 +722,74 @@ Invoke-Assertion 'ConvertFrom-AgyOutput normalizes empty success errors to null'
     Assert-Equal $agy.answer '4'
     Assert-Equal $agy.error $null
 }
+
+Invoke-Assertion 'ConvertFrom-AgyOutput normalizes reordered canonical success properties' {
+    $agy = ConvertFrom-AgyOutput '{"status":"SUCCESS","structured_output":{"answer":"4","error":null,"status":"success"}}'
+    Assert-SequenceEqual @($agy.PSObject.Properties.Name) @('status', 'answer', 'error')
+    Assert-True (Test-CanonicalResponse $agy).valid
+}
+
+Invoke-Assertion 'ConvertFrom-AgyOutput normalizes reordered canonical failure properties' {
+    $agy = ConvertFrom-AgyOutput '{"status":"SUCCESS","structured_output":{"answer":"","error":"provider declined","status":"failure"}}'
+    Assert-SequenceEqual @($agy.PSObject.Properties.Name) @('status', 'answer', 'error')
+    Assert-True (Test-CanonicalResponse $agy).valid
+}
+
+Invoke-Assertion 'ConvertFrom-AgyOutput preserves case-variant canonical property names for rejection' {
+    $cases = @(
+        [pscustomobject]@{ json = '{"status":"SUCCESS","structured_output":{"Status":"success","answer":"4","error":null}}'; names = @('Status', 'answer', 'error') }
+        [pscustomobject]@{ json = '{"status":"SUCCESS","structured_output":{"status":"success","Answer":"4","error":null}}'; names = @('status', 'Answer', 'error') }
+        [pscustomobject]@{ json = '{"status":"SUCCESS","structured_output":{"status":"success","answer":"4","Error":null}}'; names = @('status', 'answer', 'Error') }
+    )
+    foreach ($case in $cases) {
+        $agy = ConvertFrom-AgyOutput $case.json
+        $actualNames = @($agy.PSObject.Properties.Name)
+        Assert-Equal $actualNames.Count @($case.names).Count
+        for ($index = 0; $index -lt @($case.names).Count; $index++) {
+            Assert-True ([string]::Equals(
+                    [string]$actualNames[$index], [string]$case.names[$index], [StringComparison]::Ordinal))
+        }
+    }
+}
+
+Invoke-Assertion 'Test-CanonicalResponse rejects case-variant canonical property names' {
+    $cases = @(
+        [pscustomobject]@{ value = [pscustomobject][ordered]@{ Status = 'success'; answer = '4'; error = $null }; missing = 'status' }
+        [pscustomobject]@{ value = [pscustomobject][ordered]@{ status = 'success'; Answer = '4'; error = $null }; missing = 'answer' }
+        [pscustomobject]@{ value = [pscustomobject][ordered]@{ status = 'success'; answer = '4'; Error = $null }; missing = 'error' }
+    )
+    foreach ($case in $cases) {
+        $validation = Test-CanonicalResponse $case.value
+        Assert-True (-not $validation.valid)
+        Assert-Contains $validation.reason "Missing required property '$($case.missing)'."
+    }
+}
+
+Invoke-Assertion 'Test-CanonicalResponse rejects case-variant canonical status values' {
+    $cases = @(
+        [pscustomobject][ordered]@{ status = 'Success'; answer = '4'; error = $null }
+        [pscustomobject][ordered]@{ status = 'Failure'; answer = ''; error = 'provider declined' }
+    )
+    foreach ($case in $cases) {
+        $validation = Test-CanonicalResponse $case
+        Assert-True (-not $validation.valid)
+        Assert-Contains $validation.reason 'status must be exactly success or failure.'
+    }
+}
+
+Invoke-Assertion 'ConvertFrom-AgyOutput preserves invalid canonical value types' {
+    $agy = ConvertFrom-AgyOutput '{"status":"SUCCESS","structured_output":{"answer":4,"error":"","status":"success"}}'
+    Assert-SequenceEqual @($agy.PSObject.Properties.Name) @('status', 'answer', 'error')
+    Assert-True ($agy.answer -isnot [string])
+    Assert-True (-not (Test-CanonicalResponse $agy).valid)
+}
+
+Invoke-Assertion 'ConvertFrom-AgyOutput preserves unexpected canonical properties for rejection' {
+    $agy = ConvertFrom-AgyOutput '{"status":"SUCCESS","structured_output":{"answer":"4","error":null,"status":"success","extra":"not allowed"}}'
+    Assert-True ($agy.PSObject.Properties.Name -contains 'extra')
+    Assert-True (-not (Test-CanonicalResponse $agy).valid)
+}
+
 Invoke-Assertion 'ConvertFrom-AgyOutput accepts one JSON envelope surrounded by stdout noise' {
     $agy = ConvertFrom-AgyOutput "agy startup`n{""status"":""SUCCESS"",""structured_output"":{""status"":""success"",""answer"":""4"",""error"":null},""response"":""4""}`nagy complete"
     Assert-Equal $agy.status 'success'
@@ -1598,6 +1666,265 @@ Invoke-Assertion 'Invoke-PilotCandidate executes one exact candidate without wri
     Assert-True (-not $serialized.Contains('item.completed'))
 }
 
+Invoke-Assertion 'Invoke-PilotCandidate runs LaunchGuard immediately before NativeInvoker with the exact command' {
+    $matrix = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'pilot/model_matrix.json') | ConvertFrom-Json
+    $candidate = @($matrix.candidates | Where-Object { $_.route_id -eq 'agy__gemini_3_7_flash_low__low' } | Select-Object -First 1)[0]
+    $events = [Collections.Generic.List[string]]::new()
+    $guardCandidates = [Collections.Generic.List[object]]::new()
+    $guardCommands = [Collections.Generic.List[object]]::new()
+    $nativeCommands = [Collections.Generic.List[object]]::new()
+    $nativeInvoker = {
+        param($command)
+        $nativeCommands.Add($command)
+        $events.Add(('native:' + $command.route_id))
+        [pscustomobject]@{
+            exit_code = 0
+            stdout = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'pilot/tests/fixtures/agy-success.json')
+            stderr = ''
+            duration_ms = 1
+        }
+    }
+    $launchGuard = {
+        param($guardCandidate, $command)
+        $guardCandidates.Add($guardCandidate)
+        $guardCommands.Add($command)
+        Assert-Equal $guardCandidate.route_id 'agy__gemini_3_7_flash_low__low'
+        Assert-Equal $command.route_id 'agy__gemini_3_7_flash_low__low'
+        Assert-Equal $guardCandidate.model 'gemini-3.7-flash-low'
+        Assert-Equal $command.executable 'agy'
+        Assert-SequenceEqual $command.arguments @('-p', 'guard ordering prompt', '--output-format', 'json', '--json-schema', 'pilot/shared/response_schema.json', '--model', 'gemini-3.7-flash-low', '--effort', 'low', '--print-timeout', '2m', '--disable-slash-commands')
+        $events.Add(('guard:' + $guardCandidate.route_id))
+    }
+
+    $execution = Invoke-PilotCandidate -Candidate $candidate -Prompt 'guard ordering prompt' `
+        -LaunchGuard $launchGuard -NativeInvoker $nativeInvoker -RunId 'task2-guard-ordering'
+
+    Assert-Equal $guardCandidates.Count 1
+    Assert-Equal $guardCommands.Count 1
+    Assert-Equal $nativeCommands.Count 1
+    Assert-True ([object]::ReferenceEquals($guardCandidates[0], $candidate))
+    Assert-True ([object]::ReferenceEquals($guardCommands[0], $nativeCommands[0]))
+    Assert-Equal $guardCommands[0].route_id 'agy__gemini_3_7_flash_low__low'
+    Assert-Equal $guardCommands[0].prompt 'guard ordering prompt'
+    Assert-Equal $guardCommands[0].tool 'agy'
+    Assert-Equal $guardCommands[0].executable 'agy'
+    Assert-SequenceEqual $guardCommands[0].arguments @('-p', 'guard ordering prompt', '--output-format', 'json', '--json-schema', 'pilot/shared/response_schema.json', '--model', 'gemini-3.7-flash-low', '--effort', 'low', '--print-timeout', '2m', '--disable-slash-commands')
+    Assert-Equal $guardCommands[0].working_directory $projectRoot
+    Assert-SequenceEqual @($events) @(
+        'guard:agy__gemini_3_7_flash_low__low',
+        'native:agy__gemini_3_7_flash_low__low'
+    )
+    Assert-Equal $execution.diagnostic_note 'completed'
+    Assert-Equal $execution.canonical.status 'success'
+    Assert-Equal $execution.canonical.answer '4'
+}
+
+Invoke-Assertion 'Invoke-PilotCandidate sinks successful LaunchGuard output' {
+    $matrix = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'pilot/model_matrix.json') | ConvertFrom-Json
+    $candidate = @($matrix.candidates | Where-Object { $_.route_id -eq 'agy__gemini_3_7_flash_low__low' } | Select-Object -First 1)[0]
+    $nativeInvoker = {
+        param($command)
+        [pscustomobject]@{
+            exit_code = 0
+            stdout = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'pilot/tests/fixtures/agy-success.json')
+            stderr = ''
+            duration_ms = 1
+        }
+    }
+    $execution = Invoke-PilotCandidate -Candidate $candidate -Prompt 'guard output prompt' `
+        -LaunchGuard { 'GUARD_OUTPUT_SENTINEL' } -NativeInvoker $nativeInvoker -RunId 'task2-guard-output'
+
+    Assert-Equal @($execution).Count 1
+    Assert-True ($execution -is [pscustomobject])
+    Assert-Equal $execution.run_id 'task2-guard-output'
+    $serialized = $execution | ConvertTo-Json -Depth 20 -Compress
+    Assert-True (-not $serialized.Contains('GUARD_OUTPUT_SENTINEL'))
+}
+
+Invoke-Assertion 'Invoke-PilotCandidate binds and forwards the exact prepared launcher identity without re-resolution' {
+    $matrix = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'pilot/model_matrix.json') | ConvertFrom-Json
+    $candidate = @($matrix.candidates | Where-Object { $_.route_id -ceq 'codex__gpt_5_6_sol__max' })[0]
+    $preparedExecutable = [IO.Path]::GetFullPath((Join-Path ([IO.Path]::GetTempPath()) 'locked-codex.exe'))
+    $managedRoot = [IO.Path]::GetFullPath((Join-Path ([IO.Path]::GetTempPath()) 'locked-codex-package'))
+    $preparedIdentity = [pscustomobject][ordered]@{
+        prepared_launcher_version = 'calibration-prepared-launcher/v1'
+        ordinal = 2
+        role = 'judge_1'
+        launcher = 'codex'
+        route_id = 'codex__gpt_5_6_sol__max'
+        executed_component_id = 'codex_native'
+        executable = $preparedExecutable
+        environment = [pscustomobject][ordered]@{
+            clear = @('CODEX_MANAGED_BY_NPM', 'CODEX_MANAGED_BY_BUN', 'CODEX_MANAGED_BY_PNPM')
+            set = [pscustomobject][ordered]@{ CODEX_MANAGED_PACKAGE_ROOT = $managedRoot; CODEX_MANAGED_BY_NPM = '1' }
+        }
+    }
+    $seen = [Collections.Generic.List[object]]::new()
+    $nativeInvoker = {
+        param($command)
+        $seen.Add($command)
+        $canonicalJson = [pscustomobject]@{ status = 'success'; answer = 'prepared answer'; error = $null } | ConvertTo-Json -Compress
+        $providerOutput = [pscustomobject]@{
+            type = 'item.completed'
+            item = [pscustomobject]@{ type = 'agent_message'; text = $canonicalJson }
+        } | ConvertTo-Json -Compress
+        [pscustomobject]@{ exit_code = 0; stdout = $providerOutput; stderr = ''; duration_ms = 1 }
+    }
+
+    $execution = Invoke-PilotCandidate -Candidate $candidate -Prompt 'prepared prompt' `
+        -LaunchGuard { param($guardCandidate, $logicalCommand) return $preparedIdentity }.GetNewClosure() `
+        -NativeInvoker $nativeInvoker -RunId 'prepared-launcher-test'
+
+    Assert-Equal $seen.Count 1
+    Assert-Equal $seen[0].prepared $true
+    Assert-Equal $seen[0].executable $preparedExecutable
+    Assert-True ([object]::ReferenceEquals($seen[0].prepared_identity, $preparedIdentity))
+    Assert-SequenceEqual @($seen[0].environment.clear) @('CODEX_MANAGED_BY_NPM', 'CODEX_MANAGED_BY_BUN', 'CODEX_MANAGED_BY_PNPM')
+    Assert-SequenceEqual @($seen[0].environment.set.PSObject.Properties.Name) @('CODEX_MANAGED_PACKAGE_ROOT', 'CODEX_MANAGED_BY_NPM')
+    Assert-Equal $seen[0].environment.set.CODEX_MANAGED_PACKAGE_ROOT $managedRoot
+    Assert-Equal $seen[0].environment.set.CODEX_MANAGED_BY_NPM '1'
+    Assert-Equal $execution.canonical.answer 'prepared answer'
+}
+
+Invoke-Assertion 'Invoke-PilotCandidate rejects a prepared identity for another route before the native seam' {
+    $matrix = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'pilot/model_matrix.json') | ConvertFrom-Json
+    $candidate = @($matrix.candidates | Where-Object { $_.route_id -ceq 'codex__gpt_5_6_sol__max' })[0]
+    $nativeCalls = [pscustomobject]@{ count = 0 }
+    $wrong = [pscustomobject][ordered]@{
+        prepared_launcher_version = 'calibration-prepared-launcher/v1'
+        ordinal = 2; role = 'judge_1'; launcher = 'codex'
+        route_id = 'codex__gpt_5_6_sol__low'; executed_component_id = 'codex_native'
+        executable = [IO.Path]::GetFullPath((Join-Path ([IO.Path]::GetTempPath()) 'locked-codex.exe'))
+        environment = [pscustomobject][ordered]@{
+            clear = @('CODEX_MANAGED_BY_NPM', 'CODEX_MANAGED_BY_BUN', 'CODEX_MANAGED_BY_PNPM')
+            set = [pscustomobject][ordered]@{
+                CODEX_MANAGED_PACKAGE_ROOT = [IO.Path]::GetFullPath((Join-Path ([IO.Path]::GetTempPath()) 'locked-codex-package'))
+                CODEX_MANAGED_BY_NPM = '1'
+            }
+        }
+    }
+    $launchGuard = { param($c, $command) return $wrong }.GetNewClosure()
+    $thrownCode = $null
+    try {
+        Invoke-PilotCandidate -Candidate $candidate -Prompt 'wrong prepared route' `
+            -LaunchGuard $launchGuard `
+            -NativeInvoker { param($command) $nativeCalls.count++; throw 'must not start' }.GetNewClosure() `
+            -RunId 'prepared-route-mismatch' | Out-Null
+    } catch { $thrownCode = $_.Exception.Message }
+    Assert-Equal $thrownCode 'prepared_launcher_identity_invalid'
+    Assert-Equal $nativeCalls.count 0
+}
+
+Invoke-Assertion 'Invoke-NativeCandidate builds exact prepared start info without resolution or a real process start' {
+    $matrix = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'pilot/model_matrix.json') | ConvertFrom-Json
+    $candidate = @($matrix.candidates | Where-Object { $_.route_id -ceq 'codex__gpt_5_6_sol__max' })[0]
+    $logical = New-CandidateCommand -Candidate $candidate -Prompt 'start-info-only'
+    $managedRoot = [IO.Path]::GetFullPath((Join-Path ([IO.Path]::GetTempPath()) 'verified-codex-root'))
+    $executable = [IO.Path]::GetFullPath((Join-Path $managedRoot 'native/codex.exe'))
+    $identity = [pscustomobject][ordered]@{
+        prepared_launcher_version = 'calibration-prepared-launcher/v1'
+        ordinal = 2; role = 'judge_1'; launcher = 'codex'; route_id = 'codex__gpt_5_6_sol__max'
+        executed_component_id = 'codex_native'; executable = $executable
+        environment = [pscustomobject][ordered]@{
+            clear = @('CODEX_MANAGED_BY_NPM', 'CODEX_MANAGED_BY_BUN', 'CODEX_MANAGED_BY_PNPM')
+            set = [pscustomobject][ordered]@{ CODEX_MANAGED_PACKAGE_ROOT = $managedRoot; CODEX_MANAGED_BY_NPM = '1' }
+        }
+    }
+    $prepared = Bind-RunnerPreparedCommand -Command $logical -PreparedIdentity $identity
+    $originalResolver = ${function:Resolve-RunnerNativeCommand}
+    $oldNpm = $env:CODEX_MANAGED_BY_NPM
+    $oldBun = $env:CODEX_MANAGED_BY_BUN
+    $oldPnpm = $env:CODEX_MANAGED_BY_PNPM
+    try {
+        $env:CODEX_MANAGED_BY_NPM = 'inherited-npm'
+        $env:CODEX_MANAGED_BY_BUN = 'inherited-bun'
+        $env:CODEX_MANAGED_BY_PNPM = 'inherited-pnpm'
+        Set-Item -Path Function:Resolve-RunnerNativeCommand -Value { throw 'resolver_must_not_run_for_prepared_command' }
+        $observed = [pscustomobject]@{ count = 0 }
+        $observer = {
+            param($startInfo, $command)
+            $observed.count++
+            Assert-Equal $startInfo.FileName $executable
+            Assert-Equal $command.prepared_identity $identity
+            Assert-Equal $startInfo.Environment.CODEX_MANAGED_PACKAGE_ROOT $managedRoot
+            Assert-Equal $startInfo.Environment.CODEX_MANAGED_BY_NPM '1'
+            Assert-True (-not $startInfo.Environment.ContainsKey('CODEX_MANAGED_BY_BUN'))
+            Assert-True (-not $startInfo.Environment.ContainsKey('CODEX_MANAGED_BY_PNPM'))
+            throw 'start_info_observed_without_start'
+        }.GetNewClosure()
+        $caught = $null
+        try { Invoke-NativeCandidate -Command $prepared -StartInfoObserver $observer | Out-Null }
+        catch { $caught = $_.Exception.Message }
+        Assert-Equal $caught 'start_info_observed_without_start'
+        Assert-Equal $observed.count 1
+    } finally {
+        Set-Item -Path Function:Resolve-RunnerNativeCommand -Value $originalResolver
+        $env:CODEX_MANAGED_BY_NPM = $oldNpm
+        $env:CODEX_MANAGED_BY_BUN = $oldBun
+        $env:CODEX_MANAGED_BY_PNPM = $oldPnpm
+    }
+}
+
+Invoke-Assertion 'Invoke-PilotCandidate preserves positional RunId and TimeoutSeconds binding without a guard' {
+    $matrix = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'pilot/model_matrix.json') | ConvertFrom-Json
+    $candidate = @($matrix.candidates | Where-Object { $_.tool -eq 'codex' } | Select-Object -First 1)[0]
+    $nativeInvoker = {
+        param($command)
+        $canonicalJson = [pscustomobject]@{ status = 'success'; answer = 'positional answer'; error = $null } | ConvertTo-Json -Compress
+        $providerOutput = [pscustomobject]@{
+            type = 'item.completed'
+            item = [pscustomobject]@{ type = 'agent_message'; text = $canonicalJson }
+        } | ConvertTo-Json -Compress
+        [pscustomobject]@{ exit_code = 0; stdout = $providerOutput; stderr = ''; duration_ms = 1 }
+    }
+
+    $execution = Invoke-PilotCandidate $candidate 'positional prompt' $nativeInvoker 'positional-run-id' 17
+
+    Assert-Equal $execution.run_id 'positional-run-id'
+    Assert-Equal $execution.diagnostic_note 'completed'
+    Assert-Equal $execution.canonical.answer 'positional answer'
+}
+
+Invoke-Assertion 'Invoke-PilotCandidate vetoes launch safely without invoking NativeInvoker' {
+    $matrix = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'pilot/model_matrix.json') | ConvertFrom-Json
+    $candidate = @($matrix.candidates | Where-Object { $_.route_id -eq 'agy__gemini_3_7_flash_low__low' } | Select-Object -First 1)[0]
+    $nativeCalls = [Collections.Generic.List[string]]::new()
+    $nativeInvoker = {
+        $nativeCalls.Add('native')
+        throw 'native invoker must not run after launch guard veto'
+    }
+    $launchGuard = {
+        throw 'launch_guard_vetoed'
+    }
+
+    $execution = Invoke-PilotCandidate -Candidate $candidate -Prompt 'veto ordering prompt' `
+        -LaunchGuard $launchGuard -NativeInvoker $nativeInvoker -RunId 'task2-guard-veto'
+
+    Assert-Equal $nativeCalls 0
+    Assert-Equal $execution.diagnostic_note 'execution failure'
+    Assert-Equal $execution.failure 'execution failure'
+    Assert-Equal $execution.canonical $null
+    $serialized = $execution | ConvertTo-Json -Depth 20 -Compress
+    Assert-True (-not $serialized.Contains('launch_guard_vetoed'))
+}
+
+Invoke-Assertion 'Invoke-PilotCandidate never trusts NativeInvoker control-code spoofing' {
+    $matrix = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'pilot/model_matrix.json') | ConvertFrom-Json
+    $candidate = @($matrix.candidates | Where-Object { $_.route_id -eq 'agy__gemini_3_7_flash_low__low' } | Select-Object -First 1)[0]
+    $caseIndex = 0
+    foreach ($spoofedCode in @('source_drift', 'SOURCE_DRIFT', 'pilot_claim_persistence_indeterminate')) {
+        $caseIndex++
+        $execution = Invoke-PilotCandidate -Candidate $candidate -Prompt 'native spoof prompt' `
+            -LaunchGuard { param($guardCandidate, $command) } `
+            -NativeInvoker { param($command) throw $spoofedCode }.GetNewClosure() `
+            -RunId ('native-spoof-case-' + $caseIndex)
+        Assert-Equal $execution.diagnostic_note 'execution failure'
+        Assert-Equal $execution.failure 'execution failure'
+        $serialized = $execution | ConvertTo-Json -Depth 20 -Compress
+        Assert-True (-not $serialized.Contains($spoofedCode, [StringComparison]::OrdinalIgnoreCase))
+    }
+}
+
 Invoke-Assertion 'Invoke-PilotCandidate preserves provider-declared and parse failure diagnostics' {
     $matrix = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'pilot/model_matrix.json') | ConvertFrom-Json
     $candidate = @($matrix.candidates | Where-Object { $_.tool -eq 'codex' } | Select-Object -First 1)[0]
@@ -1622,6 +1949,47 @@ Invoke-Assertion 'Invoke-PilotCandidate preserves provider-declared and parse fa
     $serialized = $parseFailure | ConvertTo-Json -Depth 20 -Compress
     Assert-True (-not $serialized.Contains('not provider JSON'))
     Assert-True (-not $serialized.Contains('sensitive raw stderr'))
+}
+
+Invoke-Assertion 'Invoke-PilotCandidate keeps native Agy provider-declared failure out of the failure channel' {
+    $matrix = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'pilot/model_matrix.json') | ConvertFrom-Json
+    $candidate = @($matrix.candidates | Where-Object { $_.route_id -eq 'agy__gemini_3_7_flash_low__low' } | Select-Object -First 1)[0]
+    $nativeText = [ordered]@{
+        thread_id = 'fixture-thread'
+        session_id = 'fixture-session'
+        status = 'SUCCESS'
+        created_at = '2026-08-25T00:00:00Z'
+        finished_at = '2026-08-25T00:00:01Z'
+        result = ''
+        structured_output = [ordered]@{ answer = ''; error = 'provider declined'; status = 'failure' }
+        usage = [ordered]@{ input_tokens = 160; output_tokens = 57; thinking_tokens = 13; total_tokens = 230 }
+    } | ConvertTo-Json -Compress -Depth 10
+
+    $execution = Invoke-PilotCandidate -Candidate $candidate -Prompt 'native Agy provider failure' -RunId 'agy-provider-failure' -NativeInvoker {
+        [pscustomobject]@{
+            exit_code = 0
+            stdout = $nativeText
+            stderr = ''
+            duration_ms = 17
+            timed_out = $false
+            cleanup_failed = $false
+            cleanup_status = 'not_required'
+            process_exited = $true
+        }
+    }
+
+    Assert-SequenceEqual @($execution.canonical.PSObject.Properties.Name) @('status', 'answer', 'error')
+    Assert-True (Test-CanonicalResponse $execution.canonical).valid
+    Assert-Equal $execution.canonical.status 'failure'
+    Assert-Equal $execution.failure $null
+    Assert-Equal $execution.diagnostic_note 'provider-declared failure'
+    Assert-True $execution.record.contract_compliant
+    Assert-Equal $execution.process.exit_code 0
+    Assert-Equal $execution.process.duration_ms 17
+    Assert-Equal $execution.usage.actual_input_tokens 160
+    Assert-Equal $execution.usage.visible_output_tokens 44
+    Assert-Equal $execution.usage.reasoning_tokens 13
+    Assert-True $execution.usage.complete
 }
 
 Invoke-Assertion 'Invoke-PilotCandidate rejects every unsuccessful transport state before parsing' {

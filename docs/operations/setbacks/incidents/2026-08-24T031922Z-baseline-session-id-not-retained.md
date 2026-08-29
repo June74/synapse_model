@@ -2,10 +2,10 @@
 
 - **Status:** closed
 - **First observed:** 2026-08-24T03:19:22.527505Z
-- **Last observed:** 2026-08-24T04:42:50Z
-- **Phase/task:** Task 7 pre-implementation baseline
+- **Last observed:** 2026-08-26T18:35:43.5125472Z
+- **Phase/task:** Calibration JSON repair final offline verification
 - **Environment:** Windows PowerShell, Codex desktop managed workspace
-- **Version/commit:** `12481f6`
+- **Version/commit:** First observed at `12481f6`; calibration JSON repair recurrence at `f25a793`
 
 ## Symptom
 
@@ -54,6 +54,10 @@ Run the full router PowerShell suite through an execution wrapper with a 30-seco
 - 2026-08-24T03:19:22.527505Z: First observed.
 - 2026-08-24T04:42:50Z: Project-owner-reported Task 7 handoff serialization recurrence; repository status and test state were re-established before work resumed.
 - 2026-08-24T05:14:03Z: Task 8 baseline wrapper again printed partial output without retaining the returned session identifier.
+- 2026-08-25T21:31:26.0453209Z: Task 7 documentation spec review repeated the 30-second wrapper/session-handle loss; a retained-handle rerun completed successfully.
+- 2026-08-26T04:30:39.5990506Z: Option 1 repair baseline repeated the output projection mistake for the functional calibration suite; the orphaned session was allowed to exit without launching a duplicate suite.
+- 2026-08-26T15:22:19.6405081Z: Task 3 review follow-up again projected output and an undefined exit code without retaining the functional suite's continuation identifier. A subsequent `Win32_Process` inventory probe was denied by the managed Windows permissions and produced no process details.
+- 2026-08-26T18:35:43.5125472Z: The calibration JSON repair security gate again discarded a continuation identifier, and a second offline security run was started before completion of the first could be observed. The tracked rerun completed with exit code 0 and 42 passing assertions; the five-suite acceptance sequence remained paused until this recurrence was recorded.
 
 ## Recurrence: Task 7 handoff serialization
 
@@ -72,3 +76,90 @@ Run the full router PowerShell suite through an execution wrapper with a 30-seco
 - **Correction:** Reran the suite in a dedicated call, retained session `73876`, and polled it to exit code 0.
 - **Prevention:** Long-running test commands must run in dedicated calls that print or persist the full result object before any projection.
 - **Verification:** The corrected full router baseline completed with exit code 0.
+
+## Recurrence: Task 4 combined verification wrapper
+
+- **Symptom:** A wrapper running both calibration suites produced no captured output after approximately 30 seconds, so it did not establish either suite's exit status.
+- **Impact:** Final verification and commit were paused. A dedicated direct run then exposed one functional-suite failure; no provider was invoked and no private output was recorded.
+- **Confirmed cause:** The wrapper projected only the nested command's output field and did not preserve the continuation identifier when execution crossed the yield boundary.
+- **Hypotheses:** The first overlapping direct invocation may have observed interference from the still-running discarded session; there is not enough retained evidence to classify that transient assertion as a product defect.
+- **Rejected hypotheses:** The empty wrapper result did not prove the suites were green or hung. The state-machine behavior was not a stable regression: its exact sequence passed in isolation and the full suite passed on a fresh, session-aware rerun.
+- **Known exclusions:** No provider, network, credential, prompt text, or raw private payload was involved.
+- **Correction:** Use dedicated direct suite calls, retain the full execution result, and poll any returned session identifier before accepting the outcome.
+- **Prevention:** Do not combine long suites inside an output-only projection. Verification evidence must include each direct command's explicit exit code and assertion count.
+- **Owner:** Codex.
+- **Next diagnostic step:** None. If the state assertion recurs in a non-overlapping direct run, open a separate incident and capture its exact failing step.
+- **Verification:** A dedicated functional run was polled through its continuation handle to exit 0 with 43 passing assertions. A dedicated security run exited 0 with 19 passing assertions. The exact state-machine sequence also passed in isolation.
+
+## Recurrence: Task 5 TDD RED verification wrapper
+
+- **Symptom:** The first Task 5 functional RED run yielded a partial PASS stream after 30 seconds, and the wrapper projected the output plus an undefined exit code without retaining the continuation identifier.
+- **Impact:** The partial stream was discarded as completion evidence and Task 5 implementation paused. The new assertions had not yet produced their expected RED evidence. No provider, native launcher, network request, or private output was involved.
+- **Confirmed cause:** The wrapper repeated the documented output projection before preserving the full long-running command result.
+- **Hypotheses:** The functional suite was still running when the 30-second yield boundary was reached.
+- **Rejected hypotheses:** The partial PASS stream does not prove either a green suite or a product failure.
+- **Known exclusions:** Only offline test code was changed; no calibration run directory, provider call, credential, or raw provider response was created.
+- **Correction:** Rerun the suite in a dedicated session-aware call, preserve the complete result object, and poll any returned session identifier until an explicit exit code is observed.
+- **Prevention:** Use direct session-aware execution for this functional suite because its normal duration exceeds 30 seconds; never project fields before checking for a continuation identifier.
+- **Owner:** Codex.
+- **Next diagnostic step:** None for the wrapper recurrence; proceed with the observed Task 5 RED cycle.
+- **Verification:** The corrected session-aware run was polled to exit code 1 and reported exactly the intended missing Task 5 orchestration seam plus the superseded bounded-live error expectation.
+
+## Recurrence: Option 1 Task 7 documentation specification review
+
+- **Symptom:** The first functional-suite review command crossed the 30-second yield boundary and its wrapper discarded the returned continuation handle.
+- **Impact:** The partial output was discarded as acceptance evidence. No repository state, provider process, network request, or private data changed.
+- **Confirmed cause:** The review wrapper again projected command output before preserving the full execution result and continuation identifier.
+- **Known exclusions:** No product defect, live calibration path, native launcher, provider call, credential, prompt, or response was involved.
+- **Correction:** Confirmed no matching process remained, then reran with the complete execution result retained and polled the returned session handle to an explicit exit code.
+- **Prevention:** Run long PowerShell suites through direct session-aware calls and retain the full result object before inspecting output.
+- **Verification:** The retained-handle rerun completed with exit code 0 and all 48 functional assertions passed; the offline pilot plan separately returned zero provider calls and wrote no result artifact.
+
+## Recurrence: Option 1 Agy-envelope repair baseline
+
+- **Symptom:** A parallel baseline wrapper retained the full nested command results only inside an expired orchestration scope, then printed projected output without the functional suite's continuation identifier or exit code.
+- **Impact:** The partial functional PASS stream is not accepted as baseline evidence. The already-running suite was allowed to finish, and no duplicate suite was launched while it remained active.
+- **Confirmed cause:** The wrapper again projected fields before exposing or storing the long-running command's continuation identifier outside the orchestration scope.
+- **Known exclusions:** The pilot suite completed independently with exit code 0. No provider, native launcher, network request, credential, prompt, response, or product-code mutation was involved.
+- **Correction:** Waited for the known functional-suite parent process to exit without terminating it; rerun the functional suite in a dedicated session-aware call and retain the full result.
+- **Prevention:** Never launch a potentially long suite inside a fresh isolate unless the complete returned object, including `session_id`, is emitted verbatim or durably stored for the next call.
+- **Verification:** The dedicated functional-suite rerun retained session `53324`, was polled to exit code 0, and reported all calibration tests passed.
+
+## Recurrence: Task 3 launcher-identity specification review follow-up
+
+- **Symptom:** The functional RED run crossed the 30-second yield boundary and the orchestration wrapper emitted partial PASS output plus an undefined exit code without retaining the continuation identifier.
+- **Impact:** The partial run is discarded as RED evidence. No product code, provider process, network request, credential, prompt, or response was affected.
+- **Confirmed cause:** The wrapper repeated output projection before preserving the full execution result and continuation identifier.
+- **Rejected hypothesis:** A follow-up `Get-CimInstance Win32_Process` probe could not establish whether the discarded session remained because the managed environment denied that inventory operation.
+- **Known exclusions:** The pilot RED run had already failed only at the newly tightened prepared-identity assertion. No launcher or provider execution was authorized or performed.
+- **Correction:** Rerun the functional RED suite with the complete execution result emitted, retain any returned session identifier, and poll it to an explicit exit code before implementation.
+- **Prevention:** Long suite calls must emit the complete command-result object; never select only output or exit code before checking `session_id`.
+- **Owner:** Codex.
+- **Next diagnostic step:** Complete the corrected session-aware functional RED run, then close this recurrence with its observed result.
+- **Verification:** The corrected functional RED run retained session `11008`, was polled to exit code 1, and reported the intended prepared-hash and claim-control failures plus two new fixture diagnostics.
+
+## Recurrence: Final Option 1 SQLite verification output projection
+
+- **Symptom:** The first final-gate SQLite wrapper serialized a PowerShell error object into its summary, exceeded the retained output budget, and returned truncated output instead of a readable unittest result.
+- **Impact:** That invocation is discarded as verification evidence. It also created only the ordinary untracked Python bytecode cache under `router/storage/__pycache__/`; no source or calibration result changed.
+- **Confirmed cause:** The wrapper projected a rich PowerShell error object rather than using the direct unittest process output and exit code.
+- **Known exclusions:** No provider, native launcher, network request, credential, prompt, response, or live calibration path was involved.
+- **Correction:** Remove the generated bytecode cache and rerun the SQLite suite directly, retaining its plain output and explicit process exit code.
+- **Prevention:** For the SQLite final gate, invoke the resolved Python executable directly and do not serialize PowerShell error records as JSON.
+- **Owner:** Codex.
+- **Next diagnostic step:** None for the wrapper recurrence; continue the remaining offline final suites.
+- **Verification:** The corrected direct unittest run completed with exit code 0: 53 tests ran and reported `OK`.
+
+## Recurrence: Calibration JSON repair security gate
+
+- **Symptom:** The first focused calibration-security invocation crossed the 30-second yield boundary and its wrapper did not retain the continuation identifier. A second invocation was started with correct session tracking before the first invocation's completion had been observed.
+- **Impact:** The first partial stream is discarded as acceptance evidence, and the required sequential five-suite gate was paused. The overlap was limited to duplicate offline security verification; no source or immutable live result was intentionally changed.
+- **Confirmed cause:** The command wrapper again projected only output, losing the long-running command result's continuation identifier; the rerun began before that uncertainty was contained.
+- **Hypotheses:** The first invocation may still have been completing when the tracked rerun started.
+- **Rejected hypotheses:** The retained rerun did not show a product failure; it completed with exit code 0 and 42 passing assertions.
+- **Known exclusions:** No provider, native launcher, network request, credential, prompt, response, calibration `-Run` operation, or paid/local model execution occurred.
+- **Correction:** Paused before the five-suite sequence, discarded the first partial stream, retained and polled the second invocation to an explicit exit code, and recorded this recurrence before resuming.
+- **Prevention:** Every long-running suite call must emit the complete execution result object and be polled by its returned session identifier. Never start a replacement run while the prior run's completion is unobserved.
+- **Owner:** Codex.
+- **Next diagnostic step:** Run the required five suites as separate, strictly sequential, session-aware commands and accept only explicit exit codes.
+- **Verification:** The tracked focused security rerun exited 0 with 42 passing assertions and `All calibration security tests passed.` Final containment will also be checked by the last sequential security suite in the acceptance gate.

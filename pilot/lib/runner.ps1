@@ -194,16 +194,17 @@ function ConvertTo-AgyCanonicalResponse {
 
     $propertyNames = @($Response.PSObject.Properties.Name)
     if ($propertyNames.Count -eq 3 -and
-        $propertyNames -contains 'status' -and
-        $propertyNames -contains 'answer' -and
-        $propertyNames -contains 'error' -and
-        $Response.status -eq 'success' -and
-        $Response.error -is [string] -and
-        [string]::IsNullOrEmpty($Response.error)) {
-        return [pscustomobject]@{
-            status = [string]$Response.status
-            answer = [string]$Response.answer
-            error = $null
+        $propertyNames -ccontains 'status' -and
+        $propertyNames -ccontains 'answer' -and
+        $propertyNames -ccontains 'error') {
+        $normalizedError = if ($Response.status -is [string] -and
+            $Response.status -ceq 'success' -and
+            $Response.error -is [string] -and
+            [string]::IsNullOrEmpty($Response.error)) { $null } else { $Response.error }
+        return [pscustomobject][ordered]@{
+            status = $Response.status
+            answer = $Response.answer
+            error = $normalizedError
         }
     }
 
@@ -267,30 +268,30 @@ function Test-CanonicalResponse {
     } else {
         $propertyNames = @($Response.PSObject.Properties.Name)
         foreach ($required in @('status', 'answer', 'error')) {
-            if ($required -notin $propertyNames) {
+            if ($required -cnotin $propertyNames) {
                 $reason = "Missing required property '$required'."
                 break
             }
         }
 
         if ($null -eq $reason) {
-            $unexpected = @($propertyNames | Where-Object { $_ -notin @('status', 'answer', 'error') })
+            $unexpected = @($propertyNames | Where-Object { $_ -cnotin @('status', 'answer', 'error') })
             if ($unexpected.Count -gt 0) {
                 $reason = "Unexpected properties: $($unexpected -join ', ')."
             }
         }
 
-        if ($null -eq $reason -and ($Response.status -isnot [string] -or $Response.status -notin @('success', 'failure'))) {
+        if ($null -eq $reason -and ($Response.status -isnot [string] -or $Response.status -cnotin @('success', 'failure'))) {
             $reason = 'status must be exactly success or failure.'
         } elseif ($null -eq $reason -and $Response.answer -isnot [string]) {
             $reason = 'answer must be a string.'
         } elseif ($null -eq $reason -and $null -ne $Response.error -and $Response.error -isnot [string]) {
             $reason = 'error must be null or a string.'
-        } elseif ($null -eq $reason -and $Response.status -eq 'success' -and $null -ne $Response.error) {
+        } elseif ($null -eq $reason -and $Response.status -ceq 'success' -and $null -ne $Response.error) {
             $reason = 'success responses must have null error.'
-        } elseif ($null -eq $reason -and $Response.status -eq 'success' -and $Response.answer -eq '') {
+        } elseif ($null -eq $reason -and $Response.status -ceq 'success' -and $Response.answer -eq '') {
             $reason = 'success responses must have a nonempty answer.'
-        } elseif ($null -eq $reason -and $Response.status -eq 'failure' -and
+        } elseif ($null -eq $reason -and $Response.status -ceq 'failure' -and
             ($Response.answer -ne '' -or $Response.error -isnot [string] -or [string]::IsNullOrWhiteSpace($Response.error))) {
             $reason = 'failure responses must have an empty answer and a nonempty error.'
         }
@@ -687,6 +688,90 @@ function Resolve-RunnerNativeCommand {
     }
 }
 
+function Test-RunnerExactPropertySet {
+    param([AllowNull()][object]$Value, [Parameter(Mandatory)][string[]]$Names)
+    if ($null -eq $Value -or $Value -is [string] -or $Value -is [Collections.IDictionary] -or
+        $Value -is [Collections.IList]) { return $false }
+    $actual = @($Value.PSObject.Properties.Name)
+    if ($actual.Count -ne $Names.Count) { return $false }
+    for ($index = 0; $index -lt $Names.Count; $index++) {
+        if ($actual[$index] -cne $Names[$index]) { return $false }
+    }
+    return $true
+}
+
+function Test-RunnerPreparedLauncherIdentity {
+    param([AllowNull()][object]$Identity, [Parameter(Mandatory)][object]$Command)
+    if (-not (Test-RunnerExactPropertySet -Value $Identity -Names @(
+            'prepared_launcher_version', 'ordinal', 'role', 'launcher', 'route_id', 'executed_component_id',
+            'executable', 'environment'))) { return $false }
+    $expectedBindings = @(
+        @('candidate', 'agy', 'agy__gemini_3_7_flash_low__low', 'agy_native'),
+        @('judge_1', 'codex', 'codex__gpt_5_6_sol__max', 'codex_native'),
+        @('judge_2', 'claude', 'claude__claude_opus_5__max', 'claude_native')
+    )
+    $expected = if ($Identity.ordinal -is [int] -and $Identity.ordinal -ge 1 -and $Identity.ordinal -le 3) {
+        $expectedBindings[$Identity.ordinal - 1]
+    } else { $null }
+    if ($Identity.prepared_launcher_version -isnot [string] -or
+        $Identity.prepared_launcher_version -cne 'calibration-prepared-launcher/v1' -or
+        $Identity.ordinal -isnot [int] -or $Identity.ordinal -lt 1 -or $Identity.ordinal -gt 3 -or
+        $null -eq $expected -or $Identity.role -isnot [string] -or $Identity.role -cne $expected[0] -or
+        $Identity.launcher -isnot [string] -or $Identity.launcher -cne $expected[1] -or
+        $Identity.launcher -cne [string]$Command.tool -or
+        $Identity.route_id -isnot [string] -or $Identity.route_id -cne $expected[2] -or
+        $Identity.route_id -cne [string]$Command.route_id -or
+        $Identity.executed_component_id -isnot [string] -or
+        $Identity.executed_component_id -cne $expected[3] -or
+        $Identity.executable -isnot [string] -or
+        -not [IO.Path]::IsPathFullyQualified([string]$Identity.executable) -or
+        [IO.Path]::GetFullPath([string]$Identity.executable) -cne [string]$Identity.executable) { return $false }
+    if (-not (Test-RunnerExactPropertySet -Value $Identity.environment -Names @('clear', 'set')) -or
+        $Identity.environment.clear -isnot [Collections.IList] -or
+        $Identity.environment.set -isnot [pscustomobject]) { return $false }
+    $expectedClear = if ($Identity.launcher -ceq 'codex') {
+        @('CODEX_MANAGED_BY_NPM', 'CODEX_MANAGED_BY_BUN', 'CODEX_MANAGED_BY_PNPM')
+    } else { @() }
+    if (@($Identity.environment.clear).Count -ne $expectedClear.Count) { return $false }
+    for ($index = 0; $index -lt $expectedClear.Count; $index++) {
+        if ($Identity.environment.clear[$index] -isnot [string] -or
+            $Identity.environment.clear[$index] -cne $expectedClear[$index]) { return $false }
+    }
+    $setNames = @($Identity.environment.set.PSObject.Properties | ForEach-Object { [string]$_.Name })
+    if ($Identity.launcher -ceq 'codex') {
+        if ($setNames.Count -ne 2 -or $setNames[0] -cne 'CODEX_MANAGED_PACKAGE_ROOT' -or
+            $setNames[1] -cne 'CODEX_MANAGED_BY_NPM' -or
+            $Identity.environment.set.CODEX_MANAGED_PACKAGE_ROOT -isnot [string] -or
+            -not [IO.Path]::IsPathFullyQualified([string]$Identity.environment.set.CODEX_MANAGED_PACKAGE_ROOT) -or
+            [IO.Path]::GetFullPath([string]$Identity.environment.set.CODEX_MANAGED_PACKAGE_ROOT) -cne
+                [string]$Identity.environment.set.CODEX_MANAGED_PACKAGE_ROOT -or
+            $Identity.environment.set.CODEX_MANAGED_BY_NPM -isnot [string] -or
+            $Identity.environment.set.CODEX_MANAGED_BY_NPM -cne '1') { return $false }
+    } elseif ($setNames.Count -ne 0) { return $false }
+    return $true
+}
+
+function Bind-RunnerPreparedCommand {
+    param(
+        [Parameter(Mandatory)][object]$Command,
+        [Parameter(Mandatory)][object]$PreparedIdentity
+    )
+    if (-not (Test-RunnerPreparedLauncherIdentity -Identity $PreparedIdentity -Command $Command)) {
+        throw 'prepared_launcher_identity_invalid'
+    }
+    return [pscustomobject][ordered]@{
+        prepared = $true
+        executable = [string]$PreparedIdentity.executable
+        arguments = @($Command.arguments)
+        prompt = [string]$Command.prompt
+        tool = [string]$Command.tool
+        route_id = [string]$Command.route_id
+        working_directory = [string]$Command.working_directory
+        environment = $PreparedIdentity.environment
+        prepared_identity = $PreparedIdentity
+    }
+}
+
 function ConvertTo-RunnerNormalizedLineEndings {
     param([AllowNull()][string]$Text)
 
@@ -938,10 +1023,25 @@ function Invoke-NativeCandidate {
     param(
         [Parameter(Mandatory)][object]$Command,
         [int]$TimeoutSeconds = 0,
-        [switch]$PreserveRawOutput
+        [switch]$PreserveRawOutput,
+        [scriptblock]$StartInfoObserver
     )
 
-    $resolvedCommand = Resolve-RunnerNativeCommand -Command $Command
+    $isPrepared = $Command.PSObject.Properties.Name -ccontains 'prepared' -and
+        $Command.prepared -is [bool] -and [bool]$Command.prepared
+    if ($isPrepared) {
+        if (-not (Test-RunnerExactPropertySet -Value $Command -Names @(
+                'prepared', 'executable', 'arguments', 'prompt', 'tool', 'route_id', 'working_directory',
+                'environment', 'prepared_identity')) -or
+            -not (Test-RunnerPreparedLauncherIdentity -Identity $Command.prepared_identity -Command $Command) -or
+            $Command.executable -isnot [string] -or
+            $Command.executable -cne $Command.prepared_identity.executable) {
+            throw 'prepared_launcher_command_invalid'
+        }
+        $resolvedCommand = $Command
+    } else {
+        $resolvedCommand = Resolve-RunnerNativeCommand -Command $Command
+    }
     $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
     $startInfo.FileName = [string]$resolvedCommand.executable
     $startInfo.WorkingDirectory = [string]$resolvedCommand.working_directory
@@ -952,8 +1052,19 @@ function Invoke-NativeCandidate {
     $utf8Encoding = [System.Text.UTF8Encoding]::new($false)
     $startInfo.StandardOutputEncoding = $utf8Encoding
     $startInfo.StandardErrorEncoding = $utf8Encoding
+    if ($isPrepared) {
+        foreach ($name in @($resolvedCommand.environment.clear)) {
+            [void]$startInfo.Environment.Remove([string]$name)
+        }
+        foreach ($property in $resolvedCommand.environment.set.PSObject.Properties) {
+            $startInfo.Environment[[string]$property.Name] = [string]$property.Value
+        }
+    }
     foreach ($argument in @($resolvedCommand.arguments)) {
         [void]$startInfo.ArgumentList.Add([string]$argument)
+    }
+    if ($null -ne $StartInfoObserver) {
+        $null = & $StartInfoObserver $startInfo $resolvedCommand
     }
 
     $promptProperty = $Command.PSObject.Properties['prompt']
@@ -1241,7 +1352,7 @@ function Protect-PilotRecordStrings {
     $structuralProperties = @('run_id', 'route_id', 'tool', 'provider', 'model', 'effort', 'status', 'exit_code', 'duration_ms')
     $safeDiagnosticCodes = @('completed', 'provider-declared failure', 'transport failure', 'parse failure', 'contract failure', 'execution failure')
     $status = if ($Record.PSObject.Properties.Name -contains 'status') { [string]$Record.status } else { 'failure' }
-    $isFailure = $status -eq 'failure'
+    $isFailure = $status -ceq 'failure'
     $isContractCompliant = ($Record.PSObject.Properties.Name -contains 'contract_compliant') -and [bool]$Record.contract_compliant
     foreach ($property in $Record.PSObject.Properties) {
         if ($structuralProperties -contains $property.Name) { continue }
@@ -1324,11 +1435,11 @@ function New-ResultRecord {
     $contractCompliant = $transportSuccess -and $null -ne $Canonical -and (Test-CanonicalResponse $Canonical).valid
     $safeDiagnosticCodes = @('completed', 'provider-declared failure', 'transport failure', 'parse failure', 'contract failure', 'execution failure')
     $safeNote = if ($safeDiagnosticCodes -contains $DiagnosticNote) { $DiagnosticNote } else { 'execution failure' }
-    if ($contractCompliant -and $Canonical.status -eq 'failure') {
+    if ($contractCompliant -and $Canonical.status -ceq 'failure') {
         $safeNote = 'provider-declared failure'
     }
-    $answer = if ($contractCompliant -and $Canonical.status -eq 'success') { '[provider answer omitted from JSONL for privacy]' } else { '' }
-    $error = if ($contractCompliant -and $Canonical.status -eq 'failure') { 'provider-declared failure' } elseif ($contractCompliant) { $null } else { $safeNote }
+    $answer = if ($contractCompliant -and $Canonical.status -ceq 'success') { '[provider answer omitted from JSONL for privacy]' } else { '' }
+    $error = if ($contractCompliant -and $Canonical.status -ceq 'failure') { 'provider-declared failure' } elseif ($contractCompliant) { $null } else { $safeNote }
 
     $record = [ordered]@{
         run_id = $RunId
@@ -1515,7 +1626,8 @@ function Invoke-PilotCandidate {
         [Parameter(Mandatory)][ValidateNotNullOrEmpty()][string]$Prompt,
         [scriptblock]$NativeInvoker,
         [AllowNull()][string]$RunId,
-        [ValidateRange(-1, [int]::MaxValue)][int]$TimeoutSeconds = -1
+        [ValidateRange(-1, [int]::MaxValue)][int]$TimeoutSeconds = -1,
+        [scriptblock]$LaunchGuard
     )
 
     $candidateValidation = Test-CandidateDefinition -Candidate $Candidate
@@ -1529,49 +1641,82 @@ function Invoke-PilotCandidate {
     $failure = $null
     $reportedCost = $null
     $note = 'completed'
-    try {
-        $command = New-CandidateCommand -Candidate $Candidate -Prompt $Prompt
-        $processResult = if ($null -ne $NativeInvoker) {
-            & $NativeInvoker $command
-        } else {
-            $nativeTimeoutSeconds = if ($TimeoutSeconds -ge 0) {
-                $TimeoutSeconds
-            } elseif ($Candidate.tool -in @('agy', 'claude')) {
-                120
-            } else {
-                0
+    $command = New-CandidateCommand -Candidate $Candidate -Prompt $Prompt
+    $launchReady = $true
+    if ($null -ne $LaunchGuard) {
+        try {
+            $guardResult = & $LaunchGuard $Candidate $command
+            if ($guardResult -is [pscustomobject] -and
+                $guardResult.PSObject.Properties.Name -ccontains 'prepared_launcher_version') {
+                $command = Bind-RunnerPreparedCommand -Command $command -PreparedIdentity $guardResult
             }
-            Invoke-NativeCandidate -Command $command -TimeoutSeconds $nativeTimeoutSeconds -PreserveRawOutput
-        }
-        $reportedCost = Get-PilotReportedCost -ProcessResult $processResult
-        if (-not (Test-PilotTransportSuccess -ProcessResult $processResult)) {
-            $note = 'transport failure'
+        } catch {
+            $launchControlFailure = [string]$_.Exception.Message
+            if (@(
+                    'source_drift',
+                    'pilot_claim_persistence_indeterminate',
+                    'pilot_runtime_role_mismatch',
+                    'pilot_slot_reservation_not_persisted',
+                    'pilot_slot_ordinal_invalid',
+                    'pilot_slot_run_not_running',
+                    'pilot_slot_identity_invalid',
+                    'pilot_slot_not_next',
+                    'pilot_slot_limit_reached',
+                    'pilot_slot_prior_attempt_failed',
+                    'pilot_slot_previous_incomplete',
+                    'prepared_launcher_identity_invalid',
+                    'prepared_launcher_command_invalid') -ccontains $launchControlFailure) {
+                throw $launchControlFailure
+            }
+            $note = 'execution failure'
             $failure = $note
-        } else {
-            try {
-                $providerOutput = if ($processResult.PSObject.Properties.Name -contains 'raw_stdout') {
-                    $processResult.raw_stdout
+            $launchReady = $false
+        }
+    }
+    if ($launchReady) {
+        try {
+            $processResult = if ($null -ne $NativeInvoker) {
+                & $NativeInvoker $command
+            } else {
+                $nativeTimeoutSeconds = if ($TimeoutSeconds -ge 0) {
+                    $TimeoutSeconds
+                } elseif ($Candidate.tool -in @('agy', 'claude')) {
+                    120
                 } else {
-                    $processResult.stdout
+                    0
                 }
-                $canonical = switch ($Candidate.tool) {
-                    'codex' { ConvertFrom-CodexOutput $providerOutput }
-                    'claude' { ConvertFrom-ClaudeOutput $providerOutput }
-                    'agy' { ConvertFrom-AgyOutput $providerOutput }
-                }
-                $canonicalCheck = Test-CanonicalResponse $canonical
-                if (-not $canonicalCheck.valid) {
-                    $note = 'contract failure'
+                Invoke-NativeCandidate -Command $command -TimeoutSeconds $nativeTimeoutSeconds -PreserveRawOutput
+            }
+            $reportedCost = Get-PilotReportedCost -ProcessResult $processResult
+            if (-not (Test-PilotTransportSuccess -ProcessResult $processResult)) {
+                $note = 'transport failure'
+                $failure = $note
+            } else {
+                try {
+                    $providerOutput = if ($processResult.PSObject.Properties.Name -contains 'raw_stdout') {
+                        $processResult.raw_stdout
+                    } else {
+                        $processResult.stdout
+                    }
+                    $canonical = switch ($Candidate.tool) {
+                        'codex' { ConvertFrom-CodexOutput $providerOutput }
+                        'claude' { ConvertFrom-ClaudeOutput $providerOutput }
+                        'agy' { ConvertFrom-AgyOutput $providerOutput }
+                    }
+                    $canonicalCheck = Test-CanonicalResponse $canonical
+                    if (-not $canonicalCheck.valid) {
+                        $note = 'contract failure'
+                        $failure = $note
+                    }
+                } catch {
+                    $note = 'parse failure'
                     $failure = $note
                 }
-            } catch {
-                $note = 'parse failure'
-                $failure = $note
             }
+        } catch {
+            $note = 'execution failure'
+            $failure = $note
         }
-    } catch {
-        $note = 'execution failure'
-        $failure = $note
     }
 
     $safeProcess = if ($null -eq $processResult) {
@@ -1589,7 +1734,9 @@ function Invoke-PilotCandidate {
     $record = New-ResultRecord -Candidate $Candidate -ProcessResult $safeProcess -Canonical $canonical `
         -RunId $RunId -DiagnosticNote $note -FailureError $failure -Prompt $Prompt `
         -CliReportedCostUsd $reportedCost
-    if ($record.diagnostic_note -cne 'completed') { $failure = [string]$record.diagnostic_note }
+    if (-not [bool]$record.contract_compliant -and $record.diagnostic_note -cne 'completed') {
+        $failure = [string]$record.diagnostic_note
+    }
 
     $usage = ConvertTo-PilotUsageMetadata -ProcessResult $processResult
     if ($null -eq $usage -and $null -ne $processResult -and

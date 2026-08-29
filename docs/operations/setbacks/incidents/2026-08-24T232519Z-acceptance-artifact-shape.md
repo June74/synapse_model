@@ -2,7 +2,7 @@
 
 - **Status:** closed
 - **First observed:** 2026-08-24T23:25:19.859408Z
-- **Last observed:** 2026-08-24T23:25:19.859408Z
+- **Last observed:** 2026-08-25T23:19:52.9615185Z
 - **Phase/task:** Task 9 final integrated verification
 - **Environment:** Windows PowerShell 7, local deterministic-router-v1 worktree
 - **Version/commit:** 3778210
@@ -47,7 +47,10 @@ The command response reported route mode, 24 route entries, and zero provider ca
 
 Corrected acceptance run exited 0 with 24 route entries and zero provider calls in both the command response and stored artifact. Temporary acceptance artifacts were removed.
 
+On recurrence, direct inspection of the public offline pilot plan confirmed `mode` is `pilot-plan`, `selection_mode` is `calibration_only_exact_pin`, all three roles are present, and `provider_calls` is zero. The results-tree snapshot comparison had already remained unchanged; only the verification command's guessed selection-mode value was wrong.
+
 ## Recurrence history
 
 - 2026-08-24T23:25:19.859408Z: First observed.
 - 2026-08-24T23:30:00Z: Root cause confirmed and corrected acceptance boundary passed; incident closed.
+- 2026-08-25T23:19:52.9615185Z: Recurred when the final offline-pilot check guessed `option1_fixed_three_launch` instead of reading the public plan's frozen `calibration_only_exact_pin` value. No result write or product failure occurred.

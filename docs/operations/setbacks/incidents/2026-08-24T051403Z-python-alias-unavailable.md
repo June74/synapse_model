@@ -2,8 +2,8 @@
 
 - **Status:** closed
 - **First observed:** 2026-08-24T05:14:03Z
-- **Last observed:** 2026-08-24T18:44:54Z
-- **Phase/task:** Task 8 pre-implementation baseline
+- **Last observed:** 2026-08-27T03:44:11.5952989Z
+- **Phase/task:** Calibration JSON repair controller final verification
 - **Environment:** Windows PowerShell, Codex desktop managed workspace
 - **Version/commit:** `50ca437`
 
@@ -47,9 +47,19 @@ Invoke `python` from the Task 8 managed PowerShell environment without resolving
 
 ## Verification and related work
 
-The bundled interpreter completed all 52 storage tests with exit code 0 in 15.598 seconds. On recurrence during Task 8 quality verification, it completed all 53 current storage tests with exit code 0 in 15.222 seconds.
+The bundled interpreter completed all 52 storage tests with exit code 0 in 15.598 seconds. On recurrence during Task 8 quality verification, it completed all 53 current storage tests with exit code 0 in 15.222 seconds. The 2026-08-25T22:30:48Z recurrence was closed by rerunning all 53 storage tests through the resolved bundled interpreter; they passed in 14.618 seconds with exit code 0.
 
 ## Recurrence history
+
+- 2026-08-27T03:44:11.5952989Z: The direct `python -m unittest router.storage.test_sqlite_store` acceptance command failed before discovery because the managed shell still exposes no `python` alias. No repository, provider, launcher, network, live-calibration, or result state changed. The repository-approved resolver then ran all 53 tests successfully in 15.097 seconds with exit code 0.
+- 2026-08-26T15:32:58.107276Z: The unavailable `py` alias recurred while invoking the correctly resolved setback helper. The bundled Python path from the workspace dependency inventory then ran the helper successfully; no provider, launcher, network, or live calibration path ran.
+- 2026-08-26T14:53:12Z: The unavailable `python` alias recurred while attempting to invoke the setback helper during Task 3. The helper was not present at the expected repository path, so the new incident was recorded directly with the repository template contract. Work remained offline; no provider, launcher, network, or live calibration path ran.
+- 2026-08-26T05:24:28.365954Z: The unavailable `python` alias recurred while locating the setback helper during Task 2. Work remained offline and contained. The bundled Python runtime was resolved through the workspace dependency inventory and successfully ran the helper; no provider, launcher, network, or live calibration path ran.
+- 2026-08-25T22:30:48.1539712Z: The unavailable `python` alias recurred in the Task 8 final five-suite wrapper after the pilot and router suites passed. The wrapper continued to the calibration suites because command-not-found did not supply a failing native exit code; no provider, network, or live path ran. The storage suite remains unverified in that wrapper and must be rerun with the resolved repository-approved runtime.
+- 2026-08-25T20:23:24.5926183Z: The unavailable `python` and `py` aliases recurred while starting the Task 6 parallel-suite setback helper. Work remained contained; the bundled runtime was resolved before continuing, and no product or live path ran.
+- 2026-08-25T19:55:35.3677309Z: The unavailable `python` and `py` aliases recurred during Task 6 setback-helper discovery. Work remained contained, no product path or provider launcher ran, and the bundled Python 3.12 executable was resolved through the workspace dependency inventory before continuing.
+- 2026-08-25 Task 5: The unavailable `python` alias recurred while requesting setback-helper usage for the first GREEN failure. Work remained contained, no provider or native launcher ran, and the bundled runtime was resolved before retrying the helper.
+- 2026-08-25T18:44:00Z: The unavailable `python` and `py` aliases recurred while invoking the setback helper. The installed Python 3.12 executable was resolved explicitly and the helper completed after the required scoped execution approval.
 
 - 2026-08-24T05:14:03Z: First observed and closed.
 - 2026-08-24T18:44:54Z: The unavailable alias recurred once; the documented bundled-interpreter path completed all 53 current tests.

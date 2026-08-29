@@ -250,6 +250,52 @@ On 2026-08-25, Task 10 performed an explicitly authorized subscription-backed sm
 
 All three runs stored one selected candidate evaluation, a completed status, version fields, and 64-character prompt and response hashes with no storage error. Inspection found three decisions and three candidate evaluations, null prompt/response content, and no raw prompt, credential, authorization-header, or environment-dump markers. Agy and Codex supplied complete trustworthy usage and produced `price_final: true`; Claude did not supply a complete reasoning split, so its estimate correctly remained `price_final: false`. No fallback, calibration `-Run`, paid API, local model, push, PR, or merge occurred. The temporary harness and database were removed after inspection.
 
+## Option 1 three-launch calibration pilot
+
+Option 1 is a small, fixed calibration pilot. Its purpose is to collect bounded technical and quality evidence without changing production routing. Start with the offline command:
+
+```powershell
+# Offline validation and deterministic plan: zero provider launches and zero result writes
+pwsh -NoProfile -File .\calibration\run_calibration.ps1 -Pilot
+```
+
+The offline plan validates the frozen sources, hashes them, and prints the exact ordered roles. It starts no provider process, consumes no launcher slot, and writes no result directory.
+
+The live command is frozen as follows, but it must not be run merely because it is documented:
+
+```powershell
+# Live only after explicit approval of the exact commit and exact ordered identities
+pwsh -NoProfile -File .\calibration\run_calibration.ps1 -Pilot -Run -RunId option1-live-20260826-002
+```
+
+Running that exact command requires separate explicit approval of the exact commit and exact ordered identities in the final acceptance packet. Approval of development or offline tests is not approval to execute the live command.
+
+The fixed pipeline performs candidate execution, a local deterministic grader, and two independent cross-family judges in this order:
+
+1. Google candidate: `agy__gemini_3_7_flash_low__low`.
+2. Local exact-fields grading. This local deterministic grader does not consume a launcher slot.
+3. OpenAI Judge 1: `codex__gpt_5_6_sol__max`.
+4. Anthropic Judge 2: `claude__claude_opus_5__max`.
+
+The local grade runs between the candidate and the judges but is not a provider launch. Therefore, a technically successful run consumes a maximum of three non-refundable application launch slots: one candidate slot and one slot for each judge. A slot is durably claimed before its application process starts. If launch or execution later fails, the claim remains consumed; it is never refunded or reused.
+
+Application launch slots are a local safety ceiling, not a claim about provider-internal behavior. The pilot records `provider_side_requests.observable: false` and `provider_side_requests.count: null` because a launcher does not reveal how many provider-side requests or internal retries it may make.
+
+No retry, fallback, or resume is allowed. The pilot never substitutes another model, repeats a role, adds a fourth launch, or continues after a technical stop. A stopped or indeterminate run requires a new RunId and new explicit approval; the same run ID cannot be resumed. The current build accepts only `option1-live-20260826-002`. Do not edit the command to invent a replacement RunId. A replacement RunId requires a new reviewed build that accepts it and a revised acceptance packet that freezes and authorizes the exact replacement command, followed by new explicit approval.
+
+On a technically completed run, the complete persistent shape of the bounded safe artifacts is:
+
+- `.run.claim`: the exclusive run claim;
+- `plan.json`: the immutable source, budget, identity, and commit plan;
+- `result.json`: the durable technical-state and separate quality ledger;
+- `claims/01-google-candidate.claim`, `claims/02-openai-judge.claim`, and `claims/03-anthropic-judge.claim`: the three ordered, non-refundable slot claims;
+- `raw/candidate-response.json`: only `item_id`, `status`, credential-sanitized `output`, and bounded `error_code`; and
+- `raw/judge-responses.json`: only `item_id`, the anonymized judge payload, and accumulated normalized decisions.
+
+A stopped or indeterminate run may contain only the prefix of that shape that was durably written before the stop; missing later claims or raw files do not refund a consumed slot. The safe artifacts omit credentials, command arguments, environment dumps, raw provider event streams, arbitrary standard output or error text, exception text, and prompt-echo diagnostics. Cleanup-indeterminate exceptional residue may include an owned `.result-*.tmp` or `.raw-*.tmp` file. The operator must not delete that residue, resume or retry the run, or reuse its RunId automatically. Preserve the complete run directory for review; a later replacement still requires the new reviewed build, revised acceptance packet, and new explicit approval described above.
+
+Pilot evidence is observational only. Results never promote production quality, never mutate model profiles, and never change production eligibility. External quality remains `unknown` unless a later, separately designed evidence-promotion process is approved and implemented.
+
 ## Decision trace lookup
 
 A live route returns `decision_trace_id` only when trace storage succeeds. Normal traces are stored in `data/router.sqlite`; they retain structured metadata and content hashes, not request or response text. Policy dry runs do not create SQLite traces, and calibration route-only mode writes its separate JSON route-plan artifact.
